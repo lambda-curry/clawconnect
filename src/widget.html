@@ -88,17 +88,19 @@
   <div class="result" id="result" style="display:none"></div>
 
   <script>
-    const badgeEl = document.getElementById('badge');
-    const spinnerEl = document.getElementById('spinnerWrap');
-    const elapsedEl = document.getElementById('elapsed');
-    const logsEl = document.getElementById('logs');
-    const resultEl = document.getElementById('result');
+    var badgeEl = document.getElementById('badge');
+    var spinnerEl = document.getElementById('spinnerWrap');
+    var elapsedEl = document.getElementById('elapsed');
+    var logsEl = document.getElementById('logs');
+    var resultEl = document.getElementById('result');
 
-    let startTime = Date.now();
-    let done = false;
+    var jobId = null;
+    var sessionKey = null;
+    var startTime = Date.now();
+    var done = false;
 
     function addLog(text, cls) {
-      const el = document.createElement('div');
+      var el = document.createElement('div');
       el.className = 'entry ' + (cls || 'info');
       el.textContent = text;
       logsEl.appendChild(el);
@@ -122,8 +124,22 @@
         resultEl.textContent = summary;
       }
       addLog(status === 'error' ? 'Task failed.' : 'Task completed.', status === 'error' ? 'err' : 'done');
+
+      // Persist widget state
       if (window.openai && window.openai.setWidgetState) {
         window.openai.setWidgetState({ done: true, summary: summary, status: status });
+      }
+
+      // Re-awaken ChatGPT with the result
+      if (status !== 'error' && summary) {
+        window.parent.postMessage({
+          jsonrpc: '2.0',
+          method: 'ui/message',
+          params: {
+            role: 'user',
+            content: [{ type: 'text', text: 'Clawdy finished the task. Here is the result:\n\n' + summary }]
+          }
+        }, '*');
       }
     }
 
@@ -136,97 +152,63 @@
       elapsedEl.textContent = m > 0 ? m + 'm ' + sec + 's' : sec + 's';
     }, 1000);
 
-    // Poll for job result
-    async function poll(jobId) {
-      if (done) return;
-      try {
-        var result;
-        if (window.openai && window.openai.callTool) {
-          result = await window.openai.callTool('check_openclaw_task', { jobId: jobId });
-        } else {
-          // Fallback: postMessage bridge
-          window.parent.postMessage({
-            jsonrpc: '2.0',
-            method: 'tools/call',
-            params: { toolName: 'check_openclaw_task', input: { jobId: jobId } }
-          }, '*');
-          return; // Result comes back via message event
-        }
-
-        var data = result && result.structuredContent;
-        if (!data) { setTimeout(function() { poll(jobId); }, 5000); return; }
-
-        if (data.status === 'running') {
-          addLog('Still running... (' + (data.elapsedSeconds || 0) + 's)');
-          poll(jobId);
-        } else if (data.status === 'completed') {
-          showResult(data.summary, 'completed');
-        } else if (data.status === 'error') {
-          showResult(data.error, 'error');
-        }
-      } catch (err) {
-        addLog('Poll error: ' + (err.message || err), 'err');
-        setTimeout(function() { poll(jobId); }, 5000);
-      }
+    // Poll for job result via tools/call
+    function poll() {
+      if (done || !jobId) return;
+      window.parent.postMessage({
+        jsonrpc: '2.0',
+        method: 'tools/call',
+        params: { toolName: 'check_openclaw_task', input: { jobId: jobId } }
+      }, '*');
     }
 
-    // Initialize
-    function init() {
-      // Check for saved state
-      var saved = window.openai && window.openai.widgetState;
-      if (saved && saved.done) {
-        showResult(saved.summary, saved.status);
-        return;
-      }
+    function handleData(data) {
+      if (!data) return;
 
-      // Get initial tool output
-      var output = window.openai && window.openai.toolOutput;
-      var data = output && output.structuredContent;
-      if (data && data.jobId) {
+      // Initial submit — extract jobId
+      if (data.jobId && !jobId) {
+        jobId = data.jobId;
+        sessionKey = data.sessionKey;
         startTime = Date.now();
-        addLog('Task submitted: ' + data.jobId.slice(0, 8) + '...');
+        addLog('Task submitted: ' + jobId.slice(0, 8) + '...');
         setStatus('running');
-        poll(data.jobId);
+        // Start polling
+        poll();
         return;
       }
 
-      addLog('Waiting for task submission...');
+      // Poll results
+      if (data.status === 'running') {
+        var elapsed = data.elapsedSeconds || 0;
+        addLog('Still running... (' + elapsed + 's)');
+        // Poll again after server-side long poll returns
+        poll();
+      } else if (data.status === 'completed') {
+        showResult(data.summary, 'completed');
+      } else if (data.status === 'error') {
+        showResult(data.error, 'error');
+      }
     }
 
-    // Also listen for postMessage notifications as fallback
+    // Listen for ALL messages from ChatGPT host
     window.addEventListener('message', function(event) {
       if (event.source !== window.parent) return;
       var msg = event.data;
       if (!msg || msg.jsonrpc !== '2.0') return;
-      if (msg.method !== 'ui/notifications/tool-result') return;
 
-      var data = msg.params && msg.params.structuredContent;
-      if (!data) return;
-
-      if (data.jobId && !done) {
-        if (data.status === 'running' && data.elapsedSeconds) {
-          addLog('Still running... (' + data.elapsedSeconds + 's)');
-        } else if (data.status === 'completed') {
-          showResult(data.summary, 'completed');
-        } else if (data.status === 'error') {
-          showResult(data.error, 'error');
-        }
+      // Tool result notification (initial + poll results)
+      if (msg.method === 'ui/notifications/tool-result') {
+        var data = msg.params && msg.params.structuredContent;
+        handleData(data);
+        return;
       }
     }, { passive: true });
 
-    // Start
-    if (window.openai) {
-      init();
+    // Check for restored state
+    if (window.openai && window.openai.widgetState && window.openai.widgetState.done) {
+      showResult(window.openai.widgetState.summary, window.openai.widgetState.status);
     } else {
-      // Wait for openai to be available
-      var attempts = 0;
-      var check = setInterval(function() {
-        attempts++;
-        if (window.openai || attempts > 50) {
-          clearInterval(check);
-          init();
-        }
-      }, 100);
+      addLog('Waiting for Clawdy...');
     }
   </script>
 </body>
