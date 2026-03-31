@@ -198,8 +198,16 @@
 
       // Listen for the event when ChatGPT delivers the tool result
       window.addEventListener('openai:set_globals', function() {
-        addLog('Received tool output');
-        startFromOutput(window.openai.toolOutput);
+        try {
+          var to = window.openai.toolOutput;
+          addLog('set_globals: toolOutput type=' + typeof to + ' null=' + (to === null));
+          if (to) {
+            addLog('keys: ' + Object.keys(to).join(', '));
+          }
+          startFromOutput(to);
+        } catch(e) {
+          addLog('ERR: ' + e.message, 'err');
+        }
       });
     }
   </script>
