@@ -13,20 +13,33 @@ const CORS_HEADERS = {
   'Access-Control-Expose-Headers': 'Mcp-Session-Id',
 }
 
-const TOOL_DEFINITION = {
-  name: 'run_openclaw_task',
-  description: 'Send a task to OpenClaw and return a structured result. The response includes a sessionKey — pass it back in follow-up calls to continue the same session.',
-  inputSchema: {
-    type: 'object',
-    properties: {
-      task: { type: 'string' },
-      context: { type: 'string' },
-      workspace: { type: 'string' },
-      sessionKey: { type: 'string', description: 'Session key returned from a previous call. Omit to start a new session.' },
+const TOOLS = [
+  {
+    name: 'run_openclaw_task',
+    description: 'Submit a task to OpenClaw. Returns a jobId immediately. Use check_openclaw_task to poll for the result. The response also includes a sessionKey — pass it back in follow-up calls to continue the same conversation.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        task: { type: 'string', description: 'The task to perform' },
+        context: { type: 'string', description: 'Optional context for the task' },
+        workspace: { type: 'string' },
+        sessionKey: { type: 'string', description: 'Session key from a previous call to continue the conversation. Omit to start fresh.' },
+      },
+      required: ['task'],
     },
-    required: ['task'],
   },
-}
+  {
+    name: 'check_openclaw_task',
+    description: 'Check the status of a previously submitted task. Returns the result if complete, or current status if still running. You MUST poll this after calling run_openclaw_task until status is "completed" or "error".',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        jobId: { type: 'string', description: 'The jobId returned by run_openclaw_task' },
+      },
+      required: ['jobId'],
+    },
+  },
+]
 
 hono.get('/', (c) => c.text('OK'))
 hono.get('/health', (c) => c.json({ ok: true }))
@@ -41,13 +54,6 @@ const server = createServer(async (req, res) => {
     }
 
     Object.entries(CORS_HEADERS).forEach(([k, v]) => res.setHeader(k, v))
-
-    // Disable socket timeout for long-running tasks
-    req.socket.setTimeout(0)
-    req.socket.setKeepAlive(true)
-    res.once('close', () => {
-      if (!res.writableEnded) console.log('[mcp] connection closed by client before response was sent')
-    })
 
     // Parse body
     const chunks: Buffer[] = []
@@ -84,59 +90,52 @@ const server = createServer(async (req, res) => {
         serverInfo: { name: 'openclaw-app', version: '0.0.1' },
       })
     } else if (isNotification) {
-      // notifications/initialized and other notifications — just acknowledge
       res.writeHead(202)
       res.end()
     } else if (msg.method === 'tools/list') {
-      respond({ tools: [TOOL_DEFINITION] })
+      respond({ tools: TOOLS })
     } else if (msg.method === 'tools/call') {
       const { name, arguments: args } = msg.params as { name: string; arguments: Record<string, string> }
-      if (name !== 'run_openclaw_task') {
-        respondError(-32601, `Unknown tool: ${name}`)
-        return
-      }
 
-      // Stream SSE to keep the connection alive while Clawdy works
-      res.writeHead(200, {
-        ...CORS_HEADERS,
-        'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache',
-        'Connection': 'keep-alive',
-      })
-
-      const keepAlive = setInterval(() => {
-        if (!res.writableEnded) res.write(': keepalive\n\n')
-      }, 10_000)
-
-      const sendSseResult = (payload: unknown) => {
-        clearInterval(keepAlive)
-        if (!res.writableEnded) {
-          res.write(`event: message\ndata: ${JSON.stringify({ jsonrpc: '2.0', id: msg.id ?? null, result: payload })}\n\n`)
-          res.end()
-        }
-      }
-
-      const sendSseError = (code: number, message: string) => {
-        clearInterval(keepAlive)
-        if (!res.writableEnded) {
-          res.write(`event: message\ndata: ${JSON.stringify({ jsonrpc: '2.0', id: msg.id ?? null, error: { code, message } })}\n\n`)
-          res.end()
-        }
-      }
-
-      try {
-        const result = await openclaw.runTask({
+      if (name === 'run_openclaw_task') {
+        const job = openclaw.submitTask({
           task: args.task,
           context: args.context,
           workspace: args.workspace,
           sessionKey: args.sessionKey,
         })
-        sendSseResult({
-          content: [{ type: 'text', text: result.summary }],
-          structuredContent: result,
+        console.log(`[mcp] submitted job ${job.jobId} on session ${job.sessionKey}`)
+        respond({
+          content: [{ type: 'text', text: `Task submitted. Poll with check_openclaw_task using jobId: ${job.jobId}` }],
+          structuredContent: { jobId: job.jobId, sessionKey: job.sessionKey, status: 'running' },
         })
-      } catch (err) {
-        sendSseError(-32000, err instanceof Error ? err.message : String(err))
+      } else if (name === 'check_openclaw_task') {
+        const job = openclaw.getJob(args.jobId)
+        if (!job) {
+          respond({
+            content: [{ type: 'text', text: `Unknown jobId: ${args.jobId}` }],
+            isError: true,
+          })
+        } else if (job.status === 'running') {
+          const elapsed = Math.round((Date.now() - job.startedAt) / 1000)
+          respond({
+            content: [{ type: 'text', text: `Still running (${elapsed}s elapsed). Poll again shortly.` }],
+            structuredContent: { jobId: job.jobId, sessionKey: job.sessionKey, status: 'running', elapsedSeconds: elapsed },
+          })
+        } else if (job.status === 'completed') {
+          respond({
+            content: [{ type: 'text', text: job.summary ?? '' }],
+            structuredContent: { jobId: job.jobId, sessionKey: job.sessionKey, status: 'completed', summary: job.summary },
+          })
+        } else {
+          respond({
+            content: [{ type: 'text', text: `Task failed: ${job.error}` }],
+            structuredContent: { jobId: job.jobId, sessionKey: job.sessionKey, status: 'error', error: job.error },
+            isError: true,
+          })
+        }
+      } else {
+        respondError(-32601, `Unknown tool: ${name}`)
       }
     } else {
       respondError(-32601, `Method not found: ${msg.method}`)
