@@ -194,21 +194,43 @@
     window.addEventListener('message', function(event) {
       if (event.source !== window.parent) return;
       var msg = event.data;
-      if (!msg || msg.jsonrpc !== '2.0') return;
+      if (!msg) return;
+
+      // Debug: log every message method we receive
+      if (msg.jsonrpc === '2.0' && msg.method) {
+        addLog('[msg] ' + msg.method);
+      }
+
+      if (!msg.jsonrpc || msg.jsonrpc !== '2.0') return;
 
       // Tool result notification (initial + poll results)
       if (msg.method === 'ui/notifications/tool-result') {
         var data = msg.params && msg.params.structuredContent;
+        addLog('[tool-result] structuredContent: ' + JSON.stringify(data).slice(0, 120));
         handleData(data);
+        return;
+      }
+
+      // Also try tool-input — maybe the data comes as input
+      if (msg.method === 'ui/notifications/tool-input') {
+        addLog('[tool-input] ' + JSON.stringify(msg.params).slice(0, 120));
+        var inputData = msg.params && msg.params.arguments;
+        if (inputData) handleData(inputData);
         return;
       }
     }, { passive: true });
 
+    // Debug: log available openai properties
+    var oai = window.openai || {};
+    addLog('[init] openai keys: ' + Object.keys(oai).join(', '));
+    if (oai.widgetState) addLog('[init] widgetState: ' + JSON.stringify(oai.widgetState).slice(0, 100));
+    if (oai.toolOutput) addLog('[init] toolOutput: ' + JSON.stringify(oai.toolOutput).slice(0, 100));
+
     // Check for restored state
-    if (window.openai && window.openai.widgetState && window.openai.widgetState.done) {
-      showResult(window.openai.widgetState.summary, window.openai.widgetState.status);
+    if (oai.widgetState && oai.widgetState.done) {
+      showResult(oai.widgetState.summary, oai.widgetState.status);
     } else {
-      addLog('Waiting for Clawdy...');
+      addLog('Listening for messages...');
     }
   </script>
 </body>
