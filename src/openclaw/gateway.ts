@@ -265,11 +265,18 @@ export class OpenClawGateway {
         if (payload.state === 'final') {
           clearTimeout(timer)
           this.subscribers.delete(subId)
-          const text = (payload.message?.content ?? [])
+          const blocks = payload.message?.content ?? []
+          console.log('[openclaw-gateway] final content blocks:', JSON.stringify(blocks.map(b => ({ type: b.type, len: (b.text ?? b.thinking ?? '').length }))))
+          const text = blocks
             .filter(b => b.type === 'text')
             .map(b => b.text ?? '')
             .join('')
-          resolve(text)
+          // fall back to thinking content if no text blocks
+          const result = text || blocks
+            .filter(b => b.type === 'thinking')
+            .map(b => b.thinking ?? '')
+            .join('')
+          resolve(result)
         } else if (payload.state === 'aborted') {
           clearTimeout(timer)
           this.subscribers.delete(subId)
