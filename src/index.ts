@@ -1,6 +1,5 @@
 import 'dotenv/config'
 import { createServer } from 'node:http'
-import { randomUUID } from 'node:crypto'
 import { Hono } from 'hono'
 import { z } from 'zod'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
@@ -10,22 +9,14 @@ import { OpenClawAdapter } from './openclaw/adapter.js'
 const hono = new Hono()
 const openclaw = new OpenClawAdapter()
 
-interface Session {
-  mcpServer: McpServer
-  transport: StreamableHTTPServerTransport
-  openClawSessionKey: string
+const CORS_HEADERS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type, Mcp-Session-Id',
+  'Access-Control-Expose-Headers': 'Mcp-Session-Id',
 }
 
-const sessions = new Map<string, Session>()
-
-function createSession(): Session {
-  const sessionId = randomUUID()
-  const openClawSessionKey = `agent:main:chatgpt-${sessionId}`
-
-  const transport = new StreamableHTTPServerTransport({
-    sessionIdGenerator: () => sessionId,
-  })
-
+function createMcpServer(): McpServer {
   const mcpServer = new McpServer({ name: 'openclaw-app', version: '0.0.1' })
 
   mcpServer.tool(
@@ -37,7 +28,7 @@ function createSession(): Session {
       workspace: z.string().optional(),
     },
     async ({ task, context, workspace }) => {
-      const result = await openclaw.runTask({ task, context, workspace, sessionKey: openClawSessionKey })
+      const result = await openclaw.runTask({ task, context, workspace })
       return {
         structuredContent: result,
         content: [{ type: 'text', text: result.summary }],
@@ -45,15 +36,10 @@ function createSession(): Session {
     }
   )
 
-  // Remove non-standard `execution` field — older MCP clients (including ChatGPT)
-  // don't recognise it and crash parsing tools/list.
+  // Remove non-standard `execution` field — ChatGPT's MCP client crashes parsing it
   delete (mcpServer as any)._registeredTools['run_openclaw_task'].execution
 
-  void mcpServer.connect(transport)
-
-  const session: Session = { mcpServer, transport, openClawSessionKey }
-  sessions.set(sessionId, session)
-  return session
+  return mcpServer
 }
 
 hono.get('/', (c) => c.text('OK'))
@@ -61,12 +47,28 @@ hono.get('/health', (c) => c.json({ ok: true }))
 
 const server = createServer(async (req, res) => {
   if (req.url?.startsWith('/mcp')) {
-    const sessionId = req.headers['mcp-session-id'] as string | undefined
-    const sessionFound = !!(sessionId && sessions.get(sessionId))
-    const session = (sessionId && sessions.get(sessionId)) ?? createSession()
-    console.log(`[mcp] ${req.method} session=${sessionId ?? 'none'} found=${sessionFound} → ${session.openClawSessionKey}`)
-    await session.transport.handleRequest(req, res)
-    console.log(`[mcp] response status=${res.statusCode}`)
+    // CORS preflight
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204, CORS_HEADERS)
+      res.end()
+      return
+    }
+
+    // Add CORS headers to all MCP responses
+    Object.entries(CORS_HEADERS).forEach(([k, v]) => res.setHeader(k, v))
+
+    console.log(`[mcp] ${req.method} session=${req.headers['mcp-session-id'] ?? 'none'}`)
+
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: undefined,
+      enableJsonResponse: true,
+    })
+
+    const mcpServer = createMcpServer()
+    await mcpServer.connect(transport)
+    await transport.handleRequest(req, res)
+
+    console.log(`[mcp] → ${res.statusCode}`)
     return
   }
 
