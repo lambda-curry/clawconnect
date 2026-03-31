@@ -27,7 +27,7 @@ export class OpenClawAdapter {
       ? `${input.context}\n\n${input.task}`
       : input.task
 
-    const sessionKey = input.sessionKey ?? 'agent:main:main'
+    const sessionKey = input.sessionKey ?? 'agent:chatgpt:main'
     const reply = await gateway.chat(sessionKey, message, TIMEOUT_MS)
 
     return {
