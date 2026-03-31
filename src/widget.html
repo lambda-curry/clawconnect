@@ -52,7 +52,6 @@
     }
     .logs .entry { white-space: pre-wrap; word-break: break-word; }
     .logs .entry.info { color: #a1a1aa; }
-    .logs .entry.tool { color: #60a5fa; }
     .logs .entry.done { color: #4ade80; }
     .logs .entry.err { color: #f87171; }
     .result {
@@ -95,30 +94,12 @@
     const logsEl = document.getElementById('logs');
     const resultEl = document.getElementById('result');
 
-    let jobId = null;
-    let sessionKey = null;
     let startTime = Date.now();
-    let polling = false;
     let done = false;
 
-    // Restore from saved state
-    const saved = window.openai?.widgetState;
-    if (saved?.done) {
-      showComplete(saved.summary, saved.status);
-    }
-
-    // Update elapsed timer
-    setInterval(() => {
-      if (done) return;
-      const s = Math.round((Date.now() - startTime) / 1000);
-      const m = Math.floor(s / 60);
-      const sec = s % 60;
-      elapsedEl.textContent = m > 0 ? `${m}m ${sec}s` : `${sec}s`;
-    }, 1000);
-
-    function addLog(text, cls = 'info') {
+    function addLog(text, cls) {
       const el = document.createElement('div');
-      el.className = 'entry ' + cls;
+      el.className = 'entry ' + (cls || 'info');
       el.textContent = text;
       logsEl.appendChild(el);
       logsEl.scrollTop = logsEl.scrollHeight;
@@ -129,10 +110,11 @@
       badgeEl.textContent = status;
       if (status === 'completed' || status === 'error') {
         spinnerEl.style.display = 'none';
+        done = true;
       }
     }
 
-    function showComplete(summary, status) {
+    function showResult(summary, status) {
       done = true;
       setStatus(status === 'error' ? 'error' : 'completed');
       if (summary) {
@@ -140,57 +122,112 @@
         resultEl.textContent = summary;
       }
       addLog(status === 'error' ? 'Task failed.' : 'Task completed.', status === 'error' ? 'err' : 'done');
+      if (window.openai && window.openai.setWidgetState) {
+        window.openai.setWidgetState({ done: true, summary: summary, status: status });
+      }
     }
 
-    function poll() {
-      if (done || !jobId) return;
-      window.parent.postMessage({
-        jsonrpc: '2.0',
-        method: 'tools/call',
-        params: { toolName: 'check_openclaw_task', input: { jobId } }
-      }, '*');
+    // Elapsed timer
+    setInterval(function() {
+      if (done) return;
+      var s = Math.round((Date.now() - startTime) / 1000);
+      var m = Math.floor(s / 60);
+      var sec = s % 60;
+      elapsedEl.textContent = m > 0 ? m + 'm ' + sec + 's' : sec + 's';
+    }, 1000);
+
+    // Poll for job result
+    async function poll(jobId) {
+      if (done) return;
+      try {
+        var result;
+        if (window.openai && window.openai.callTool) {
+          result = await window.openai.callTool('check_openclaw_task', { jobId: jobId });
+        } else {
+          // Fallback: postMessage bridge
+          window.parent.postMessage({
+            jsonrpc: '2.0',
+            method: 'tools/call',
+            params: { toolName: 'check_openclaw_task', input: { jobId: jobId } }
+          }, '*');
+          return; // Result comes back via message event
+        }
+
+        var data = result && result.structuredContent;
+        if (!data) { setTimeout(function() { poll(jobId); }, 5000); return; }
+
+        if (data.status === 'running') {
+          addLog('Still running... (' + (data.elapsedSeconds || 0) + 's)');
+          poll(jobId);
+        } else if (data.status === 'completed') {
+          showResult(data.summary, 'completed');
+        } else if (data.status === 'error') {
+          showResult(data.error, 'error');
+        }
+      } catch (err) {
+        addLog('Poll error: ' + (err.message || err), 'err');
+        setTimeout(function() { poll(jobId); }, 5000);
+      }
     }
 
-    // Listen for messages from ChatGPT
-    window.addEventListener('message', (event) => {
-      if (event.source !== window.parent) return;
-      const msg = event.data;
-      if (!msg || msg.jsonrpc !== '2.0') return;
-      if (msg.method !== 'ui/notifications/tool-result') return;
-
-      const data = msg.params?.structuredContent;
-      if (!data) return;
-
-      // Initial submit response — has jobId
-      if (data.jobId && !jobId) {
-        jobId = data.jobId;
-        sessionKey = data.sessionKey;
-        startTime = Date.now();
-        addLog('Task submitted: ' + jobId.slice(0, 8) + '...');
-        setStatus('running');
-        // Start server-side long poll
-        poll();
+    // Initialize
+    function init() {
+      // Check for saved state
+      var saved = window.openai && window.openai.widgetState;
+      if (saved && saved.done) {
+        showResult(saved.summary, saved.status);
         return;
       }
 
-      // Poll result
-      if (data.status === 'running') {
-        const elapsed = data.elapsedSeconds || 0;
-        addLog(`Still running... (${elapsed}s)`);
-        // Server-side long poll returned without completion — poll again
-        poll();
-      } else if (data.status === 'completed') {
-        showComplete(data.summary, 'completed');
-        if (window.openai?.setWidgetState) {
-          window.openai.setWidgetState({ done: true, summary: data.summary, status: 'completed' });
-        }
-      } else if (data.status === 'error') {
-        showComplete(data.error, 'error');
-        if (window.openai?.setWidgetState) {
-          window.openai.setWidgetState({ done: true, summary: data.error, status: 'error' });
+      // Get initial tool output
+      var output = window.openai && window.openai.toolOutput;
+      var data = output && output.structuredContent;
+      if (data && data.jobId) {
+        startTime = Date.now();
+        addLog('Task submitted: ' + data.jobId.slice(0, 8) + '...');
+        setStatus('running');
+        poll(data.jobId);
+        return;
+      }
+
+      addLog('Waiting for task submission...');
+    }
+
+    // Also listen for postMessage notifications as fallback
+    window.addEventListener('message', function(event) {
+      if (event.source !== window.parent) return;
+      var msg = event.data;
+      if (!msg || msg.jsonrpc !== '2.0') return;
+      if (msg.method !== 'ui/notifications/tool-result') return;
+
+      var data = msg.params && msg.params.structuredContent;
+      if (!data) return;
+
+      if (data.jobId && !done) {
+        if (data.status === 'running' && data.elapsedSeconds) {
+          addLog('Still running... (' + data.elapsedSeconds + 's)');
+        } else if (data.status === 'completed') {
+          showResult(data.summary, 'completed');
+        } else if (data.status === 'error') {
+          showResult(data.error, 'error');
         }
       }
     }, { passive: true });
+
+    // Start
+    if (window.openai) {
+      init();
+    } else {
+      // Wait for openai to be available
+      var attempts = 0;
+      var check = setInterval(function() {
+        attempts++;
+        if (window.openai || attempts > 50) {
+          clearInterval(check);
+          init();
+        }
+      }, 100);
+    }
   </script>
 </body>
 </html>

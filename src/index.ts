@@ -123,6 +123,12 @@ const server = createServer(async (req, res) => {
             uri: WIDGET_URI,
             mimeType: 'text/html;profile=mcp-app',
             text: WIDGET_HTML,
+            _meta: {
+              ui: {
+                borders: 'square',
+                domains: ['*'],
+              },
+            },
           }],
         })
       } else {
