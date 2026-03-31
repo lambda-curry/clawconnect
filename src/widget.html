@@ -52,7 +52,30 @@
     .result {
       background: #09090b; border: 1px solid #27272a; border-radius: 8px;
       padding: 12px; max-height: 400px; overflow-y: auto;
-      white-space: pre-wrap; word-break: break-word; font-size: 13px; line-height: 1.6;
+      word-break: break-word; font-size: 13px; line-height: 1.6;
+    }
+    .result h1, .result h2, .result h3 {
+      color: #f4f4f5; margin: 12px 0 6px 0; font-size: 15px;
+    }
+    .result h1 { font-size: 17px; }
+    .result h3 { font-size: 13px; }
+    .result p { margin: 6px 0; }
+    .result ul, .result ol { margin: 6px 0; padding-left: 20px; }
+    .result li { margin: 2px 0; }
+    .result code {
+      background: #27272a; padding: 1px 4px; border-radius: 3px;
+      font-family: "SF Mono", "Fira Code", monospace; font-size: 12px;
+    }
+    .result pre {
+      background: #27272a; padding: 8px 10px; border-radius: 6px;
+      overflow-x: auto; margin: 8px 0;
+    }
+    .result pre code { background: none; padding: 0; }
+    .result strong { color: #f4f4f5; }
+    .result a { color: #60a5fa; text-decoration: none; }
+    .result a:hover { text-decoration: underline; }
+    .result blockquote {
+      border-left: 3px solid #3f3f46; padding-left: 10px; margin: 8px 0; color: #a1a1aa;
     }
     .actions {
       display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px;
@@ -104,6 +127,39 @@
     var oai = window.openai || {};
 
     var ICONS = { lifecycle: '\u25B6', tool: '\u2692', 'tool-result': '\u2714' };
+
+    // Lightweight markdown to HTML
+    function renderMarkdown(text) {
+      var html = escapeHtml(text);
+      // Code blocks (``` ... ```)
+      html = html.replace(/```(\w*)\n([\s\S]*?)```/g, function(_, lang, code) {
+        return '<pre><code>' + code.trim() + '</code></pre>';
+      });
+      // Inline code
+      html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+      // Headers
+      html = html.replace(/^### (.+)$/gm, '<h3>$1</h3>');
+      html = html.replace(/^## (.+)$/gm, '<h2>$1</h2>');
+      html = html.replace(/^# (.+)$/gm, '<h1>$1</h1>');
+      // Bold
+      html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+      // Italic
+      html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
+      // Links
+      html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank">$1</a>');
+      // Blockquotes
+      html = html.replace(/^&gt; (.+)$/gm, '<blockquote>$1</blockquote>');
+      // Unordered lists
+      html = html.replace(/^- (.+)$/gm, '<li>$1</li>');
+      html = html.replace(/(<li>.*<\/li>\n?)+/g, '<ul>$&</ul>');
+      // Ordered lists
+      html = html.replace(/^\d+\. (.+)$/gm, '<li>$1</li>');
+      // Paragraphs (double newlines)
+      html = html.replace(/\n\n/g, '</p><p>');
+      // Single newlines within paragraphs
+      html = html.replace(/\n/g, '<br>');
+      return '<p>' + html + '</p>';
+    }
 
     function escapeHtml(s) {
       var d = document.createElement('div'); d.textContent = s; return d.innerHTML;
@@ -198,7 +254,7 @@
         resultLabel.style.display = 'block';
         resultLabel.textContent = status === 'error' ? 'Error' : "Clawdy's response";
         resultEl.style.display = 'block';
-        resultEl.textContent = display;
+        resultEl.innerHTML = renderMarkdown(display);
       }
 
       renderActions(data);
