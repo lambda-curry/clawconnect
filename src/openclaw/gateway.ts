@@ -268,7 +268,7 @@ export class OpenClawGateway {
 
         if (payload.state === 'delta') {
           const text = extractText(payload.message?.content ?? [])
-          if (text) accumulated += text
+          if (text) accumulated = text  // each delta is cumulative, not incremental
         } else if (payload.state === 'final') {
           clearTimeout(timer)
           this.subscribers.delete(subId)
