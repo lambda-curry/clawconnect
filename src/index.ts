@@ -150,33 +150,50 @@ const server = createServer(async (req, res) => {
           workspace: args.workspace,
           sessionKey: args.sessionKey,
         })
+        const priorState = args.sessionKey ? openclaw.getSessionState(args.sessionKey) : undefined
         console.log(`[mcp] submitted job ${job.jobId} on session ${job.sessionKey}`)
         respond({
           content: [{ type: 'text', text: `Task submitted. Job ID: ${job.jobId}` }],
-          structuredContent: { jobId: job.jobId, sessionKey: job.sessionKey, status: 'running' },
+          structuredContent: {
+            jobId: job.jobId,
+            sessionKey: job.sessionKey,
+            status: 'running',
+            ...(priorState ? { continuationState: priorState } : {}),
+          },
         })
 
       } else if (name === 'check_openclaw_task') {
         const job = await openclaw.waitForJob(args.jobId)
         if (!job) {
           respond({ content: [{ type: 'text', text: `Unknown jobId: ${args.jobId}` }], isError: true })
-        } else if (job.status === 'running') {
-          const elapsed = Math.round((Date.now() - job.startedAt) / 1000)
-          respond({
-            content: [{ type: 'text', text: `Still running (${elapsed}s elapsed). Poll again.` }],
-            structuredContent: { jobId: job.jobId, sessionKey: job.sessionKey, status: 'running', elapsedSeconds: elapsed, logs: job.logs },
-          })
-        } else if (job.status === 'completed') {
-          respond({
-            content: [{ type: 'text', text: job.summary ?? '' }],
-            structuredContent: { jobId: job.jobId, sessionKey: job.sessionKey, status: 'completed', summary: job.summary, logs: job.logs },
-          })
         } else {
-          respond({
-            content: [{ type: 'text', text: `Task failed: ${job.error}` }],
-            structuredContent: { jobId: job.jobId, sessionKey: job.sessionKey, status: 'error', error: job.error },
-            isError: true,
-          })
+          const continuation = openclaw.getSessionState(job.sessionKey)
+          if (job.status === 'running') {
+            const elapsed = Math.round((Date.now() - job.startedAt) / 1000)
+            respond({
+              content: [{ type: 'text', text: `Still running (${elapsed}s elapsed). Poll again.` }],
+              structuredContent: { jobId: job.jobId, sessionKey: job.sessionKey, status: 'running', elapsedSeconds: elapsed, logs: job.logs, artifacts: job.artifacts },
+            })
+          } else if (job.status === 'completed') {
+            respond({
+              content: [{ type: 'text', text: job.summary ?? '' }],
+              structuredContent: {
+                jobId: job.jobId, sessionKey: job.sessionKey, status: 'completed',
+                summary: job.summary, artifacts: job.artifacts, logs: job.logs,
+                ...(continuation ? { continuationState: continuation } : {}),
+              },
+            })
+          } else {
+            respond({
+              content: [{ type: 'text', text: `Task failed: ${job.error}` }],
+              structuredContent: {
+                jobId: job.jobId, sessionKey: job.sessionKey, status: 'error',
+                error: job.error, errorInfo: job.errorInfo, artifacts: job.artifacts, logs: job.logs,
+                ...(continuation ? { continuationState: continuation } : {}),
+              },
+              isError: true,
+            })
+          }
         }
 
       } else {

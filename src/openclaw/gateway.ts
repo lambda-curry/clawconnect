@@ -93,6 +93,13 @@ interface ChatEventPayload {
   errorMessage?: string
 }
 
+// ── Event types ──────────────────────────────────────────────────────────────
+
+export type GatewayEvent =
+  | { type: 'lifecycle'; text: string }
+  | { type: 'tool'; text: string; toolName: string; args: Record<string, unknown> }
+  | { type: 'tool-result'; text: string; toolName: string; isError: boolean }
+
 // ── Gateway client ────────────────────────────────────────────────────────────
 
 export class OpenClawGateway {
@@ -244,7 +251,7 @@ export class OpenClawGateway {
     sessionKey: string,
     message: string,
     timeoutMs: number,
-    onEvent?: (entry: { type: string; text: string }) => void,
+    onEvent?: (entry: GatewayEvent) => void,
   ): Promise<string> {
     await this.connect()
 
@@ -284,14 +291,14 @@ export class OpenClawGateway {
             const phase = p.data?.phase as string
             onEvent({ type: 'lifecycle', text: phase === 'start' ? 'Agent started' : 'Agent finished' })
           } else if (p.stream === 'tool' && p.data?.phase === 'start') {
-            const name = p.data?.name as string ?? 'unknown'
+            const toolName = p.data?.name as string ?? 'unknown'
             const args = p.data?.args as Record<string, unknown> ?? {}
             const summary = args.command ?? args.file_path ?? args.pattern ?? args.query ?? ''
-            onEvent({ type: 'tool', text: `${name}: ${String(summary).slice(0, 80)}` })
+            onEvent({ type: 'tool', text: `${toolName}: ${String(summary).slice(0, 80)}`, toolName, args })
           } else if (p.stream === 'tool' && p.data?.phase === 'result') {
-            const name = p.data?.name as string ?? 'unknown'
+            const toolName = p.data?.name as string ?? 'unknown'
             const isError = p.data?.isError as boolean
-            onEvent({ type: 'tool-result', text: `${name} ${isError ? 'failed' : 'done'}` })
+            onEvent({ type: 'tool-result', text: `${toolName} ${isError ? 'failed' : 'done'}`, toolName, isError })
           }
         }
       })

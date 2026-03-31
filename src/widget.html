@@ -32,31 +32,16 @@
     .badge.completed { background: #052e16; color: #4ade80; }
     .badge.error { background: #450a0a; color: #f87171; }
     .badge.queued { background: #1e1b4b; color: #a78bfa; }
-    .elapsed {
-      font-size: 12px;
-      color: #71717a;
-      margin-left: auto;
-    }
+    .elapsed { font-size: 12px; color: #71717a; margin-left: auto; }
     .section-label {
-      font-size: 11px;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-      color: #71717a;
-      margin-bottom: 6px;
+      font-size: 11px; font-weight: 600; text-transform: uppercase;
+      letter-spacing: 0.05em; color: #71717a; margin-bottom: 6px;
     }
     .logs {
-      background: #09090b;
-      border: 1px solid #27272a;
-      border-radius: 8px;
-      padding: 10px 12px;
-      margin-bottom: 12px;
-      max-height: 140px;
-      overflow-y: auto;
-      font-family: "SF Mono", "Fira Code", monospace;
-      font-size: 11px;
-      color: #a1a1aa;
-      line-height: 1.6;
+      background: #09090b; border: 1px solid #27272a; border-radius: 8px;
+      padding: 10px 12px; margin-bottom: 12px; max-height: 140px; overflow-y: auto;
+      font-family: "SF Mono", "Fira Code", monospace; font-size: 11px;
+      color: #a1a1aa; line-height: 1.6;
     }
     .logs .entry { white-space: pre-wrap; word-break: break-word; display: flex; gap: 8px; }
     .logs .ts { color: #52525b; flex-shrink: 0; }
@@ -64,27 +49,27 @@
     .logs .entry.lifecycle .icon { color: #a78bfa; }
     .logs .entry.tool .icon { color: #60a5fa; }
     .logs .entry.tool-result .icon { color: #4ade80; }
-    .logs .entry.tool-result.error .icon { color: #f87171; }
     .result {
-      background: #09090b;
-      border: 1px solid #27272a;
-      border-radius: 8px;
-      padding: 12px;
-      max-height: 400px;
-      overflow-y: auto;
-      white-space: pre-wrap;
-      word-break: break-word;
-      font-size: 13px;
-      line-height: 1.6;
+      background: #09090b; border: 1px solid #27272a; border-radius: 8px;
+      padding: 12px; max-height: 400px; overflow-y: auto;
+      white-space: pre-wrap; word-break: break-word; font-size: 13px; line-height: 1.6;
     }
+    .actions {
+      display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px;
+    }
+    .action-btn {
+      background: #27272a; color: #e4e4e7; border: 1px solid #3f3f46;
+      border-radius: 6px; padding: 6px 12px; font-size: 12px; font-weight: 500;
+      cursor: pointer; transition: background 0.15s;
+    }
+    .action-btn:hover { background: #3f3f46; }
+    .action-btn:disabled { opacity: 0.4; cursor: default; }
+    .action-btn.primary { background: #1d4ed8; border-color: #2563eb; }
+    .action-btn.primary:hover { background: #2563eb; }
     .spinner {
-      display: inline-block;
-      width: 12px;
-      height: 12px;
-      border: 2px solid #fbbf2440;
-      border-top-color: #fbbf24;
-      border-radius: 50%;
-      animation: spin 0.8s linear infinite;
+      display: inline-block; width: 12px; height: 12px;
+      border: 2px solid #fbbf2440; border-top-color: #fbbf24;
+      border-radius: 50%; animation: spin 0.8s linear infinite;
     }
     @keyframes spin { to { transform: rotate(360deg); } }
   </style>
@@ -99,6 +84,7 @@
   <div class="logs" id="logs"></div>
   <div class="section-label" id="resultLabel" style="display:none">Clawdy's response</div>
   <div class="result" id="result" style="display:none"></div>
+  <div class="actions" id="actions" style="display:none"></div>
 
   <script>
     var badgeEl = document.getElementById('badge');
@@ -107,44 +93,36 @@
     var logsEl = document.getElementById('logs');
     var resultLabel = document.getElementById('resultLabel');
     var resultEl = document.getElementById('result');
+    var actionsEl = document.getElementById('actions');
 
     var jobId = null;
+    var sessionKey = null;
     var startTime = Date.now();
     var done = false;
     var seenLogCount = 0;
+    var lastData = null;
     var oai = window.openai || {};
 
-    var ICONS = {
-      lifecycle: '\u25B6',
-      tool: '\u2692',
-      'tool-result': '\u2714',
-    };
+    var ICONS = { lifecycle: '\u25B6', tool: '\u2692', 'tool-result': '\u2714' };
+
+    function escapeHtml(s) {
+      var d = document.createElement('div'); d.textContent = s; return d.innerHTML;
+    }
 
     function addLogEntry(entry) {
       var el = document.createElement('div');
-      var isError = entry.type === 'tool-result' && entry.text.includes('failed');
-      el.className = 'entry ' + entry.type + (isError ? ' error' : '');
-
+      el.className = 'entry ' + entry.type;
       var elapsed = Math.round((entry.ts - startTime) / 1000);
       el.innerHTML = '<span class="ts">' + elapsed + 's</span>'
         + '<span class="icon">' + (ICONS[entry.type] || '\u2022') + '</span>'
         + '<span>' + escapeHtml(entry.text) + '</span>';
-
       logsEl.appendChild(el);
       logsEl.scrollTop = logsEl.scrollHeight;
     }
 
-    function escapeHtml(s) {
-      var d = document.createElement('div');
-      d.textContent = s;
-      return d.innerHTML;
-    }
-
     function renderLogs(logs) {
       if (!logs || logs.length <= seenLogCount) return;
-      for (var i = seenLogCount; i < logs.length; i++) {
-        addLogEntry(logs[i]);
-      }
+      for (var i = seenLogCount; i < logs.length; i++) addLogEntry(logs[i]);
       seenLogCount = logs.length;
     }
 
@@ -164,23 +142,75 @@
       return null;
     }
 
-    async function showResult(summary, status, logs) {
-      done = true;
-      setStatus(status === 'error' ? 'error' : 'completed');
-      if (logs) renderLogs(logs);
-      if (summary) {
-        resultLabel.style.display = 'block';
-        resultEl.style.display = 'block';
-        resultEl.textContent = summary;
+    // Build a directive message for ChatGPT based on outcome
+    function buildDirective(data) {
+      if (data.status === 'error') {
+        var ei = data.errorInfo;
+        if (ei) return 'Clawdy encountered a ' + ei.category + ' error. ' + ei.suggestedRecovery + ' Explain what happened and suggest how to fix it.';
+        return 'Clawdy encountered an error. Explain what went wrong and suggest recovery steps.';
+      }
+      var a = data.artifacts || {};
+      if (a.prUrl) return 'Clawdy created a PR at ' + a.prUrl + '. Summarize the changes and ask if the user wants to review or merge.';
+      if (a.needsHumanDecision) return 'Clawdy needs a decision from the user. Present the options clearly.';
+      if ((a.filesChanged || []).length > 0) return 'Clawdy modified ' + a.filesChanged.length + ' file(s). Summarize what changed and propose next steps.';
+      return 'Clawdy completed the task. Summarize the result and propose next steps.';
+    }
+
+    // Render action buttons based on outcome
+    function renderActions(data) {
+      actionsEl.style.display = 'flex';
+      actionsEl.innerHTML = '';
+      var a = data.artifacts || {};
+      var sk = data.sessionKey || sessionKey;
+
+      var buttons = [];
+      if (data.status === 'error') {
+        buttons.push({ label: 'Retry', msg: 'Retry the failed task using sessionKey: ' + sk, primary: true });
+        buttons.push({ label: 'Explain error', msg: 'Explain in detail what went wrong and why.' });
+      } else {
+        buttons.push({ label: 'Continue', msg: 'Continue working on this using sessionKey: ' + sk, primary: true });
+        buttons.push({ label: 'Explain changes', msg: 'Explain the changes Clawdy made in detail.' });
+        if (!a.prUrl && (a.filesChanged || []).length > 0) {
+          buttons.push({ label: 'Create PR', msg: 'Ask Clawdy to create a PR for these changes using sessionKey: ' + sk });
+        }
       }
 
+      buttons.forEach(function(b) {
+        var btn = document.createElement('button');
+        btn.className = 'action-btn' + (b.primary ? ' primary' : '');
+        btn.textContent = b.label;
+        btn.onclick = function() {
+          btn.disabled = true;
+          if (oai.sendFollowUpMessage) oai.sendFollowUpMessage(b.msg);
+        };
+        actionsEl.appendChild(btn);
+      });
+    }
+
+    async function showResult(data) {
+      done = true;
+      var status = data.status;
+      setStatus(status === 'error' ? 'error' : 'completed');
+      if (data.logs) renderLogs(data.logs);
+
+      var display = status === 'error' ? (data.error || 'Unknown error') : (data.summary || '');
+      if (display) {
+        resultLabel.style.display = 'block';
+        resultLabel.textContent = status === 'error' ? 'Error' : "Clawdy's response";
+        resultEl.style.display = 'block';
+        resultEl.textContent = display;
+      }
+
+      renderActions(data);
+
       if (oai.setWidgetState) {
-        oai.setWidgetState({ done: true, summary: summary, status: status });
+        oai.setWidgetState({ done: true, summary: display, status: status });
       }
-      if (status !== 'error' && summary) {
-        try { if (oai.requestTargetedReply) await oai.requestTargetedReply(); } catch(e) {}
-        try { if (oai.sendFollowUpMessage) await oai.sendFollowUpMessage('Clawdy finished:\n\n' + summary.slice(0, 2000)); } catch(e) {}
-      }
+
+      // Send directive to wake up ChatGPT
+      var directive = buildDirective(data);
+      try { if (oai.requestTargetedReply) await oai.requestTargetedReply(); } catch(e) {}
+      try { if (oai.sendFollowUpMessage) await oai.sendFollowUpMessage(directive); } catch(e) {}
     }
 
     // Elapsed timer
@@ -198,15 +228,13 @@
         var result = await oai.callTool('check_openclaw_task', { jobId: jobId });
         var data = extractData(result);
         if (!data) { setTimeout(poll, 3000); return; }
-
         if (data.logs) renderLogs(data.logs);
 
         if (data.status === 'running') {
           poll();
-        } else if (data.status === 'completed') {
-          showResult(data.summary, 'completed', data.logs);
-        } else if (data.status === 'error') {
-          showResult(data.error, 'error', data.logs);
+        } else {
+          lastData = data;
+          showResult(data);
         }
       } catch (err) {
         setTimeout(poll, 5000);
@@ -218,6 +246,7 @@
       var data = extractData(output);
       if (data && data.jobId) {
         jobId = data.jobId;
+        sessionKey = data.sessionKey;
         startTime = Date.now();
         setStatus('running');
         poll();
@@ -225,7 +254,7 @@
     }
 
     if (oai.widgetState && oai.widgetState.done) {
-      showResult(oai.widgetState.summary, oai.widgetState.status);
+      showResult({ status: oai.widgetState.status, summary: oai.widgetState.summary });
     } else {
       if (oai.toolOutput) startFromOutput(oai.toolOutput);
       window.addEventListener('openai:set_globals', function() {
