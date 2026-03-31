@@ -45,6 +45,10 @@ function createSession(): Session {
     }
   )
 
+  // Remove non-standard `execution` field — older MCP clients (including ChatGPT)
+  // don't recognise it and crash parsing tools/list.
+  delete (mcpServer as any)._registeredTools['run_openclaw_task'].execution
+
   void mcpServer.connect(transport)
 
   const session: Session = { mcpServer, transport, openClawSessionKey }
