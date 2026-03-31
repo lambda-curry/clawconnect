@@ -21,12 +21,14 @@ export class OpenClawAdapter {
     task: string
     context?: string
     workspace?: string
+    sessionKey?: string
   }): Promise<OpenClawResult> {
     const message = input.context
       ? `${input.context}\n\n${input.task}`
       : input.task
 
-    const reply = await gateway.chat('agent:main:main', message, TIMEOUT_MS)
+    const sessionKey = input.sessionKey ?? 'agent:main:main'
+    const reply = await gateway.chat(sessionKey, message, TIMEOUT_MS)
 
     return {
       success: true,

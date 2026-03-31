@@ -1,5 +1,6 @@
 import 'dotenv/config'
 import { createServer } from 'node:http'
+import { randomUUID } from 'node:crypto'
 import { Hono } from 'hono'
 import { z } from 'zod'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
@@ -9,13 +10,25 @@ import { OpenClawAdapter } from './openclaw/adapter.js'
 const hono = new Hono()
 const openclaw = new OpenClawAdapter()
 
-function createMcpServer() {
-  const server = new McpServer({
-    name: 'openclaw-app',
-    version: '0.0.1',
+interface Session {
+  mcpServer: McpServer
+  transport: StreamableHTTPServerTransport
+  openClawSessionKey: string
+}
+
+const sessions = new Map<string, Session>()
+
+function createSession(): Session {
+  const sessionId = randomUUID()
+  const openClawSessionKey = `agent:main:chatgpt-${sessionId}`
+
+  const transport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: () => sessionId,
   })
 
-  server.tool(
+  const mcpServer = new McpServer({ name: 'openclaw-app', version: '0.0.1' })
+
+  mcpServer.tool(
     'run_openclaw_task',
     'Send a task to OpenClaw and return a structured result',
     {
@@ -24,7 +37,7 @@ function createMcpServer() {
       workspace: z.string().optional(),
     },
     async ({ task, context, workspace }) => {
-      const result = await openclaw.runTask({ task, context, workspace })
+      const result = await openclaw.runTask({ task, context, workspace, sessionKey: openClawSessionKey })
       return {
         structuredContent: result,
         content: [{ type: 'text', text: result.summary }],
@@ -32,7 +45,11 @@ function createMcpServer() {
     }
   )
 
-  return server
+  void mcpServer.connect(transport)
+
+  const session: Session = { mcpServer, transport, openClawSessionKey }
+  sessions.set(sessionId, session)
+  return session
 }
 
 hono.get('/', (c) => c.text('OK'))
@@ -40,12 +57,9 @@ hono.get('/health', (c) => c.json({ ok: true }))
 
 const server = createServer(async (req, res) => {
   if (req.url?.startsWith('/mcp')) {
-    const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: undefined,
-    })
-    const mcpServer = createMcpServer()
-    await mcpServer.connect(transport)
-    await transport.handleRequest(req, res)
+    const sessionId = req.headers['mcp-session-id'] as string | undefined
+    const session = (sessionId && sessions.get(sessionId)) ?? createSession()
+    await session.transport.handleRequest(req, res)
     return
   }
 
