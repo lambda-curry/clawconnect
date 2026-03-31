@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { OpenClawGateway } from './gateway.js'
 
 const TIMEOUT_MS = 600_000 // 10 minutes
@@ -5,6 +6,7 @@ const TIMEOUT_MS = 600_000 // 10 minutes
 export type OpenClawResult = {
   success: boolean
   summary: string
+  sessionKey: string
   steps: string[]
   warnings?: string[]
   artifacts?: string[]
@@ -27,12 +29,13 @@ export class OpenClawAdapter {
       ? `${input.context}\n\n${input.task}`
       : input.task
 
-    const sessionKey = input.sessionKey ?? 'agent:chatgpt:main'
+    const sessionKey = input.sessionKey ?? `agent:chatgpt:${randomUUID()}`
     const reply = await gateway.chat(sessionKey, message, TIMEOUT_MS)
 
     return {
       success: true,
       summary: reply,
+      sessionKey,
       steps: [],
       warnings: [],
       artifacts: [],

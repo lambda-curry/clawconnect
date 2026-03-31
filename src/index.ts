@@ -15,13 +15,14 @@ const CORS_HEADERS = {
 
 const TOOL_DEFINITION = {
   name: 'run_openclaw_task',
-  description: 'Send a task to OpenClaw and return a structured result',
+  description: 'Send a task to OpenClaw and return a structured result. The response includes a sessionKey — pass it back in follow-up calls to continue the same session.',
   inputSchema: {
     type: 'object',
     properties: {
       task: { type: 'string' },
       context: { type: 'string' },
       workspace: { type: 'string' },
+      sessionKey: { type: 'string', description: 'Session key returned from a previous call. Omit to start a new session.' },
     },
     required: ['task'],
   },
