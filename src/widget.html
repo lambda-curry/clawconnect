@@ -128,8 +128,6 @@
       if (oai.setWidgetState) {
         oai.setWidgetState({ done: true, summary: summary, status: status });
       }
-
-      // Re-awaken ChatGPT with the result
       if (status !== 'error' && summary && oai.sendFollowUpMessage) {
         oai.sendFollowUpMessage('Clawdy finished. Here is the result:\n\n' + summary);
       }
@@ -144,21 +142,20 @@
       elapsedEl.textContent = m > 0 ? m + 'm ' + sec + 's' : sec + 's';
     }, 1000);
 
-    // Poll for job result using window.openai.callTool
+    // Poll for job result
     async function poll() {
       if (done || !jobId) return;
       try {
         var result = await oai.callTool('check_openclaw_task', { jobId: jobId });
         var data = result && result.structuredContent;
         if (!data) {
-          addLog('Poll returned no data, retrying...');
+          addLog('No data from poll, retrying...');
           setTimeout(poll, 3000);
           return;
         }
-
         if (data.status === 'running') {
           addLog('Running... (' + (data.elapsedSeconds || 0) + 's)');
-          poll(); // server-side long poll, call again immediately
+          poll();
         } else if (data.status === 'completed') {
           showResult(data.summary, 'completed');
         } else if (data.status === 'error') {
@@ -170,43 +167,35 @@
       }
     }
 
-    // Wait for toolOutput to be populated (widget loads before server responds)
-    function waitForToolOutput() {
-      if (oai.widgetState && oai.widgetState.done) {
-        showResult(oai.widgetState.summary, oai.widgetState.status);
-        return;
+    function startFromOutput(output) {
+      if (done || jobId) return;
+      var data = output && output.structuredContent;
+      if (data && data.jobId) {
+        jobId = data.jobId;
+        startTime = Date.now();
+        addLog('Job: ' + jobId.slice(0, 8) + '...');
+        setStatus('running');
+        poll();
       }
-
-      var attempts = 0;
-      var check = setInterval(function() {
-        attempts++;
-        var output = oai.toolOutput;
-        if (output) {
-          clearInterval(check);
-          addLog('toolOutput received');
-          var data = output.structuredContent;
-          if (data && data.jobId) {
-            jobId = data.jobId;
-            startTime = Date.now();
-            addLog('Job: ' + jobId.slice(0, 8) + '...');
-            setStatus('running');
-            poll();
-          } else {
-            addLog('No jobId in toolOutput: ' + JSON.stringify(output).slice(0, 100));
-          }
-          return;
-        }
-        if (attempts > 120) { // 60 seconds
-          clearInterval(check);
-          addLog('Timed out waiting for tool response', 'err');
-          setStatus('error');
-        }
-      }, 500);
-
-      addLog('Waiting for response...');
     }
 
-    waitForToolOutput();
+    // Check restored state first
+    if (oai.widgetState && oai.widgetState.done) {
+      showResult(oai.widgetState.summary, oai.widgetState.status);
+    } else {
+      addLog('Waiting for response...');
+
+      // toolOutput may already be populated (if event fired before widget loaded)
+      if (oai.toolOutput) {
+        startFromOutput(oai.toolOutput);
+      }
+
+      // Listen for the event when ChatGPT delivers the tool result
+      window.addEventListener('openai:set_globals', function() {
+        addLog('Received tool output');
+        startFromOutput(window.openai.toolOutput);
+      });
+    }
   </script>
 </body>
 </html>
