@@ -42,6 +42,13 @@ const server = createServer(async (req, res) => {
 
     Object.entries(CORS_HEADERS).forEach(([k, v]) => res.setHeader(k, v))
 
+    // Disable socket timeout for long-running tasks
+    req.socket.setTimeout(0)
+    req.socket.setKeepAlive(true)
+    res.once('close', () => {
+      if (!res.writableEnded) console.log('[mcp] connection closed by client before response was sent')
+    })
+
     // Parse body
     const chunks: Buffer[] = []
     for await (const chunk of req) chunks.push(chunk as Buffer)
@@ -126,6 +133,7 @@ const server = createServer(async (req, res) => {
 })
 
 const port = Number(process.env.PORT || 7331)
+server.timeout = 0
 server.listen(port, () => {
   console.log(`Server running on http://localhost:${port}`)
 })
