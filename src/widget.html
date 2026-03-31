@@ -43,7 +43,7 @@
       border-radius: 8px;
       padding: 12px;
       margin-bottom: 12px;
-      max-height: 120px;
+      max-height: 100px;
       overflow-y: auto;
       font-family: "SF Mono", "Fira Code", monospace;
       font-size: 12px;
@@ -59,7 +59,7 @@
       border: 1px solid #27272a;
       border-radius: 8px;
       padding: 12px;
-      max-height: 300px;
+      max-height: 400px;
       overflow-y: auto;
       white-space: pre-wrap;
       word-break: break-word;
@@ -116,7 +116,15 @@
       }
     }
 
-    function showResult(summary, status) {
+    // Extract data from either {structuredContent: {…}} or flat {jobId, status, …}
+    function extractData(obj) {
+      if (!obj) return null;
+      if (obj.structuredContent) return obj.structuredContent;
+      if (obj.jobId || obj.status) return obj;
+      return null;
+    }
+
+    async function showResult(summary, status) {
       done = true;
       setStatus(status === 'error' ? 'error' : 'completed');
       if (summary) {
@@ -128,8 +136,22 @@
       if (oai.setWidgetState) {
         oai.setWidgetState({ done: true, summary: summary, status: status });
       }
-      if (status !== 'error' && summary && oai.sendFollowUpMessage) {
-        oai.sendFollowUpMessage('Clawdy finished. Here is the result:\n\n' + summary);
+
+      // Try multiple approaches to re-awaken the chat
+      if (status !== 'error' && summary) {
+        try {
+          if (oai.requestTargetedReply) {
+            await oai.requestTargetedReply();
+            addLog('Requested targeted reply');
+          }
+        } catch(e) { addLog('targetedReply: ' + e.message); }
+
+        try {
+          if (oai.sendFollowUpMessage) {
+            await oai.sendFollowUpMessage('Clawdy finished:\n\n' + summary.slice(0, 500));
+            addLog('Sent follow-up');
+          }
+        } catch(e) { addLog('followUp: ' + e.message); }
       }
     }
 
@@ -147,9 +169,9 @@
       if (done || !jobId) return;
       try {
         var result = await oai.callTool('check_openclaw_task', { jobId: jobId });
-        var data = result && result.structuredContent;
+        var data = extractData(result);
         if (!data) {
-          addLog('No data from poll, retrying...');
+          addLog('No data, retrying...');
           setTimeout(poll, 3000);
           return;
         }
@@ -169,29 +191,23 @@
 
     function startFromOutput(output) {
       if (done || jobId) return;
-      addLog('toolOutput: ' + JSON.stringify(output).slice(0, 200));
-
-      // Try structuredContent first, then top-level, then _meta
-      var data = (output && output.structuredContent) || output || {};
-      var id = data.jobId || (output && output._meta && output._meta.jobId);
-      if (id) {
-        jobId = id;
+      var data = extractData(output);
+      if (data && data.jobId) {
+        jobId = data.jobId;
         startTime = Date.now();
         addLog('Job: ' + jobId.slice(0, 8) + '...');
         setStatus('running');
         poll();
-      } else {
-        addLog('No jobId found in output');
       }
     }
 
-    // Check restored state first
+    // Check restored state
     if (oai.widgetState && oai.widgetState.done) {
       showResult(oai.widgetState.summary, oai.widgetState.status);
     } else {
       addLog('Waiting for response...');
 
-      // toolOutput may already be populated (if event fired before widget loaded)
+      // toolOutput may already be populated
       if (oai.toolOutput) {
         startFromOutput(oai.toolOutput);
       }
@@ -199,12 +215,7 @@
       // Listen for the event when ChatGPT delivers the tool result
       window.addEventListener('openai:set_globals', function() {
         try {
-          var to = window.openai.toolOutput;
-          addLog('set_globals: toolOutput type=' + typeof to + ' null=' + (to === null));
-          if (to) {
-            addLog('keys: ' + Object.keys(to).join(', '));
-          }
-          startFromOutput(to);
+          startFromOutput(window.openai.toolOutput);
         } catch(e) {
           addLog('ERR: ' + e.message, 'err');
         }
