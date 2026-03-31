@@ -9,33 +9,31 @@ import { OpenClawAdapter } from './openclaw/adapter.js'
 const hono = new Hono()
 const openclaw = new OpenClawAdapter()
 
-const mcpServer = new McpServer({
-  name: 'openclaw-app',
-  version: '0.0.1',
-})
+function createMcpServer() {
+  const server = new McpServer({
+    name: 'openclaw-app',
+    version: '0.0.1',
+  })
 
-mcpServer.tool(
-  'run_openclaw_task',
-  'Send a task to OpenClaw and return a structured result',
-  {
-    task: z.string(),
-    context: z.string().optional(),
-    workspace: z.string().optional(),
-  },
-  async ({ task, context, workspace }) => {
-    const result = await openclaw.runTask({ task, context, workspace })
-
-    return {
-      structuredContent: result,
-      content: [
-        {
-          type: 'text',
-          text: result.summary,
-        },
-      ],
+  server.tool(
+    'run_openclaw_task',
+    'Send a task to OpenClaw and return a structured result',
+    {
+      task: z.string(),
+      context: z.string().optional(),
+      workspace: z.string().optional(),
+    },
+    async ({ task, context, workspace }) => {
+      const result = await openclaw.runTask({ task, context, workspace })
+      return {
+        structuredContent: result,
+        content: [{ type: 'text', text: result.summary }],
+      }
     }
-  }
-)
+  )
+
+  return server
+}
 
 hono.get('/', (c) => c.text('OK'))
 hono.get('/health', (c) => c.json({ ok: true }))
@@ -45,6 +43,7 @@ const server = createServer(async (req, res) => {
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
     })
+    const mcpServer = createMcpServer()
     await mcpServer.connect(transport)
     await transport.handleRequest(req, res)
     return
