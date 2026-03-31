@@ -63,7 +63,7 @@ const server = createServer(async (req, res) => {
   res.end(Buffer.from(buf))
 })
 
-const port = Number(process.env.PORT || 3000)
+const port = Number(process.env.PORT || 7331)
 server.listen(port, () => {
   console.log(`Server running on http://localhost:${port}`)
 })
