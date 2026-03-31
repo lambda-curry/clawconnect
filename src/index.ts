@@ -95,21 +95,48 @@ const server = createServer(async (req, res) => {
         respondError(-32601, `Unknown tool: ${name}`)
         return
       }
+
+      // Stream SSE to keep the connection alive while Clawdy works
+      res.writeHead(200, {
+        ...CORS_HEADERS,
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+      })
+
+      const keepAlive = setInterval(() => {
+        if (!res.writableEnded) res.write(': keepalive\n\n')
+      }, 10_000)
+
+      const sendSseResult = (payload: unknown) => {
+        clearInterval(keepAlive)
+        if (!res.writableEnded) {
+          res.write(`event: message\ndata: ${JSON.stringify({ jsonrpc: '2.0', id: msg.id ?? null, result: payload })}\n\n`)
+          res.end()
+        }
+      }
+
+      const sendSseError = (code: number, message: string) => {
+        clearInterval(keepAlive)
+        if (!res.writableEnded) {
+          res.write(`event: message\ndata: ${JSON.stringify({ jsonrpc: '2.0', id: msg.id ?? null, error: { code, message } })}\n\n`)
+          res.end()
+        }
+      }
+
       try {
         const result = await openclaw.runTask({
           task: args.task,
           context: args.context,
           workspace: args.workspace,
+          sessionKey: args.sessionKey,
         })
-        respond({
+        sendSseResult({
           content: [{ type: 'text', text: result.summary }],
           structuredContent: result,
         })
       } catch (err) {
-        respond({
-          content: [{ type: 'text', text: err instanceof Error ? err.message : String(err) }],
-          isError: true,
-        })
+        sendSseError(-32000, err instanceof Error ? err.message : String(err))
       }
     } else {
       respondError(-32601, `Method not found: ${msg.method}`)
