@@ -1,9 +1,6 @@
 import 'dotenv/config'
 import { createServer } from 'node:http'
 import { Hono } from 'hono'
-import { z } from 'zod'
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
-import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import { OpenClawAdapter } from './openclaw/adapter.js'
 
 const hono = new Hono()
@@ -16,30 +13,18 @@ const CORS_HEADERS = {
   'Access-Control-Expose-Headers': 'Mcp-Session-Id',
 }
 
-function createMcpServer(): McpServer {
-  const mcpServer = new McpServer({ name: 'openclaw-app', version: '0.0.1' })
-
-  mcpServer.tool(
-    'run_openclaw_task',
-    'Send a task to OpenClaw and return a structured result',
-    {
-      task: z.string(),
-      context: z.string().optional(),
-      workspace: z.string().optional(),
+const TOOL_DEFINITION = {
+  name: 'run_openclaw_task',
+  description: 'Send a task to OpenClaw and return a structured result',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      task: { type: 'string' },
+      context: { type: 'string' },
+      workspace: { type: 'string' },
     },
-    async ({ task, context, workspace }) => {
-      const result = await openclaw.runTask({ task, context, workspace })
-      return {
-        structuredContent: result,
-        content: [{ type: 'text', text: result.summary }],
-      }
-    }
-  )
-
-  // Remove non-standard `execution` field — ChatGPT's MCP client crashes parsing it
-  delete (mcpServer as any)._registeredTools['run_openclaw_task'].execution
-
-  return mcpServer
+    required: ['task'],
+  },
 }
 
 hono.get('/', (c) => c.text('OK'))
@@ -54,19 +39,73 @@ const server = createServer(async (req, res) => {
       return
     }
 
-    // Add CORS headers to all MCP responses
     Object.entries(CORS_HEADERS).forEach(([k, v]) => res.setHeader(k, v))
 
-    console.log(`[mcp] ${req.method} session=${req.headers['mcp-session-id'] ?? 'none'}`)
+    // Parse body
+    const chunks: Buffer[] = []
+    for await (const chunk of req) chunks.push(chunk as Buffer)
+    const raw = Buffer.concat(chunks).toString()
 
-    const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: undefined,
-      enableJsonResponse: true,
-    })
+    let msg: { jsonrpc: string; id?: unknown; method: string; params?: Record<string, unknown> }
+    try {
+      msg = JSON.parse(raw)
+    } catch {
+      res.writeHead(400, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } }))
+      return
+    }
 
-    const mcpServer = createMcpServer()
-    await mcpServer.connect(transport)
-    await transport.handleRequest(req, res)
+    const isNotification = msg.id === undefined
+
+    const respond = (result: unknown, status = 200) => {
+      res.writeHead(status, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ jsonrpc: '2.0', id: msg.id ?? null, result }))
+    }
+
+    const respondError = (code: number, message: string, httpStatus = 200) => {
+      res.writeHead(httpStatus, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ jsonrpc: '2.0', id: msg.id ?? null, error: { code, message } }))
+    }
+
+    console.log(`[mcp] ${req.method} ${msg.method}`)
+
+    if (msg.method === 'initialize') {
+      respond({
+        protocolVersion: '2024-11-05',
+        capabilities: { tools: {} },
+        serverInfo: { name: 'openclaw-app', version: '0.0.1' },
+      })
+    } else if (isNotification) {
+      // notifications/initialized and other notifications — just acknowledge
+      res.writeHead(202)
+      res.end()
+    } else if (msg.method === 'tools/list') {
+      respond({ tools: [TOOL_DEFINITION] })
+    } else if (msg.method === 'tools/call') {
+      const { name, arguments: args } = msg.params as { name: string; arguments: Record<string, string> }
+      if (name !== 'run_openclaw_task') {
+        respondError(-32601, `Unknown tool: ${name}`)
+        return
+      }
+      try {
+        const result = await openclaw.runTask({
+          task: args.task,
+          context: args.context,
+          workspace: args.workspace,
+        })
+        respond({
+          content: [{ type: 'text', text: result.summary }],
+          structuredContent: result,
+        })
+      } catch (err) {
+        respond({
+          content: [{ type: 'text', text: err instanceof Error ? err.message : String(err) }],
+          isError: true,
+        })
+      }
+    } else {
+      respondError(-32601, `Method not found: ${msg.method}`)
+    }
 
     console.log(`[mcp] → ${res.statusCode}`)
     return
