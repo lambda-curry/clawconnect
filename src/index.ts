@@ -164,12 +164,12 @@ const server = createServer(async (req, res) => {
           const elapsed = Math.round((Date.now() - job.startedAt) / 1000)
           respond({
             content: [{ type: 'text', text: `Still running (${elapsed}s elapsed). Poll again.` }],
-            structuredContent: { jobId: job.jobId, sessionKey: job.sessionKey, status: 'running', elapsedSeconds: elapsed },
+            structuredContent: { jobId: job.jobId, sessionKey: job.sessionKey, status: 'running', elapsedSeconds: elapsed, logs: job.logs },
           })
         } else if (job.status === 'completed') {
           respond({
             content: [{ type: 'text', text: job.summary ?? '' }],
-            structuredContent: { jobId: job.jobId, sessionKey: job.sessionKey, status: 'completed', summary: job.summary },
+            structuredContent: { jobId: job.jobId, sessionKey: job.sessionKey, status: 'completed', summary: job.summary, logs: job.logs },
           })
         } else {
           respond({

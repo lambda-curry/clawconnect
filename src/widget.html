@@ -37,12 +37,7 @@
       color: #71717a;
       margin-left: auto;
     }
-    .status-line {
-      font-size: 12px;
-      color: #71717a;
-      margin-bottom: 12px;
-    }
-    .result-label {
+    .section-label {
       font-size: 11px;
       font-weight: 600;
       text-transform: uppercase;
@@ -50,6 +45,26 @@
       color: #71717a;
       margin-bottom: 6px;
     }
+    .logs {
+      background: #09090b;
+      border: 1px solid #27272a;
+      border-radius: 8px;
+      padding: 10px 12px;
+      margin-bottom: 12px;
+      max-height: 140px;
+      overflow-y: auto;
+      font-family: "SF Mono", "Fira Code", monospace;
+      font-size: 11px;
+      color: #a1a1aa;
+      line-height: 1.6;
+    }
+    .logs .entry { white-space: pre-wrap; word-break: break-word; display: flex; gap: 8px; }
+    .logs .ts { color: #52525b; flex-shrink: 0; }
+    .logs .icon { flex-shrink: 0; }
+    .logs .entry.lifecycle .icon { color: #a78bfa; }
+    .logs .entry.tool .icon { color: #60a5fa; }
+    .logs .entry.tool-result .icon { color: #4ade80; }
+    .logs .entry.tool-result.error .icon { color: #f87171; }
     .result {
       background: #09090b;
       border: 1px solid #27272a;
@@ -80,22 +95,58 @@
     <span id="spinnerWrap"><span class="spinner"></span></span>
     <span class="elapsed" id="elapsed"></span>
   </div>
-  <div class="status-line" id="statusLine">Waiting for response...</div>
-  <div class="result-label" id="resultLabel" style="display:none">Clawdy's response</div>
+  <div class="section-label">Activity</div>
+  <div class="logs" id="logs"></div>
+  <div class="section-label" id="resultLabel" style="display:none">Clawdy's response</div>
   <div class="result" id="result" style="display:none"></div>
 
   <script>
     var badgeEl = document.getElementById('badge');
     var spinnerEl = document.getElementById('spinnerWrap');
     var elapsedEl = document.getElementById('elapsed');
-    var statusLine = document.getElementById('statusLine');
+    var logsEl = document.getElementById('logs');
     var resultLabel = document.getElementById('resultLabel');
     var resultEl = document.getElementById('result');
 
     var jobId = null;
     var startTime = Date.now();
     var done = false;
+    var seenLogCount = 0;
     var oai = window.openai || {};
+
+    var ICONS = {
+      lifecycle: '\u25B6',
+      tool: '\u2692',
+      'tool-result': '\u2714',
+    };
+
+    function addLogEntry(entry) {
+      var el = document.createElement('div');
+      var isError = entry.type === 'tool-result' && entry.text.includes('failed');
+      el.className = 'entry ' + entry.type + (isError ? ' error' : '');
+
+      var elapsed = Math.round((entry.ts - startTime) / 1000);
+      el.innerHTML = '<span class="ts">' + elapsed + 's</span>'
+        + '<span class="icon">' + (ICONS[entry.type] || '\u2022') + '</span>'
+        + '<span>' + escapeHtml(entry.text) + '</span>';
+
+      logsEl.appendChild(el);
+      logsEl.scrollTop = logsEl.scrollHeight;
+    }
+
+    function escapeHtml(s) {
+      var d = document.createElement('div');
+      d.textContent = s;
+      return d.innerHTML;
+    }
+
+    function renderLogs(logs) {
+      if (!logs || logs.length <= seenLogCount) return;
+      for (var i = seenLogCount; i < logs.length; i++) {
+        addLogEntry(logs[i]);
+      }
+      seenLogCount = logs.length;
+    }
 
     function setStatus(status) {
       badgeEl.className = 'badge ' + status;
@@ -113,10 +164,10 @@
       return null;
     }
 
-    async function showResult(summary, status) {
+    async function showResult(summary, status, logs) {
       done = true;
       setStatus(status === 'error' ? 'error' : 'completed');
-      statusLine.textContent = status === 'error' ? 'Task failed.' : 'Task completed.';
+      if (logs) renderLogs(logs);
       if (summary) {
         resultLabel.style.display = 'block';
         resultEl.style.display = 'block';
@@ -126,18 +177,9 @@
       if (oai.setWidgetState) {
         oai.setWidgetState({ done: true, summary: summary, status: status });
       }
-
       if (status !== 'error' && summary) {
-        try {
-          if (oai.requestTargetedReply) {
-            await oai.requestTargetedReply();
-          }
-        } catch(e) {}
-        try {
-          if (oai.sendFollowUpMessage) {
-            await oai.sendFollowUpMessage('Clawdy finished:\n\n' + summary.slice(0, 2000));
-          }
-        } catch(e) {}
+        try { if (oai.requestTargetedReply) await oai.requestTargetedReply(); } catch(e) {}
+        try { if (oai.sendFollowUpMessage) await oai.sendFollowUpMessage('Clawdy finished:\n\n' + summary.slice(0, 2000)); } catch(e) {}
       }
     }
 
@@ -155,21 +197,18 @@
       try {
         var result = await oai.callTool('check_openclaw_task', { jobId: jobId });
         var data = extractData(result);
-        if (!data) {
-          setTimeout(poll, 3000);
-          return;
-        }
+        if (!data) { setTimeout(poll, 3000); return; }
+
+        if (data.logs) renderLogs(data.logs);
+
         if (data.status === 'running') {
-          var elapsed = data.elapsedSeconds || 0;
-          statusLine.textContent = 'Clawdy is working... (' + elapsed + 's)';
           poll();
         } else if (data.status === 'completed') {
-          showResult(data.summary, 'completed');
+          showResult(data.summary, 'completed', data.logs);
         } else if (data.status === 'error') {
-          showResult(data.error, 'error');
+          showResult(data.error, 'error', data.logs);
         }
       } catch (err) {
-        statusLine.textContent = 'Poll error, retrying...';
         setTimeout(poll, 5000);
       }
     }
@@ -180,7 +219,6 @@
       if (data && data.jobId) {
         jobId = data.jobId;
         startTime = Date.now();
-        statusLine.textContent = 'Clawdy is working...';
         setStatus('running');
         poll();
       }
@@ -189,9 +227,7 @@
     if (oai.widgetState && oai.widgetState.done) {
       showResult(oai.widgetState.summary, oai.widgetState.status);
     } else {
-      if (oai.toolOutput) {
-        startFromOutput(oai.toolOutput);
-      }
+      if (oai.toolOutput) startFromOutput(oai.toolOutput);
       window.addEventListener('openai:set_globals', function() {
         try { startFromOutput(window.openai.toolOutput); } catch(e) {}
       });

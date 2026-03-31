@@ -4,6 +4,7 @@ import { OpenClawGateway } from './gateway.js'
 const TIMEOUT_MS = 600_000 // 10 minutes
 const POLL_WAIT_MS = 50_000 // max time check_openclaw_task waits before returning
 
+export type LogEntry = { ts: number; type: string; text: string }
 export type JobStatus = 'running' | 'completed' | 'error'
 
 export type Job = {
@@ -13,6 +14,7 @@ export type Job = {
   summary?: string
   error?: string
   startedAt: number
+  logs: LogEntry[]
 }
 
 const gateway = new OpenClawGateway(
@@ -35,10 +37,12 @@ export class OpenClawAdapter {
 
     const sessionKey = input.sessionKey ?? `agent:chatgpt:${randomUUID()}`
     const jobId = randomUUID()
-    const job: Job = { jobId, sessionKey, status: 'running', startedAt: Date.now() }
+    const job: Job = { jobId, sessionKey, status: 'running', startedAt: Date.now(), logs: [] }
     jobs.set(jobId, job)
 
-    gateway.chat(sessionKey, message, TIMEOUT_MS).then(
+    gateway.chat(sessionKey, message, TIMEOUT_MS, (entry) => {
+      job.logs.push({ ts: Date.now(), ...entry })
+    }).then(
       (reply) => {
         job.status = 'completed'
         job.summary = reply

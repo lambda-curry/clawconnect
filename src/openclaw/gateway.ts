@@ -240,7 +240,12 @@ export class OpenClawGateway {
    * Send a message to a session and wait for the final response.
    * Returns the text of the assistant reply.
    */
-  async chat(sessionKey: string, message: string, timeoutMs: number): Promise<string> {
+  async chat(
+    sessionKey: string,
+    message: string,
+    timeoutMs: number,
+    onEvent?: (entry: { type: string; text: string }) => void,
+  ): Promise<string> {
     await this.connect()
 
     const idempotencyKey = randomUUID()
@@ -258,17 +263,37 @@ export class OpenClawGateway {
 
       const timer = setTimeout(() => {
         this.subscribers.delete(subId)
+        this.subscribers.delete(agentSubId)
         reject(new Error('OpenClaw task timed out'))
       }, timeoutMs)
 
-      // Also track agent stream text as ultimate fallback (fires per token, data.text is cumulative)
+      // Track agent stream events for logs + text fallback
       let agentStreamText = ''
       const agentSubId = randomUUID()
       this.subscribers.set(agentSubId, (frame) => {
         if (frame.type !== 'event' || frame.event !== 'agent') return
-        const p = frame.payload as { runId?: string; stream?: string; data?: { text?: string } }
-        if (p.runId !== runId || p.stream !== 'assistant') return
-        if (p.data?.text) agentStreamText = p.data.text
+        const p = frame.payload as { runId?: string; stream?: string; data?: Record<string, unknown> }
+        if (p.runId !== runId) return
+
+        if (p.stream === 'assistant' && p.data?.text) {
+          agentStreamText = p.data.text as string
+        }
+
+        if (onEvent) {
+          if (p.stream === 'lifecycle') {
+            const phase = p.data?.phase as string
+            onEvent({ type: 'lifecycle', text: phase === 'start' ? 'Agent started' : 'Agent finished' })
+          } else if (p.stream === 'tool' && p.data?.phase === 'start') {
+            const name = p.data?.name as string ?? 'unknown'
+            const args = p.data?.args as Record<string, unknown> ?? {}
+            const summary = args.command ?? args.file_path ?? args.pattern ?? args.query ?? ''
+            onEvent({ type: 'tool', text: `${name}: ${String(summary).slice(0, 80)}` })
+          } else if (p.stream === 'tool' && p.data?.phase === 'result') {
+            const name = p.data?.name as string ?? 'unknown'
+            const isError = p.data?.isError as boolean
+            onEvent({ type: 'tool-result', text: `${name} ${isError ? 'failed' : 'done'}` })
+          }
+        }
       })
 
       this.subscribers.set(subId, (frame) => {
