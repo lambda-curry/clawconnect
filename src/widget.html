@@ -37,23 +37,19 @@
       color: #71717a;
       margin-left: auto;
     }
-    .logs {
-      background: #09090b;
-      border: 1px solid #27272a;
-      border-radius: 8px;
-      padding: 12px;
-      margin-bottom: 12px;
-      max-height: 100px;
-      overflow-y: auto;
-      font-family: "SF Mono", "Fira Code", monospace;
+    .status-line {
       font-size: 12px;
-      color: #a1a1aa;
-      line-height: 1.5;
+      color: #71717a;
+      margin-bottom: 12px;
     }
-    .logs .entry { white-space: pre-wrap; word-break: break-word; }
-    .logs .entry.info { color: #a1a1aa; }
-    .logs .entry.done { color: #4ade80; }
-    .logs .entry.err { color: #f87171; }
+    .result-label {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: #71717a;
+      margin-bottom: 6px;
+    }
     .result {
       background: #09090b;
       border: 1px solid #27272a;
@@ -84,28 +80,22 @@
     <span id="spinnerWrap"><span class="spinner"></span></span>
     <span class="elapsed" id="elapsed"></span>
   </div>
-  <div class="logs" id="logs"></div>
+  <div class="status-line" id="statusLine">Waiting for response...</div>
+  <div class="result-label" id="resultLabel" style="display:none">Clawdy's response</div>
   <div class="result" id="result" style="display:none"></div>
 
   <script>
     var badgeEl = document.getElementById('badge');
     var spinnerEl = document.getElementById('spinnerWrap');
     var elapsedEl = document.getElementById('elapsed');
-    var logsEl = document.getElementById('logs');
+    var statusLine = document.getElementById('statusLine');
+    var resultLabel = document.getElementById('resultLabel');
     var resultEl = document.getElementById('result');
 
     var jobId = null;
     var startTime = Date.now();
     var done = false;
     var oai = window.openai || {};
-
-    function addLog(text, cls) {
-      var el = document.createElement('div');
-      el.className = 'entry ' + (cls || 'info');
-      el.textContent = text;
-      logsEl.appendChild(el);
-      logsEl.scrollTop = logsEl.scrollHeight;
-    }
 
     function setStatus(status) {
       badgeEl.className = 'badge ' + status;
@@ -116,7 +106,6 @@
       }
     }
 
-    // Extract data from either {structuredContent: {…}} or flat {jobId, status, …}
     function extractData(obj) {
       if (!obj) return null;
       if (obj.structuredContent) return obj.structuredContent;
@@ -127,31 +116,28 @@
     async function showResult(summary, status) {
       done = true;
       setStatus(status === 'error' ? 'error' : 'completed');
+      statusLine.textContent = status === 'error' ? 'Task failed.' : 'Task completed.';
       if (summary) {
+        resultLabel.style.display = 'block';
         resultEl.style.display = 'block';
         resultEl.textContent = summary;
       }
-      addLog(status === 'error' ? 'Task failed.' : 'Task completed.', status === 'error' ? 'err' : 'done');
 
       if (oai.setWidgetState) {
         oai.setWidgetState({ done: true, summary: summary, status: status });
       }
 
-      // Try multiple approaches to re-awaken the chat
       if (status !== 'error' && summary) {
         try {
           if (oai.requestTargetedReply) {
             await oai.requestTargetedReply();
-            addLog('Requested targeted reply');
           }
-        } catch(e) { addLog('targetedReply: ' + e.message); }
-
+        } catch(e) {}
         try {
           if (oai.sendFollowUpMessage) {
-            await oai.sendFollowUpMessage('Clawdy finished:\n\n' + summary.slice(0, 500));
-            addLog('Sent follow-up');
+            await oai.sendFollowUpMessage('Clawdy finished:\n\n' + summary.slice(0, 2000));
           }
-        } catch(e) { addLog('followUp: ' + e.message); }
+        } catch(e) {}
       }
     }
 
@@ -164,19 +150,18 @@
       elapsedEl.textContent = m > 0 ? m + 'm ' + sec + 's' : sec + 's';
     }, 1000);
 
-    // Poll for job result
     async function poll() {
       if (done || !jobId) return;
       try {
         var result = await oai.callTool('check_openclaw_task', { jobId: jobId });
         var data = extractData(result);
         if (!data) {
-          addLog('No data, retrying...');
           setTimeout(poll, 3000);
           return;
         }
         if (data.status === 'running') {
-          addLog('Running... (' + (data.elapsedSeconds || 0) + 's)');
+          var elapsed = data.elapsedSeconds || 0;
+          statusLine.textContent = 'Clawdy is working... (' + elapsed + 's)';
           poll();
         } else if (data.status === 'completed') {
           showResult(data.summary, 'completed');
@@ -184,7 +169,7 @@
           showResult(data.error, 'error');
         }
       } catch (err) {
-        addLog('Poll error: ' + (err.message || err), 'err');
+        statusLine.textContent = 'Poll error, retrying...';
         setTimeout(poll, 5000);
       }
     }
@@ -195,30 +180,20 @@
       if (data && data.jobId) {
         jobId = data.jobId;
         startTime = Date.now();
-        addLog('Job: ' + jobId.slice(0, 8) + '...');
+        statusLine.textContent = 'Clawdy is working...';
         setStatus('running');
         poll();
       }
     }
 
-    // Check restored state
     if (oai.widgetState && oai.widgetState.done) {
       showResult(oai.widgetState.summary, oai.widgetState.status);
     } else {
-      addLog('Waiting for response...');
-
-      // toolOutput may already be populated
       if (oai.toolOutput) {
         startFromOutput(oai.toolOutput);
       }
-
-      // Listen for the event when ChatGPT delivers the tool result
       window.addEventListener('openai:set_globals', function() {
-        try {
-          startFromOutput(window.openai.toolOutput);
-        } catch(e) {
-          addLog('ERR: ' + e.message, 'err');
-        }
+        try { startFromOutput(window.openai.toolOutput); } catch(e) {}
       });
     }
   </script>
