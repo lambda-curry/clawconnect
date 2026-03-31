@@ -37,6 +37,7 @@ const TOOLS = [
     },
     _meta: {
       ui: { resourceUri: WIDGET_URI },
+      'ui/resourceUri': WIDGET_URI,
       'openai/toolInvocation/invoking': 'Sending task to Clawdy...',
     },
   },
@@ -49,6 +50,10 @@ const TOOLS = [
         jobId: { type: 'string', description: 'The jobId returned by run_openclaw_task' },
       },
       required: ['jobId'],
+    },
+    _meta: {
+      ui: { resourceUri: WIDGET_URI, visibility: ['app'] },
+      'ui/resourceUri': WIDGET_URI,
     },
   },
 ]
