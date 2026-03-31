@@ -225,7 +225,7 @@
     async function poll() {
       if (done || !jobId) return;
       try {
-        var result = await oai.callTool('check_openclaw_task', { jobId: jobId });
+        var result = await oai.callTool('check_openclaw_task', { jobId: jobId, knownLogCount: seenLogCount });
         var data = extractData(result);
         if (!data) { setTimeout(poll, 3000); return; }
         if (data.logs) renderLogs(data.logs);

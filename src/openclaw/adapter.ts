@@ -204,12 +204,14 @@ export class OpenClawAdapter {
     return sessions.get(sessionKey)
   }
 
-  async waitForJob(jobId: string): Promise<Job | undefined> {
+  async waitForJob(jobId: string, knownLogCount = 0): Promise<Job | undefined> {
     const job = jobs.get(jobId)
     if (!job || job.status !== 'running') return job
     const deadline = Date.now() + POLL_WAIT_MS
     while (Date.now() < deadline && job.status === 'running') {
-      await new Promise(r => setTimeout(r, 1000))
+      await new Promise(r => setTimeout(r, 500))
+      // Return early if there are new log entries to show
+      if (job.logs.length > knownLogCount) return job
     }
     return job
   }

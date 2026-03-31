@@ -48,6 +48,7 @@ const TOOLS = [
       type: 'object',
       properties: {
         jobId: { type: 'string', description: 'The jobId returned by run_openclaw_task' },
+        knownLogCount: { type: 'number', description: 'Number of log entries already seen. Server returns as soon as new entries appear.' },
       },
       required: ['jobId'],
     },
@@ -163,7 +164,8 @@ const server = createServer(async (req, res) => {
         })
 
       } else if (name === 'check_openclaw_task') {
-        const job = await openclaw.waitForJob(args.jobId)
+        const knownLogCount = Number(args.knownLogCount) || 0
+        const job = await openclaw.waitForJob(args.jobId, knownLogCount)
         if (!job) {
           respond({ content: [{ type: 'text', text: `Unknown jobId: ${args.jobId}` }], isError: true })
         } else {
