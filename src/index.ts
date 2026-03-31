@@ -1,7 +1,13 @@
 import 'dotenv/config'
 import { createServer } from 'node:http'
+import { readFileSync } from 'node:fs'
+import { join, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { Hono } from 'hono'
 import { OpenClawAdapter } from './openclaw/adapter.js'
+
+const __dirname = dirname(fileURLToPath(import.meta.url))
+const WIDGET_HTML = readFileSync(join(__dirname, 'widget.html'), 'utf-8')
 
 const hono = new Hono()
 const openclaw = new OpenClawAdapter()
@@ -13,10 +19,12 @@ const CORS_HEADERS = {
   'Access-Control-Expose-Headers': 'Mcp-Session-Id',
 }
 
+const WIDGET_URI = 'ui://widget/openclaw-status.html'
+
 const TOOLS = [
   {
     name: 'run_openclaw_task',
-    description: 'Submit a task to OpenClaw. Returns a jobId immediately. Use check_openclaw_task to poll for the result. The response also includes a sessionKey — pass it back in follow-up calls to continue the same conversation.',
+    description: 'Submit a task to OpenClaw. Returns a jobId immediately — the widget will show live progress. Pass sessionKey from a previous result to continue the same conversation.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -27,10 +35,14 @@ const TOOLS = [
       },
       required: ['task'],
     },
+    _meta: {
+      ui: { resourceUri: WIDGET_URI },
+      'openai/toolInvocation/invoking': 'Sending task to Clawdy...',
+    },
   },
   {
     name: 'check_openclaw_task',
-    description: 'Check the status of a previously submitted task. Returns the result if complete, or current status if still running. You MUST poll this after calling run_openclaw_task until status is "completed" or "error".',
+    description: 'Check the status of a previously submitted task. Waits up to 50 seconds for completion before returning. Poll until status is "completed" or "error".',
     inputSchema: {
       type: 'object',
       properties: {
@@ -86,7 +98,7 @@ const server = createServer(async (req, res) => {
     if (msg.method === 'initialize') {
       respond({
         protocolVersion: '2024-11-05',
-        capabilities: { tools: {} },
+        capabilities: { tools: {}, resources: {} },
         serverInfo: { name: 'openclaw-app', version: '0.0.1' },
       })
     } else if (isNotification) {
@@ -94,6 +106,29 @@ const server = createServer(async (req, res) => {
       res.end()
     } else if (msg.method === 'tools/list') {
       respond({ tools: TOOLS })
+
+    } else if (msg.method === 'resources/list') {
+      respond({
+        resources: [{
+          uri: WIDGET_URI,
+          name: 'OpenClaw Status Widget',
+          mimeType: 'text/html;profile=mcp-app',
+        }],
+      })
+    } else if (msg.method === 'resources/read') {
+      const uri = (msg.params as { uri?: string })?.uri
+      if (uri === WIDGET_URI) {
+        respond({
+          contents: [{
+            uri: WIDGET_URI,
+            mimeType: 'text/html;profile=mcp-app',
+            text: WIDGET_HTML,
+          }],
+        })
+      } else {
+        respondError(-32602, `Unknown resource: ${uri}`)
+      }
+
     } else if (msg.method === 'tools/call') {
       const { name, arguments: args } = msg.params as { name: string; arguments: Record<string, string> }
 
@@ -106,20 +141,18 @@ const server = createServer(async (req, res) => {
         })
         console.log(`[mcp] submitted job ${job.jobId} on session ${job.sessionKey}`)
         respond({
-          content: [{ type: 'text', text: `Task submitted. Poll with check_openclaw_task using jobId: ${job.jobId}` }],
+          content: [{ type: 'text', text: `Task submitted. Job ID: ${job.jobId}` }],
           structuredContent: { jobId: job.jobId, sessionKey: job.sessionKey, status: 'running' },
         })
+
       } else if (name === 'check_openclaw_task') {
-        const job = openclaw.getJob(args.jobId)
+        const job = await openclaw.waitForJob(args.jobId)
         if (!job) {
-          respond({
-            content: [{ type: 'text', text: `Unknown jobId: ${args.jobId}` }],
-            isError: true,
-          })
+          respond({ content: [{ type: 'text', text: `Unknown jobId: ${args.jobId}` }], isError: true })
         } else if (job.status === 'running') {
           const elapsed = Math.round((Date.now() - job.startedAt) / 1000)
           respond({
-            content: [{ type: 'text', text: `Still running (${elapsed}s elapsed). Poll again shortly.` }],
+            content: [{ type: 'text', text: `Still running (${elapsed}s elapsed). Poll again.` }],
             structuredContent: { jobId: job.jobId, sessionKey: job.sessionKey, status: 'running', elapsedSeconds: elapsed },
           })
         } else if (job.status === 'completed') {
@@ -134,6 +167,7 @@ const server = createServer(async (req, res) => {
             isError: true,
           })
         }
+
       } else {
         respondError(-32601, `Unknown tool: ${name}`)
       }
@@ -141,7 +175,7 @@ const server = createServer(async (req, res) => {
       respondError(-32601, `Method not found: ${msg.method}`)
     }
 
-    console.log(`[mcp] → ${res.statusCode}`)
+    console.log(`[mcp] -> ${res.statusCode}`)
     return
   }
 

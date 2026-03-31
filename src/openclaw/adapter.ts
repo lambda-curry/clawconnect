@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { OpenClawGateway } from './gateway.js'
 
 const TIMEOUT_MS = 600_000 // 10 minutes
+const POLL_WAIT_MS = 50_000 // max time check_openclaw_task waits before returning
 
 export type JobStatus = 'running' | 'completed' | 'error'
 
@@ -37,7 +38,6 @@ export class OpenClawAdapter {
     const job: Job = { jobId, sessionKey, status: 'running', startedAt: Date.now() }
     jobs.set(jobId, job)
 
-    // Fire and forget — runs in background
     gateway.chat(sessionKey, message, TIMEOUT_MS).then(
       (reply) => {
         job.status = 'completed'
@@ -56,5 +56,17 @@ export class OpenClawAdapter {
 
   getJob(jobId: string): Job | undefined {
     return jobs.get(jobId)
+  }
+
+  /** Server-side long poll: waits up to POLL_WAIT_MS for the job to finish. */
+  async waitForJob(jobId: string): Promise<Job | undefined> {
+    const job = jobs.get(jobId)
+    if (!job || job.status !== 'running') return job
+
+    const deadline = Date.now() + POLL_WAIT_MS
+    while (Date.now() < deadline && job.status === 'running') {
+      await new Promise(r => setTimeout(r, 1000))
+    }
+    return job
   }
 }

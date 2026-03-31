@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OpenClaw Task</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-size: 14px;
+      color: #e4e4e7;
+      background: #18181b;
+      padding: 16px;
+    }
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+    .badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 9999px;
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .badge.running { background: #422006; color: #fbbf24; }
+    .badge.completed { background: #052e16; color: #4ade80; }
+    .badge.error { background: #450a0a; color: #f87171; }
+    .badge.queued { background: #1e1b4b; color: #a78bfa; }
+    .elapsed {
+      font-size: 12px;
+      color: #71717a;
+      margin-left: auto;
+    }
+    .logs {
+      background: #09090b;
+      border: 1px solid #27272a;
+      border-radius: 8px;
+      padding: 12px;
+      margin-bottom: 12px;
+      max-height: 120px;
+      overflow-y: auto;
+      font-family: "SF Mono", "Fira Code", monospace;
+      font-size: 12px;
+      color: #a1a1aa;
+      line-height: 1.5;
+    }
+    .logs .entry { white-space: pre-wrap; word-break: break-word; }
+    .logs .entry.info { color: #a1a1aa; }
+    .logs .entry.tool { color: #60a5fa; }
+    .logs .entry.done { color: #4ade80; }
+    .logs .entry.err { color: #f87171; }
+    .result {
+      background: #09090b;
+      border: 1px solid #27272a;
+      border-radius: 8px;
+      padding: 12px;
+      max-height: 300px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-size: 13px;
+      line-height: 1.6;
+    }
+    .spinner {
+      display: inline-block;
+      width: 12px;
+      height: 12px;
+      border: 2px solid #fbbf2440;
+      border-top-color: #fbbf24;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <span class="badge queued" id="badge">queued</span>
+    <span id="spinnerWrap"><span class="spinner"></span></span>
+    <span class="elapsed" id="elapsed"></span>
+  </div>
+  <div class="logs" id="logs"></div>
+  <div class="result" id="result" style="display:none"></div>
+
+  <script>
+    const badgeEl = document.getElementById('badge');
+    const spinnerEl = document.getElementById('spinnerWrap');
+    const elapsedEl = document.getElementById('elapsed');
+    const logsEl = document.getElementById('logs');
+    const resultEl = document.getElementById('result');
+
+    let jobId = null;
+    let sessionKey = null;
+    let startTime = Date.now();
+    let polling = false;
+    let done = false;
+
+    // Restore from saved state
+    const saved = window.openai?.widgetState;
+    if (saved?.done) {
+      showComplete(saved.summary, saved.status);
+    }
+
+    // Update elapsed timer
+    setInterval(() => {
+      if (done) return;
+      const s = Math.round((Date.now() - startTime) / 1000);
+      const m = Math.floor(s / 60);
+      const sec = s % 60;
+      elapsedEl.textContent = m > 0 ? `${m}m ${sec}s` : `${sec}s`;
+    }, 1000);
+
+    function addLog(text, cls = 'info') {
+      const el = document.createElement('div');
+      el.className = 'entry ' + cls;
+      el.textContent = text;
+      logsEl.appendChild(el);
+      logsEl.scrollTop = logsEl.scrollHeight;
+    }
+
+    function setStatus(status) {
+      badgeEl.className = 'badge ' + status;
+      badgeEl.textContent = status;
+      if (status === 'completed' || status === 'error') {
+        spinnerEl.style.display = 'none';
+      }
+    }
+
+    function showComplete(summary, status) {
+      done = true;
+      setStatus(status === 'error' ? 'error' : 'completed');
+      if (summary) {
+        resultEl.style.display = 'block';
+        resultEl.textContent = summary;
+      }
+      addLog(status === 'error' ? 'Task failed.' : 'Task completed.', status === 'error' ? 'err' : 'done');
+    }
+
+    function poll() {
+      if (done || !jobId) return;
+      window.parent.postMessage({
+        jsonrpc: '2.0',
+        method: 'tools/call',
+        params: { toolName: 'check_openclaw_task', input: { jobId } }
+      }, '*');
+    }
+
+    // Listen for messages from ChatGPT
+    window.addEventListener('message', (event) => {
+      if (event.source !== window.parent) return;
+      const msg = event.data;
+      if (!msg || msg.jsonrpc !== '2.0') return;
+      if (msg.method !== 'ui/notifications/tool-result') return;
+
+      const data = msg.params?.structuredContent;
+      if (!data) return;
+
+      // Initial submit response — has jobId
+      if (data.jobId && !jobId) {
+        jobId = data.jobId;
+        sessionKey = data.sessionKey;
+        startTime = Date.now();
+        addLog('Task submitted: ' + jobId.slice(0, 8) + '...');
+        setStatus('running');
+        // Start server-side long poll
+        poll();
+        return;
+      }
+
+      // Poll result
+      if (data.status === 'running') {
+        const elapsed = data.elapsedSeconds || 0;
+        addLog(`Still running... (${elapsed}s)`);
+        // Server-side long poll returned without completion — poll again
+        poll();
+      } else if (data.status === 'completed') {
+        showComplete(data.summary, 'completed');
+        if (window.openai?.setWidgetState) {
+          window.openai.setWidgetState({ done: true, summary: data.summary, status: 'completed' });
+        }
+      } else if (data.status === 'error') {
+        showComplete(data.error, 'error');
+        if (window.openai?.setWidgetState) {
+          window.openai.setWidgetState({ done: true, summary: data.error, status: 'error' });
+        }
+      }
+    }, { passive: true });
+  </script>
+</body>
+</html>
