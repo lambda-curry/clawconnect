@@ -251,6 +251,10 @@ export class OpenClawGateway {
 
     return new Promise<string>((resolve, reject) => {
       const subId = randomUUID()
+      let accumulated = ''
+
+      const extractText = (blocks: Array<{ type: string; text?: string; thinking?: string }>) =>
+        blocks.filter(b => b.type === 'text').map(b => b.text ?? '').join('')
 
       const timer = setTimeout(() => {
         this.subscribers.delete(subId)
@@ -262,21 +266,17 @@ export class OpenClawGateway {
         const payload = frame.payload as ChatEventPayload
         if (payload.runId !== runId) return
 
-        if (payload.state === 'final') {
+        if (payload.state === 'delta') {
+          const text = extractText(payload.message?.content ?? [])
+          if (text) accumulated += text
+        } else if (payload.state === 'final') {
           clearTimeout(timer)
           this.subscribers.delete(subId)
           const blocks = payload.message?.content ?? []
-          console.log('[openclaw-gateway] final content blocks:', JSON.stringify(blocks.map(b => ({ type: b.type, len: (b.text ?? b.thinking ?? '').length }))))
-          const text = blocks
-            .filter(b => b.type === 'text')
-            .map(b => b.text ?? '')
-            .join('')
-          // fall back to thinking content if no text blocks
-          const result = text || blocks
-            .filter(b => b.type === 'thinking')
-            .map(b => b.thinking ?? '')
-            .join('')
-          resolve(result)
+          console.log('[openclaw-gateway] final blocks:', JSON.stringify(blocks.map(b => ({ type: b.type, len: (b.text ?? b.thinking ?? '').length }))))
+          // prefer the full final message text; fall back to accumulated deltas
+          const finalText = extractText(blocks)
+          resolve(finalText || accumulated)
         } else if (payload.state === 'aborted') {
           clearTimeout(timer)
           this.subscribers.delete(subId)
