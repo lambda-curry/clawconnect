@@ -170,32 +170,43 @@
       }
     }
 
-    // Initialize from toolOutput
-    function init() {
-      // Restored state
+    // Wait for toolOutput to be populated (widget loads before server responds)
+    function waitForToolOutput() {
       if (oai.widgetState && oai.widgetState.done) {
         showResult(oai.widgetState.summary, oai.widgetState.status);
         return;
       }
 
-      // Read tool output
-      var output = oai.toolOutput;
-      addLog('toolOutput: ' + JSON.stringify(output).slice(0, 150));
+      var attempts = 0;
+      var check = setInterval(function() {
+        attempts++;
+        var output = oai.toolOutput;
+        if (output) {
+          clearInterval(check);
+          addLog('toolOutput received');
+          var data = output.structuredContent;
+          if (data && data.jobId) {
+            jobId = data.jobId;
+            startTime = Date.now();
+            addLog('Job: ' + jobId.slice(0, 8) + '...');
+            setStatus('running');
+            poll();
+          } else {
+            addLog('No jobId in toolOutput: ' + JSON.stringify(output).slice(0, 100));
+          }
+          return;
+        }
+        if (attempts > 120) { // 60 seconds
+          clearInterval(check);
+          addLog('Timed out waiting for tool response', 'err');
+          setStatus('error');
+        }
+      }, 500);
 
-      var data = output && output.structuredContent;
-      if (data && data.jobId) {
-        jobId = data.jobId;
-        startTime = Date.now();
-        addLog('Job: ' + jobId.slice(0, 8) + '...');
-        setStatus('running');
-        poll();
-        return;
-      }
-
-      addLog('No jobId in toolOutput, waiting...');
+      addLog('Waiting for response...');
     }
 
-    init();
+    waitForToolOutput();
   </script>
 </body>
 </html>
