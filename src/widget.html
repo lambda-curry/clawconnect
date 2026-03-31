@@ -169,13 +169,19 @@
 
     function startFromOutput(output) {
       if (done || jobId) return;
-      var data = output && output.structuredContent;
-      if (data && data.jobId) {
-        jobId = data.jobId;
+      addLog('toolOutput: ' + JSON.stringify(output).slice(0, 200));
+
+      // Try structuredContent first, then top-level, then _meta
+      var data = (output && output.structuredContent) || output || {};
+      var id = data.jobId || (output && output._meta && output._meta.jobId);
+      if (id) {
+        jobId = id;
         startTime = Date.now();
         addLog('Job: ' + jobId.slice(0, 8) + '...');
         setStatus('running');
         poll();
+      } else {
+        addLog('No jobId found in output');
       }
     }
 
