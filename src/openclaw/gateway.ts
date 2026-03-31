@@ -261,6 +261,16 @@ export class OpenClawGateway {
         reject(new Error('OpenClaw task timed out'))
       }, timeoutMs)
 
+      // Also track agent stream text as ultimate fallback (fires per token, data.text is cumulative)
+      let agentStreamText = ''
+      const agentSubId = randomUUID()
+      this.subscribers.set(agentSubId, (frame) => {
+        if (frame.type !== 'event' || frame.event !== 'agent') return
+        const p = frame.payload as { runId?: string; stream?: string; data?: { text?: string } }
+        if (p.runId !== runId || p.stream !== 'assistant') return
+        if (p.data?.text) agentStreamText = p.data.text
+      })
+
       this.subscribers.set(subId, (frame) => {
         if (frame.type !== 'event' || frame.event !== 'chat') return
         const payload = frame.payload as ChatEventPayload
@@ -272,18 +282,21 @@ export class OpenClawGateway {
         } else if (payload.state === 'final') {
           clearTimeout(timer)
           this.subscribers.delete(subId)
+          this.subscribers.delete(agentSubId)
           const blocks = payload.message?.content ?? []
           console.log('[openclaw-gateway] final blocks:', JSON.stringify(blocks.map(b => ({ type: b.type, len: (b.text ?? b.thinking ?? '').length }))))
-          // prefer the full final message text; fall back to accumulated deltas
+          // prefer full final message text → last chat delta → agent stream text
           const finalText = extractText(blocks)
-          resolve(finalText || accumulated)
+          resolve(finalText || accumulated || agentStreamText)
         } else if (payload.state === 'aborted') {
           clearTimeout(timer)
           this.subscribers.delete(subId)
+          this.subscribers.delete(agentSubId)
           reject(new Error('OpenClaw task aborted'))
         } else if (payload.state === 'error') {
           clearTimeout(timer)
           this.subscribers.delete(subId)
+          this.subscribers.delete(agentSubId)
           reject(new Error(payload.errorMessage ?? 'OpenClaw task error'))
         }
       })
