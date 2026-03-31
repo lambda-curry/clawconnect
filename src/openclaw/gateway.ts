@@ -285,9 +285,9 @@ export class OpenClawGateway {
           this.subscribers.delete(agentSubId)
           const blocks = payload.message?.content ?? []
           console.log('[openclaw-gateway] final blocks:', JSON.stringify(blocks.map(b => ({ type: b.type, len: (b.text ?? b.thinking ?? '').length }))))
-          // prefer full final message text → last chat delta → agent stream text
+          // prefer full final message text → last chat delta → agent stream text → generic completion
           const finalText = extractText(blocks)
-          resolve(finalText || accumulated || agentStreamText)
+          resolve(finalText || accumulated || agentStreamText || 'Stream finished with no response collected.')
         } else if (payload.state === 'aborted') {
           clearTimeout(timer)
           this.subscribers.delete(subId)
