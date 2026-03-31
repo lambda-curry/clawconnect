@@ -62,8 +62,11 @@ hono.get('/health', (c) => c.json({ ok: true }))
 const server = createServer(async (req, res) => {
   if (req.url?.startsWith('/mcp')) {
     const sessionId = req.headers['mcp-session-id'] as string | undefined
+    const sessionFound = !!(sessionId && sessions.get(sessionId))
     const session = (sessionId && sessions.get(sessionId)) ?? createSession()
+    console.log(`[mcp] ${req.method} session=${sessionId ?? 'none'} found=${sessionFound} → ${session.openClawSessionKey}`)
     await session.transport.handleRequest(req, res)
+    console.log(`[mcp] response status=${res.statusCode}`)
     return
   }
 
