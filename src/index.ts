@@ -4,14 +4,7 @@ import { readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Hono } from 'hono'
-import {
-  OpenClawAdapter,
-  type Artifacts,
-  type ContinuationState,
-  type ErrorInfo,
-  type Job,
-  type JobStatus,
-} from './openclaw/adapter.js'
+import { OpenClawAdapter } from './openclaw/adapter.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const WIDGET_HTML = readFileSync(join(__dirname, 'widget.html'), 'utf-8')
@@ -27,100 +20,6 @@ const CORS_HEADERS = {
 }
 
 const WIDGET_URI = 'ui://widget/openclaw-status.html'
-
-type WidgetState = 'queued' | 'running' | 'waiting' | 'completed' | 'error'
-
-type WidgetStatus = {
-  version: 1
-  state: WidgetState
-  reason?: string
-}
-
-type WidgetDetails = {
-  filesChangedCount: number
-  filesChanged: string[]
-  branchName?: string
-  commitSha?: string
-  prUrl?: string
-  needsHumanDecision: boolean
-  recommendedNextStep?: string
-}
-
-function deriveRecommendedNextStep(
-  status: JobStatus,
-  artifacts: Artifacts,
-  continuation?: ContinuationState,
-  errorInfo?: ErrorInfo,
-): string | undefined {
-  if (continuation?.recommendedNextStep) return continuation.recommendedNextStep
-  if (status === 'error') {
-    return errorInfo?.category === 'timeout'
-      ? 'Resume or retry with a smaller scoped follow-up.'
-      : 'Fix the issue and retry.'
-  }
-  if (artifacts.needsHumanDecision) return 'Answer the pending question to continue.'
-  if (artifacts.prUrl) return 'Review or merge the PR.'
-  if (artifacts.filesChanged.length > 0) return 'Review the changes, summarize them, or create a PR.'
-  return undefined
-}
-
-function buildWidgetStatus(
-  status: JobStatus,
-  artifacts: Artifacts,
-  errorInfo?: ErrorInfo,
-): WidgetStatus {
-  if (status === 'error') {
-    return {
-      version: 1,
-      state: 'error',
-      reason: errorInfo?.category === 'timeout' ? 'timeout' : errorInfo?.category ?? 'error',
-    }
-  }
-
-  if (status === 'completed' && artifacts.needsHumanDecision) {
-    return { version: 1, state: 'waiting', reason: 'needs-human-decision' }
-  }
-
-  if (status === 'completed') {
-    return { version: 1, state: 'completed' }
-  }
-
-  return { version: 1, state: 'running' }
-}
-
-function buildWidgetDetails(
-  status: JobStatus,
-  artifacts: Artifacts,
-  continuation?: ContinuationState,
-  errorInfo?: ErrorInfo,
-): WidgetDetails {
-  return {
-    filesChangedCount: artifacts.filesChanged.length,
-    filesChanged: artifacts.filesChanged,
-    branchName: artifacts.branchName,
-    commitSha: artifacts.commitSha,
-    prUrl: artifacts.prUrl,
-    needsHumanDecision: artifacts.needsHumanDecision,
-    recommendedNextStep: deriveRecommendedNextStep(status, artifacts, continuation, errorInfo),
-  }
-}
-
-function buildJobPayload(job: Job, continuation?: ContinuationState) {
-  return {
-    jobId: job.jobId,
-    sessionKey: job.sessionKey,
-    status: job.status,
-    widgetStatus: buildWidgetStatus(job.status, job.artifacts, job.errorInfo),
-    details: buildWidgetDetails(job.status, job.artifacts, continuation, job.errorInfo),
-    summary: job.summary,
-    error: job.error,
-    errorInfo: job.errorInfo,
-    artifacts: job.artifacts,
-    logs: job.logs,
-    startedAt: job.startedAt,
-    ...(continuation ? { continuationState: continuation } : {}),
-  }
-}
 
 const TOOLS = [
   {
@@ -245,7 +144,6 @@ const server = createServer(async (req, res) => {
       const { name, arguments: args } = msg.params as { name: string; arguments: Record<string, string> }
 
       if (name === 'run_openclaw_task') {
-        const priorState = args.sessionKey ? openclaw.getSessionState(args.sessionKey) : undefined
         const job = openclaw.submitTask({
           task: args.task,
           context: args.context,
@@ -265,22 +163,16 @@ const server = createServer(async (req, res) => {
         const requestedSessionKey = typeof args.sessionKey === 'string' ? args.sessionKey : undefined
         const job = await openclaw.waitForJob(requestedJobId, knownLogCount, requestedSessionKey)
         if (!job) {
+          const notFoundMsg = requestedSessionKey
+            ? 'Task state not found for that session. The server may have restarted.'
+            : 'Job not found. The server may have restarted.'
           respond({
-            content: [{ type: 'text', text: requestedSessionKey ? `Unknown task state for session ${requestedSessionKey}` : `Unknown jobId: ${requestedJobId}` }],
+            content: [{ type: 'text', text: notFoundMsg }],
             structuredContent: {
               jobId: requestedJobId,
               sessionKey: requestedSessionKey,
               status: 'error',
-              widgetStatus: { version: 1, state: 'error', reason: 'not-found' },
-              details: {
-                filesChangedCount: 0,
-                filesChanged: [],
-                needsHumanDecision: false,
-                recommendedNextStep: 'Resubmit the task to start a new run.',
-              },
-              error: requestedSessionKey
-                ? 'Task state not found for that session. The server may have restarted or forgotten the run.'
-                : 'Job not found. The server may have restarted.',
+              error: notFoundMsg,
             },
             isError: true,
           })
