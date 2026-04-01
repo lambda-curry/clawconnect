@@ -682,16 +682,10 @@
 
     function onTerminal() {
       persistState();
-      // EXPERIMENT: Auto-wake ChatGPT when the task finishes.
-      // sendFollowUpMessage logs a "called without synchronous user event" warning
-      // but may still work. If ChatGPT silently ignores it, we fall back to the
-      // action buttons which do have a user gesture. Remove this if it causes
-      // issues or if ChatGPT starts blocking non-gesture calls.
-      var api = window.openai || {};
-      if (api.sendFollowUpMessage) {
-        var directive = buildDirective(state);
-        api.sendFollowUpMessage({ prompt: directive });
-      }
+      // sendFollowUpMessage requires a synchronous user gesture (click/tap).
+      // There is no documented way to programmatically wake ChatGPT from a
+      // widget without user interaction. The action buttons handle follow-ups.
+      // See: https://community.openai.com/t/support-for-asynchronous-replies-with-apps-sdk/1363373
     }
 
     // ── Data extraction ──────────────────────────────────
