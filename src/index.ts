@@ -259,9 +259,12 @@ const server = createServer(async (req, res) => {
           structuredContent: {
             jobId: job.jobId,
             sessionKey: job.sessionKey,
+            startedAt: job.startedAt,
             status: 'running',
             widgetStatus: { version: 1, state: 'running', reason: 'submitted' },
             details: buildWidgetDetails('running', job.artifacts, priorState),
+            artifacts: job.artifacts,
+            logs: job.logs,
             ...(priorState ? { continuationState: priorState } : {}),
           },
         })
