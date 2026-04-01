@@ -374,6 +374,8 @@
       // Collapse repeated reads of different files into just the latest
       if (prev.type === 'tool' && curr.type === 'tool' &&
           prev.text.indexOf('Reading files') === 0 && curr.text.indexOf('Reading files') === 0) return true;
+      // Collapse heartbeat updates (replace with latest timing)
+      if (prev.type === 'heartbeat' && curr.type === 'heartbeat') return true;
       return false;
     }
 
@@ -460,8 +462,11 @@
 
     function updateMeta() {
       elapsedEl.textContent = fmtElapsed();
-      if (state.lastEventAt && !isTerminal(state.status)) {
-        lastEvtEl.textContent = 'last event ' + fmtAgo(state.lastEventAt);
+      if (!isTerminal(state.status) && state.serverStatus === 'running') {
+        var parts = [];
+        if (state.lastEventAt) parts.push('event ' + fmtAgo(state.lastEventAt));
+        if (state.lastPollAt) parts.push('poll ' + fmtAgo(state.lastPollAt));
+        lastEvtEl.textContent = parts.join(' \u00B7 ');
       } else {
         lastEvtEl.textContent = '';
       }
@@ -669,11 +674,29 @@
       return null;
     }
 
-    // ── Tick (updates elapsed + derived status) ──────────
+    // ── Tick (updates elapsed + derived status + heartbeat) ──
+    var lastHeartbeatStatus = null;
+
     function tick() {
       if (isTerminal(state.status)) return;
+      var prev = state.status;
       updateStatus();
       updateMeta();
+
+      // Inject heartbeat entries when crossing quiet/stalled thresholds
+      var cur = state.status;
+      if (cur !== lastHeartbeatStatus && (cur === 'quiet' || cur === 'stalled')) {
+        var sinceLast = state.lastEventAt ? Math.round((Date.now() - state.lastEventAt) / 1000) : 0;
+        var hbText = cur === 'stalled'
+          ? 'No fresh events for ' + sinceLast + 's \u2014 task may be working on something complex'
+          : 'No fresh events for ' + sinceLast + 's \u2014 polling healthy';
+        var hbEntry = { ts: Date.now(), type: 'heartbeat', text: hbText };
+        state.logs.push(hbEntry);
+        renderIncrementalLogs([hbEntry]);
+        lastHeartbeatStatus = cur;
+      } else if (cur === 'active') {
+        lastHeartbeatStatus = null;
+      }
     }
 
     // ── Init: start from tool output ─────────────────────
