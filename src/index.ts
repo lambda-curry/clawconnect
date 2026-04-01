@@ -24,14 +24,13 @@ const WIDGET_URI = 'ui://widget/openclaw-status.html'
 const TOOLS = [
   {
     name: 'run_openclaw_task',
-    description: 'Submit a task to OpenClaw. Returns quickly with a jobId and sessionKey so the widget can poll check_openclaw_task for live progress. Pass sessionKey from a previous result to continue the same conversation.',
+    description: 'Submit a task to OpenClaw. New tasks start in a fresh Clawdy thread session on the configured agent. Returns quickly with a jobId and sessionKey so the widget can poll check_openclaw_task for live progress. Pass sessionKey from a previous result to continue the same thread.',
     inputSchema: {
       type: 'object',
       properties: {
         task: { type: 'string', description: 'The task to perform' },
         context: { type: 'string', description: 'Optional context for the task' },
-        workspace: { type: 'string' },
-        sessionKey: { type: 'string', description: 'Session key from a previous call to continue the same conversation. Omit to start fresh.' },
+        sessionKey: { type: 'string', description: 'Session key from a previous call to continue the same Clawdy thread. Omit to start a new thread.' },
       },
       required: ['task'],
     },
@@ -147,7 +146,6 @@ const server = createServer(async (req, res) => {
         const job = openclaw.submitTask({
           task: args.task,
           context: args.context,
-          workspace: args.workspace,
           sessionKey: args.sessionKey,
         })
         console.log(`[mcp] submitted job ${job.jobId} on session ${job.sessionKey}`)

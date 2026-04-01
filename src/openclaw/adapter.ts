@@ -30,7 +30,6 @@ export type ErrorInfo = {
 export type ContinuationState = {
   sessionKey: string
   lastJobId: string
-  workspace?: string
   lastSummary: string
   artifacts: Artifacts
   recommendedNextStep?: string
@@ -178,6 +177,20 @@ function classifyError(message: string): ErrorInfo {
 // ── Session continuation ─────────────────────────────────────────────────────
 
 const sessions = new Map<string, ContinuationState>()
+const DEFAULT_AGENT_ID = process.env.OPENCLAW_AGENT_ID?.trim() || 'main'
+const LEGACY_CHATGPT_SESSION_PREFIX = 'agent:chatgpt:'
+
+function createThreadSessionKey(agentId = DEFAULT_AGENT_ID): string {
+  return `agent:${agentId}:main:thread:mcp-${Date.now()}-${randomUUID().slice(0, 8)}`
+}
+
+function resolveSessionKey(input?: string): { sessionKey: string; migratedFromLegacy: boolean } {
+  if (!input) return { sessionKey: createThreadSessionKey(), migratedFromLegacy: false }
+  if (input.startsWith(LEGACY_CHATGPT_SESSION_PREFIX)) {
+    return { sessionKey: createThreadSessionKey(), migratedFromLegacy: true }
+  }
+  return { sessionKey: input, migratedFromLegacy: false }
+}
 
 function deriveNextStep(artifacts: Artifacts, status: JobStatus): string | undefined {
   if (status === 'error') return 'Fix the issue and retry.'
@@ -202,24 +215,30 @@ export class OpenClawAdapter {
   submitTask(input: {
     task: string
     context?: string
-    workspace?: string
     sessionKey?: string
   }): Job {
     const message = input.context
       ? `${input.context}\n\n${input.task}`
       : input.task
 
-    const sessionKey = input.sessionKey ?? `agent:chatgpt:${randomUUID()}`
+    const { sessionKey, migratedFromLegacy } = resolveSessionKey(input.sessionKey)
     const jobId = randomUUID()
     const artifacts = emptyArtifacts()
     const now = Date.now()
-    const job: Job = { jobId, sessionKey, status: 'running', startedAt: now, lastEventAt: now, logs: [], artifacts }
+    const logs: LogEntry[] = []
+
+    if (!input.sessionKey) {
+      logs.push({ ts: now, type: 'lifecycle', text: `Started new Clawdy thread session: ${sessionKey}` })
+    } else if (migratedFromLegacy) {
+      logs.push({ ts: now, type: 'lifecycle', text: `Migrated legacy ChatGPT session to new Clawdy thread: ${sessionKey}` })
+    }
+
+    const job: Job = { jobId, sessionKey, status: 'running', startedAt: now, lastEventAt: now, logs, artifacts }
     jobs.set(jobId, job)
     latestJobBySession.set(sessionKey, jobId)
     sessions.set(sessionKey, {
       sessionKey,
       lastJobId: jobId,
-      workspace: input.workspace,
       lastSummary: '',
       artifacts,
     })
@@ -240,7 +259,6 @@ export class OpenClawAdapter {
         sessions.set(sessionKey, {
           sessionKey,
           lastJobId: jobId,
-          workspace: input.workspace,
           lastSummary: reply.slice(0, 500),
           artifacts,
           recommendedNextStep: deriveNextStep(artifacts, job.status),
@@ -255,7 +273,6 @@ export class OpenClawAdapter {
         sessions.set(sessionKey, {
           sessionKey,
           lastJobId: jobId,
-          workspace: input.workspace,
           lastSummary: job.error,
           artifacts,
           recommendedNextStep: deriveNextStep(artifacts, 'error'),
