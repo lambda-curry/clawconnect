@@ -622,7 +622,7 @@
           } catch(e) { console.error('[widget] requestTargetedReply error:', e); }
           try {
             if (api.sendFollowUpMessage) {
-              var r2 = await api.sendFollowUpMessage(b.msg);
+              var r2 = await api.sendFollowUpMessage({ prompt: b.msg });
               console.log('[widget] sendFollowUpMessage result:', r2);
             } else {
               console.warn('[widget] sendFollowUpMessage not available');
@@ -700,7 +700,7 @@
       // Wake ChatGPT with a directive
       var directive = buildDirective(state);
       try { if (oai.requestTargetedReply) await oai.requestTargetedReply(); } catch(e) {}
-      try { if (oai.sendFollowUpMessage) await oai.sendFollowUpMessage(directive); } catch(e) {}
+      try { if (oai.sendFollowUpMessage) await oai.sendFollowUpMessage({ prompt: directive }); } catch(e) {}
     }
 
     // ── Data extraction ──────────────────────────────────
