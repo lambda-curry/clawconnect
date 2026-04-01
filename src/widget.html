@@ -6,230 +6,578 @@
   <title>OpenClaw Task</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; overflow: hidden; }
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       font-size: 14px;
       color: #e4e4e7;
-      background: #18181b;
-      padding: 16px;
+      background: transparent;
+      display: flex;
+      flex-direction: column;
     }
+    .widget {
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      flex: 1;
+      padding: 12px 14px;
+    }
+
+    /* ── Header ─────────────────────────────────────────── */
     .header {
       display: flex;
       align-items: center;
       gap: 8px;
-      margin-bottom: 12px;
+      margin-bottom: 8px;
+      flex-shrink: 0;
     }
     .badge {
       display: inline-block;
       padding: 2px 8px;
       border-radius: 9999px;
-      font-size: 12px;
+      font-size: 11px;
       font-weight: 600;
       text-transform: uppercase;
       letter-spacing: 0.05em;
     }
-    .badge.running { background: #422006; color: #fbbf24; }
-    .badge.completed { background: #052e16; color: #4ade80; }
-    .badge.error { background: #450a0a; color: #f87171; }
-    .badge.queued { background: #1e1b4b; color: #a78bfa; }
-    .elapsed { font-size: 12px; color: #71717a; margin-left: auto; }
+    .badge.starting     { background: #1e1b4b; color: #a78bfa; }
+    .badge.active       { background: #422006; color: #fbbf24; }
+    .badge.quiet        { background: #1c1917; color: #a8a29e; }
+    .badge.stalled      { background: #451a03; color: #fb923c; }
+    .badge.waiting_on_user { background: #1e1b4b; color: #c4b5fd; }
+    .badge.completed    { background: #052e16; color: #4ade80; }
+    .badge.completed_no_summary { background: #14532d; color: #86efac; }
+    .badge.failed       { background: #450a0a; color: #f87171; }
+    .badge.reconnecting { background: #1e1b4b; color: #a78bfa; }
+    .badge.service_unavailable { background: #27272a; color: #71717a; }
+    .meta {
+      font-size: 11px; color: #52525b; margin-left: auto;
+      display: flex; gap: 10px; align-items: center;
+    }
+    .meta span { white-space: nowrap; }
+    .spinner {
+      display: inline-block; width: 10px; height: 10px;
+      border: 1.5px solid #fbbf2440; border-top-color: #fbbf24;
+      border-radius: 50%; animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── Identity row ───────────────────────────────────── */
+    .identity {
+      display: flex; gap: 12px; font-size: 10px; color: #3f3f46;
+      margin-bottom: 8px; flex-shrink: 0;
+      font-family: "SF Mono", "Fira Code", monospace;
+    }
+    .identity .label { color: #52525b; }
+
+    /* ── Activity / Logs ────────────────────────────────── */
     .section-label {
-      font-size: 11px; font-weight: 600; text-transform: uppercase;
-      letter-spacing: 0.05em; color: #71717a; margin-bottom: 6px;
+      font-size: 10px; font-weight: 600; text-transform: uppercase;
+      letter-spacing: 0.06em; color: #52525b; margin-bottom: 4px;
+      flex-shrink: 0;
     }
     .logs {
-      background: #09090b; border: 1px solid #27272a; border-radius: 8px;
-      padding: 10px 12px; margin-bottom: 12px; max-height: 140px; overflow-y: auto;
-      font-family: "SF Mono", "Fira Code", monospace; font-size: 11px;
-      color: #a1a1aa; line-height: 1.6;
+      background: #09090b80; border: 1px solid #27272a40; border-radius: 6px;
+      padding: 8px 10px; margin-bottom: 8px;
+      min-height: 48px; max-height: 120px; overflow-y: auto;
+      font-family: "SF Mono", "Fira Code", monospace; font-size: 10px;
+      color: #71717a; line-height: 1.5;
+      flex-shrink: 0;
     }
-    .logs .entry { white-space: pre-wrap; word-break: break-word; display: flex; gap: 8px; }
-    .logs .ts { color: #52525b; flex-shrink: 0; }
-    .logs .icon { flex-shrink: 0; }
-    .logs .entry.lifecycle .icon { color: #a78bfa; }
+    .logs .entry { white-space: pre-wrap; word-break: break-word; display: flex; gap: 6px; }
+    .logs .ts { color: #3f3f46; flex-shrink: 0; min-width: 28px; }
+    .logs .icon { flex-shrink: 0; width: 12px; text-align: center; }
+    .logs .entry.phase .icon { color: #a78bfa; }
     .logs .entry.tool .icon { color: #60a5fa; }
     .logs .entry.tool-result .icon { color: #4ade80; }
+    .logs .entry.tool-result.error .icon { color: #f87171; }
+    .logs .entry.heartbeat { color: #3f3f46; }
+    .logs .entry.heartbeat .icon { color: #3f3f46; }
+
+    /* ── Result ─────────────────────────────────────────── */
+    .result-wrap {
+      flex: 1; min-height: 0; display: none;
+      flex-direction: column;
+    }
+    .result-wrap.visible { display: flex; }
     .result {
-      background: #09090b; border: 1px solid #27272a; border-radius: 8px;
-      padding: 12px; max-height: 400px; overflow-y: auto;
+      background: #09090b80; border: 1px solid #27272a40; border-radius: 6px;
+      padding: 10px 12px; overflow-y: auto; flex: 1; min-height: 0;
       word-break: break-word; font-size: 13px; line-height: 1.6;
     }
-    .result h1, .result h2, .result h3 {
-      color: #f4f4f5; margin: 12px 0 6px 0; font-size: 15px;
-    }
+    .result h1, .result h2, .result h3 { color: #f4f4f5; margin: 10px 0 4px 0; font-size: 15px; }
     .result h1 { font-size: 17px; }
     .result h3 { font-size: 13px; }
-    .result p { margin: 6px 0; }
-    .result ul, .result ol { margin: 6px 0; padding-left: 20px; }
+    .result p { margin: 4px 0; }
+    .result ul, .result ol { margin: 4px 0; padding-left: 18px; }
     .result li { margin: 2px 0; }
     .result code {
       background: #27272a; padding: 1px 4px; border-radius: 3px;
       font-family: "SF Mono", "Fira Code", monospace; font-size: 12px;
     }
     .result pre {
-      background: #27272a; padding: 8px 10px; border-radius: 6px;
-      overflow-x: auto; margin: 8px 0;
+      background: #27272a; padding: 6px 8px; border-radius: 4px;
+      overflow-x: auto; margin: 6px 0;
     }
     .result pre code { background: none; padding: 0; }
     .result strong { color: #f4f4f5; }
     .result a { color: #60a5fa; text-decoration: none; }
     .result a:hover { text-decoration: underline; }
     .result blockquote {
-      border-left: 3px solid #3f3f46; padding-left: 10px; margin: 8px 0; color: #a1a1aa;
+      border-left: 2px solid #3f3f46; padding-left: 8px; margin: 6px 0; color: #a1a1aa;
     }
+
+    /* ── Fallback summary (completed_no_summary) ────────── */
+    .fallback-summary {
+      background: #09090b80; border: 1px solid #27272a40; border-radius: 6px;
+      padding: 10px 12px; font-size: 12px; color: #a1a1aa; line-height: 1.5;
+      display: none;
+    }
+    .fallback-summary.visible { display: block; }
+    .fallback-summary .note {
+      color: #71717a; font-size: 11px; margin-bottom: 6px;
+    }
+    .fallback-summary .detail { margin: 2px 0; }
+    .fallback-summary .detail .label { color: #52525b; }
+
+    /* ── Actions ─────────────────────────────────────────── */
     .actions {
-      display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px;
+      display: none; gap: 6px; flex-wrap: wrap; margin-top: 8px; flex-shrink: 0;
     }
+    .actions.visible { display: flex; }
     .action-btn {
-      background: #27272a; color: #e4e4e7; border: 1px solid #3f3f46;
-      border-radius: 6px; padding: 6px 12px; font-size: 12px; font-weight: 500;
+      background: #27272a; color: #d4d4d8; border: 1px solid #3f3f4680;
+      border-radius: 5px; padding: 5px 10px; font-size: 11px; font-weight: 500;
       cursor: pointer; transition: background 0.15s;
     }
     .action-btn:hover { background: #3f3f46; }
-    .action-btn:disabled { opacity: 0.4; cursor: default; }
-    .action-btn.primary { background: #1d4ed8; border-color: #2563eb; }
+    .action-btn:disabled { opacity: 0.35; cursor: default; }
+    .action-btn.primary { background: #1d4ed8; border-color: #2563eb80; color: #e4e4e7; }
     .action-btn.primary:hover { background: #2563eb; }
-    .spinner {
-      display: inline-block; width: 12px; height: 12px;
-      border: 2px solid #fbbf2440; border-top-color: #fbbf24;
-      border-radius: 50%; animation: spin 0.8s linear infinite;
-    }
-    @keyframes spin { to { transform: rotate(360deg); } }
   </style>
 </head>
 <body>
-  <div class="header">
-    <span class="badge queued" id="badge">queued</span>
-    <span id="spinnerWrap"><span class="spinner"></span></span>
-    <span class="elapsed" id="elapsed"></span>
+  <div class="widget">
+    <div class="header">
+      <span class="badge starting" id="badge">starting</span>
+      <span id="spinnerWrap"><span class="spinner"></span></span>
+      <div class="meta">
+        <span id="elapsed"></span>
+        <span id="lastEvent"></span>
+      </div>
+    </div>
+    <div class="identity" id="identity"></div>
+    <div class="section-label">Activity</div>
+    <div class="logs" id="logs"></div>
+    <div class="result-wrap" id="resultWrap">
+      <div class="section-label" id="resultLabel">Clawdy's response</div>
+      <div class="result" id="result"></div>
+    </div>
+    <div class="fallback-summary" id="fallback"></div>
+    <div class="actions" id="actions"></div>
   </div>
-  <div class="section-label">Activity</div>
-  <div class="logs" id="logs"></div>
-  <div class="section-label" id="resultLabel" style="display:none">Clawdy's response</div>
-  <div class="result" id="result" style="display:none"></div>
-  <div class="actions" id="actions" style="display:none"></div>
 
   <script>
-    var badgeEl = document.getElementById('badge');
-    var spinnerEl = document.getElementById('spinnerWrap');
-    var elapsedEl = document.getElementById('elapsed');
-    var logsEl = document.getElementById('logs');
-    var resultLabel = document.getElementById('resultLabel');
-    var resultEl = document.getElementById('result');
-    var actionsEl = document.getElementById('actions');
+    // ── DOM refs ──────────────────────────────────────────
+    var badgeEl    = document.getElementById('badge');
+    var spinnerEl  = document.getElementById('spinnerWrap');
+    var elapsedEl  = document.getElementById('elapsed');
+    var lastEvtEl  = document.getElementById('lastEvent');
+    var identityEl = document.getElementById('identity');
+    var logsEl     = document.getElementById('logs');
+    var resultWrap = document.getElementById('resultWrap');
+    var resultLabel= document.getElementById('resultLabel');
+    var resultEl   = document.getElementById('result');
+    var fallbackEl = document.getElementById('fallback');
+    var actionsEl  = document.getElementById('actions');
 
-    var jobId = null;
-    var sessionKey = null;
-    var startTime = Date.now();
-    var done = false;
-    var seenLogCount = 0;
-    var lastData = null;
     var oai = window.openai || {};
 
-    var ICONS = { lifecycle: '\u25B6', tool: '\u2692', 'tool-result': '\u2714' };
+    // ── Constants ─────────────────────────────────────────
+    var QUIET_THRESHOLD_S  = 15;
+    var STALLED_THRESHOLD_S = 60;
 
-    // Lightweight markdown to HTML
-    function renderMarkdown(text) {
-      var html = escapeHtml(text);
-      // Code blocks (``` ... ```)
-      html = html.replace(/```(\w*)\n([\s\S]*?)```/g, function(_, lang, code) {
-        return '<pre><code>' + code.trim() + '</code></pre>';
+    // ── State ─────────────────────────────────────────────
+    var state = {
+      jobId: null,
+      sessionKey: null,
+      status: 'starting',       // UI state
+      serverStatus: null,       // raw server status
+      startedAt: null,
+      lastEventAt: null,
+      lastPollAt: null,
+      summary: null,
+      error: null,
+      errorInfo: null,
+      logs: [],
+      artifacts: null,
+      continuationState: null,
+      seenLogCount: 0,
+      pollTimer: null,
+      tickTimer: null,
+      pollFailures: 0,
+    };
+
+    // ── UI state labels ──────────────────────────────────
+    var STATUS_LABELS = {
+      starting: 'Starting',
+      active: 'Active',
+      quiet: 'Quiet',
+      stalled: 'Stalled',
+      waiting_on_user: 'Waiting on you',
+      completed: 'Completed',
+      completed_no_summary: 'Done (no summary)',
+      failed: 'Failed',
+      reconnecting: 'Reconnecting',
+      service_unavailable: 'Unavailable',
+    };
+
+    // ── Persistence (widget-instance scoped) ─────────────
+    // Note: ChatGPT does not expose a stable chat/thread ID to widgets.
+    // We use oai.setWidgetState / oai.widgetState which is scoped to
+    // the widget instance within the current message, not globally.
+    // This means: on refresh within the same chat, the widget can restore
+    // from its own prior state. It will NOT cross-pollinate between chats.
+
+    function persistState() {
+      if (!oai.setWidgetState) return;
+      oai.setWidgetState({
+        jobId: state.jobId,
+        sessionKey: state.sessionKey,
+        serverStatus: state.serverStatus,
+        startedAt: state.startedAt,
+        lastEventAt: state.lastEventAt,
+        lastPollAt: state.lastPollAt,
+        summary: state.summary,
+        error: state.error,
+        errorInfo: state.errorInfo,
+        logs: state.logs,
+        artifacts: state.artifacts,
+        continuationState: state.continuationState,
       });
-      // Inline code
-      html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
-      // Headers
-      html = html.replace(/^### (.+)$/gm, '<h3>$1</h3>');
-      html = html.replace(/^## (.+)$/gm, '<h2>$1</h2>');
-      html = html.replace(/^# (.+)$/gm, '<h1>$1</h1>');
-      // Bold
-      html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-      // Italic
-      html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
-      // Links
-      html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank">$1</a>');
-      // Blockquotes
-      html = html.replace(/^&gt; (.+)$/gm, '<blockquote>$1</blockquote>');
-      // Unordered lists
-      html = html.replace(/^- (.+)$/gm, '<li>$1</li>');
-      html = html.replace(/(<li>.*<\/li>\n?)+/g, '<ul>$&</ul>');
-      // Ordered lists
-      html = html.replace(/^\d+\. (.+)$/gm, '<li>$1</li>');
-      // Paragraphs (double newlines)
-      html = html.replace(/\n\n/g, '</p><p>');
-      // Single newlines within paragraphs
-      html = html.replace(/\n/g, '<br>');
-      return '<p>' + html + '</p>';
     }
 
+    function restoreFromWidgetState(ws) {
+      if (!ws || !ws.jobId) return false;
+      state.jobId = ws.jobId;
+      state.sessionKey = ws.sessionKey;
+      state.serverStatus = ws.serverStatus;
+      state.startedAt = ws.startedAt;
+      state.lastEventAt = ws.lastEventAt;
+      state.lastPollAt = ws.lastPollAt;
+      state.summary = ws.summary;
+      state.error = ws.error;
+      state.errorInfo = ws.errorInfo;
+      state.logs = ws.logs || [];
+      state.artifacts = ws.artifacts;
+      state.continuationState = ws.continuationState;
+      state.seenLogCount = state.logs.length;
+      return true;
+    }
+
+    // ── Derived UI state ─────────────────────────────────
+    // The server sends: running | completed | completed_no_summary | error
+    // The widget derives richer states from timestamps.
+
+    function deriveUiStatus() {
+      var ss = state.serverStatus;
+      if (!ss) return 'starting';
+      if (ss === 'completed') return 'completed';
+      if (ss === 'completed_no_summary') return 'completed_no_summary';
+      if (ss === 'error') return 'failed';
+      // ss === 'running'
+      if (state.artifacts && state.artifacts.needsHumanDecision) return 'waiting_on_user';
+      var now = Date.now();
+      var sinceLast = state.lastEventAt ? (now - state.lastEventAt) / 1000 : 999;
+      if (sinceLast > STALLED_THRESHOLD_S) return 'stalled';
+      if (sinceLast > QUIET_THRESHOLD_S) return 'quiet';
+      return 'active';
+    }
+
+    function isTerminal(s) {
+      return s === 'completed' || s === 'completed_no_summary' || s === 'failed';
+    }
+
+    // ── Markdown renderer ────────────────────────────────
     function escapeHtml(s) {
       var d = document.createElement('div'); d.textContent = s; return d.innerHTML;
     }
 
-    function addLogEntry(entry) {
+    function renderMarkdown(text) {
+      var html = escapeHtml(text);
+      html = html.replace(/```(\w*)\n([\s\S]*?)```/g, function(_, lang, code) {
+        return '<pre><code>' + code.trim() + '</code></pre>';
+      });
+      html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+      html = html.replace(/^### (.+)$/gm, '<h3>$1</h3>');
+      html = html.replace(/^## (.+)$/gm, '<h2>$1</h2>');
+      html = html.replace(/^# (.+)$/gm, '<h1>$1</h1>');
+      html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+      html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
+      html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank">$1</a>');
+      html = html.replace(/^&gt; (.+)$/gm, '<blockquote>$1</blockquote>');
+      html = html.replace(/^- (.+)$/gm, '<li>$1</li>');
+      html = html.replace(/(<li>.*<\/li>\n?)+/g, '<ul>$&</ul>');
+      html = html.replace(/^\d+\. (.+)$/gm, '<li>$1</li>');
+      html = html.replace(/\n\n/g, '</p><p>');
+      html = html.replace(/\n/g, '<br>');
+      return '<p>' + html + '</p>';
+    }
+
+    // ── Log normalization / dedup ────────────────────────
+    // Maps raw gateway events to human-meaningful phases.
+    // Dedupes repeated lifecycle noise.
+
+    var PHASE_MAP = {
+      'Agent started': 'Starting up',
+      'Agent finished': 'Wrapping up',
+    };
+
+    var TOOL_PHASES = {
+      'Read': 'Reading files',
+      'Glob': 'Searching files',
+      'Grep': 'Searching code',
+      'Edit': 'Editing files',
+      'Write': 'Writing files',
+      'Bash': 'Running command',
+      'exec': 'Running command',
+      'Agent': 'Delegating subtask',
+      'WebFetch': 'Fetching web content',
+      'WebSearch': 'Searching the web',
+    };
+
+    function normalizeLogEntry(entry) {
+      if (entry.type === 'lifecycle') {
+        var mapped = PHASE_MAP[entry.text];
+        return { type: 'phase', text: mapped || entry.text, raw: entry };
+      }
+      if (entry.type === 'tool') {
+        var toolName = entry.text.split(':')[0];
+        var detail = entry.text.slice(toolName.length + 1).trim();
+        var phase = TOOL_PHASES[toolName];
+        if (phase) {
+          return { type: 'tool', text: phase + (detail ? ' \u2014 ' + detail : ''), toolName: toolName, raw: entry };
+        }
+        return { type: 'tool', text: entry.text, toolName: toolName, raw: entry };
+      }
+      if (entry.type === 'tool-result') {
+        var isErr = entry.text.indexOf('failed') >= 0;
+        return { type: 'tool-result', text: entry.text, isError: isErr, raw: entry };
+      }
+      return { type: entry.type, text: entry.text, raw: entry };
+    }
+
+    function shouldDedup(prev, curr) {
+      if (!prev) return false;
+      // Collapse repeated identical phase entries
+      if (prev.type === 'phase' && curr.type === 'phase' && prev.text === curr.text) return true;
+      // Collapse repeated reads of different files into just the latest
+      if (prev.type === 'tool' && curr.type === 'tool' &&
+          prev.text.indexOf('Reading files') === 0 && curr.text.indexOf('Reading files') === 0) return true;
+      return false;
+    }
+
+    // ── Render helpers ───────────────────────────────────
+    var ICONS = { phase: '\u25B6', tool: '\u2692', 'tool-result': '\u2714', heartbeat: '\u00B7' };
+
+    function renderLogEntry(normalized, elapsedS) {
       var el = document.createElement('div');
-      el.className = 'entry ' + entry.type;
-      var elapsed = Math.round((entry.ts - startTime) / 1000);
-      el.innerHTML = '<span class="ts">' + elapsed + 's</span>'
-        + '<span class="icon">' + (ICONS[entry.type] || '\u2022') + '</span>'
-        + '<span>' + escapeHtml(entry.text) + '</span>';
-      logsEl.appendChild(el);
+      var cls = 'entry ' + normalized.type;
+      if (normalized.isError) cls += ' error';
+      el.className = cls;
+      var icon = ICONS[normalized.type] || '\u2022';
+      if (normalized.type === 'tool-result' && normalized.isError) icon = '\u2718';
+      el.innerHTML = '<span class="ts">' + elapsedS + 's</span>'
+        + '<span class="icon">' + icon + '</span>'
+        + '<span>' + escapeHtml(normalized.text) + '</span>';
+      return el;
+    }
+
+    function renderAllLogs() {
+      logsEl.innerHTML = '';
+      var prev = null;
+      for (var i = 0; i < state.logs.length; i++) {
+        var norm = normalizeLogEntry(state.logs[i]);
+        if (shouldDedup(prev, norm)) {
+          // Replace last child
+          if (logsEl.lastChild) logsEl.removeChild(logsEl.lastChild);
+        }
+        var elapsed = Math.round((state.logs[i].ts - (state.startedAt || state.logs[i].ts)) / 1000);
+        logsEl.appendChild(renderLogEntry(norm, elapsed));
+        prev = norm;
+      }
       logsEl.scrollTop = logsEl.scrollHeight;
     }
 
-    function renderLogs(logs) {
-      if (!logs || logs.length <= seenLogCount) return;
-      for (var i = seenLogCount; i < logs.length; i++) addLogEntry(logs[i]);
-      seenLogCount = logs.length;
+    function renderIncrementalLogs(newLogs) {
+      for (var i = 0; i < newLogs.length; i++) {
+        var norm = normalizeLogEntry(newLogs[i]);
+        // Check dedup against last rendered
+        var lastChild = logsEl.lastChild;
+        if (lastChild && lastChild._normalized && shouldDedup(lastChild._normalized, norm)) {
+          logsEl.removeChild(lastChild);
+        }
+        var elapsed = Math.round((newLogs[i].ts - (state.startedAt || newLogs[i].ts)) / 1000);
+        var el = renderLogEntry(norm, elapsed);
+        el._normalized = norm;
+        logsEl.appendChild(el);
+      }
+      logsEl.scrollTop = logsEl.scrollHeight;
     }
 
-    function setStatus(status) {
-      badgeEl.className = 'badge ' + status;
-      badgeEl.textContent = status;
-      if (status === 'completed' || status === 'error') {
-        spinnerEl.style.display = 'none';
-        done = true;
+    function renderIdentity() {
+      if (!state.jobId) { identityEl.innerHTML = ''; return; }
+      var jobShort = state.jobId.slice(0, 8);
+      var sessShort = state.sessionKey ? state.sessionKey.slice(-8) : '?';
+      identityEl.innerHTML =
+        '<span><span class="label">job</span> ' + jobShort + '</span>' +
+        '<span><span class="label">session</span> ' + sessShort + '</span>';
+    }
+
+    function fmtAgo(ts) {
+      if (!ts) return '';
+      var s = Math.round((Date.now() - ts) / 1000);
+      if (s < 5) return 'just now';
+      if (s < 60) return s + 's ago';
+      var m = Math.floor(s / 60);
+      return m + 'm ' + (s % 60) + 's ago';
+    }
+
+    function fmtElapsed() {
+      if (!state.startedAt) return '';
+      var s = Math.round((Date.now() - state.startedAt) / 1000);
+      var m = Math.floor(s / 60);
+      return m > 0 ? m + 'm ' + (s % 60) + 's' : s + 's';
+    }
+
+    function updateStatus() {
+      var uiStatus = deriveUiStatus();
+      state.status = uiStatus;
+      badgeEl.className = 'badge ' + uiStatus;
+      badgeEl.textContent = STATUS_LABELS[uiStatus] || uiStatus;
+      spinnerEl.style.display = (uiStatus === 'active' || uiStatus === 'starting' || uiStatus === 'reconnecting') ? '' : 'none';
+    }
+
+    function updateMeta() {
+      elapsedEl.textContent = fmtElapsed();
+      if (state.lastEventAt && !isTerminal(state.status)) {
+        lastEvtEl.textContent = 'last event ' + fmtAgo(state.lastEventAt);
+      } else {
+        lastEvtEl.textContent = '';
       }
     }
 
-    function extractData(obj) {
-      if (!obj) return null;
-      if (obj.structuredContent) return obj.structuredContent;
-      if (obj.jobId || obj.status) return obj;
-      return null;
+    // ── Fallback summary for completed_no_summary ────────
+    function buildFallbackSummary() {
+      var a = state.artifacts;
+      if (!a) return null;
+      var parts = [];
+      if (a.filesChanged && a.filesChanged.length > 0) {
+        parts.push(a.filesChanged.length + ' file(s) modified: ' + a.filesChanged.slice(0, 5).map(function(f) {
+          return f.split('/').pop();
+        }).join(', ') + (a.filesChanged.length > 5 ? '...' : ''));
+      }
+      if (a.commandsRun && a.commandsRun.length > 0) {
+        parts.push(a.commandsRun.length + ' command(s) run');
+      }
+      if (a.prUrl) parts.push('PR: ' + a.prUrl);
+      if (a.branchName) parts.push('Branch: ' + a.branchName);
+      if (a.commitSha) parts.push('Commit: ' + a.commitSha.slice(0, 7));
+      return parts.length > 0 ? parts : null;
     }
 
-    // Build a directive message for ChatGPT based on outcome
+    function renderFallback() {
+      var parts = buildFallbackSummary();
+      if (!parts) {
+        fallbackEl.className = 'fallback-summary';
+        fallbackEl.innerHTML = '<div class="note">Task completed but no assistant summary was received.</div>'
+          + '<div class="detail">Check the activity log above for details.</div>';
+        fallbackEl.className = 'fallback-summary visible';
+        return;
+      }
+      var html = '<div class="note">Task completed but no assistant summary was received. Here\'s what we know:</div>';
+      parts.forEach(function(p) {
+        html += '<div class="detail">' + escapeHtml(p) + '</div>';
+      });
+      fallbackEl.innerHTML = html;
+      fallbackEl.className = 'fallback-summary visible';
+    }
+
+    // ── Result rendering ─────────────────────────────────
+    function renderResult() {
+      var uiStatus = state.status;
+
+      if (uiStatus === 'failed') {
+        resultLabel.textContent = 'Error';
+        resultEl.innerHTML = renderMarkdown(state.error || 'Unknown error');
+        resultWrap.className = 'result-wrap visible';
+        fallbackEl.className = 'fallback-summary';
+        return;
+      }
+
+      if (uiStatus === 'completed_no_summary') {
+        resultWrap.className = 'result-wrap';
+        renderFallback();
+        return;
+      }
+
+      if (uiStatus === 'completed' && state.summary) {
+        resultLabel.textContent = "Clawdy's response";
+        resultEl.innerHTML = renderMarkdown(state.summary);
+        resultWrap.className = 'result-wrap visible';
+        fallbackEl.className = 'fallback-summary';
+        return;
+      }
+
+      // Not terminal or no content yet
+      resultWrap.className = 'result-wrap';
+      fallbackEl.className = 'fallback-summary';
+    }
+
+    // ── Action buttons ───────────────────────────────────
     function buildDirective(data) {
-      if (data.status === 'error') {
-        var ei = data.errorInfo;
+      var s = data.status || state.serverStatus;
+      if (s === 'error') {
+        var ei = data.errorInfo || state.errorInfo;
         if (ei) return 'Clawdy encountered a ' + ei.category + ' error. ' + ei.suggestedRecovery + ' Explain what happened and suggest how to fix it.';
         return 'Clawdy encountered an error. Explain what went wrong and suggest recovery steps.';
       }
-      var a = data.artifacts || {};
+      var a = data.artifacts || state.artifacts || {};
       if (a.prUrl) return 'Clawdy created a PR at ' + a.prUrl + '. Summarize the changes and ask if the user wants to review or merge.';
       if (a.needsHumanDecision) return 'Clawdy needs a decision from the user. Present the options clearly.';
       if ((a.filesChanged || []).length > 0) return 'Clawdy modified ' + a.filesChanged.length + ' file(s). Summarize what changed and propose next steps.';
+      if (s === 'completed_no_summary') return 'Clawdy completed the task but no summary was received. Describe what we know from artifacts and ask how to proceed.';
       return 'Clawdy completed the task. Summarize the result and propose next steps.';
     }
 
-    // Render action buttons based on outcome
-    function renderActions(data) {
-      actionsEl.style.display = 'flex';
-      actionsEl.innerHTML = '';
-      var a = data.artifacts || {};
-      var sk = data.sessionKey || sessionKey;
+    function renderActions() {
+      var uiStatus = state.status;
+      if (!isTerminal(uiStatus)) { actionsEl.className = 'actions'; return; }
 
+      actionsEl.className = 'actions visible';
+      actionsEl.innerHTML = '';
+      var sk = state.sessionKey;
+      var a = state.artifacts || {};
       var buttons = [];
-      if (data.status === 'error') {
+
+      if (uiStatus === 'failed') {
         buttons.push({ label: 'Retry', msg: 'Retry the failed task using sessionKey: ' + sk, primary: true });
         buttons.push({ label: 'Explain error', msg: 'Explain in detail what went wrong and why.' });
+      } else if (uiStatus === 'completed_no_summary') {
+        buttons.push({ label: 'Continue session', msg: 'Continue working on this using sessionKey: ' + sk, primary: true });
+        buttons.push({ label: 'Reconstruct summary', msg: 'Ask Clawdy to summarize what it did using sessionKey: ' + sk });
+        buttons.push({ label: 'Show raw events', msg: 'Show the raw activity log from the last task.' });
       } else {
-        buttons.push({ label: 'Continue', msg: 'Continue working on this using sessionKey: ' + sk, primary: true });
+        // completed
+        buttons.push({ label: 'Continue session', msg: 'Continue working on this using sessionKey: ' + sk, primary: true });
         buttons.push({ label: 'Explain changes', msg: 'Explain the changes Clawdy made in detail.' });
         if (!a.prUrl && (a.filesChanged || []).length > 0) {
           buttons.push({ label: 'Create PR', msg: 'Ask Clawdy to create a PR for these changes using sessionKey: ' + sk });
         }
       }
+
+      // Always offer "Start new task" when terminal
+      buttons.push({ label: 'New task', msg: 'Start a fresh task with Clawdy (new session).' });
 
       buttons.forEach(function(b) {
         var btn = document.createElement('button');
@@ -243,78 +591,150 @@
       });
     }
 
-    async function showResult(data) {
-      done = true;
-      var status = data.status;
-      setStatus(status === 'error' ? 'error' : 'completed');
-      if (data.logs) renderLogs(data.logs);
+    // ── Full render ──────────────────────────────────────
+    function render() {
+      updateStatus();
+      updateMeta();
+      renderIdentity();
+      renderResult();
+      renderActions();
+    }
 
-      var display = status === 'error' ? (data.error || 'Unknown error') : (data.summary || '');
-      if (display) {
-        resultLabel.style.display = 'block';
-        resultLabel.textContent = status === 'error' ? 'Error' : "Clawdy's response";
-        resultEl.style.display = 'block';
-        resultEl.innerHTML = renderMarkdown(display);
+    // ── Polling ──────────────────────────────────────────
+    async function poll() {
+      if (isTerminal(deriveUiStatus()) || !state.jobId) return;
+      try {
+        var result = await oai.callTool('check_openclaw_task', {
+          jobId: state.jobId,
+          knownLogCount: state.seenLogCount,
+        });
+        var data = extractSnapshot(result);
+        if (!data) { schedulePoll(3000); return; }
+
+        state.pollFailures = 0;
+        state.serverStatus = data.status;
+        state.lastPollAt = Date.now();
+        if (data.lastEventAt) state.lastEventAt = data.lastEventAt;
+        if (data.summary) state.summary = data.summary;
+        if (data.error) state.error = data.error;
+        if (data.errorInfo) state.errorInfo = data.errorInfo;
+        if (data.artifacts) state.artifacts = data.artifacts;
+        if (data.continuationState) state.continuationState = data.continuationState;
+
+        // Incremental log update
+        if (data.logs && data.logs.length > state.seenLogCount) {
+          var newLogs = data.logs.slice(state.seenLogCount);
+          state.logs = data.logs;
+          state.seenLogCount = data.logs.length;
+          renderIncrementalLogs(newLogs);
+        }
+
+        render();
+        persistState();
+
+        if (state.serverStatus === 'running') {
+          schedulePoll(0);
+        } else {
+          onTerminal();
+        }
+      } catch (err) {
+        state.pollFailures++;
+        // Differentiate transient failures from hard failures
+        if (state.pollFailures >= 5) {
+          state.status = 'service_unavailable';
+          render();
+        }
+        schedulePoll(Math.min(5000 * state.pollFailures, 30000));
       }
+    }
 
-      renderActions(data);
+    function schedulePoll(delayMs) {
+      clearTimeout(state.pollTimer);
+      state.pollTimer = setTimeout(poll, delayMs);
+    }
 
-      if (oai.setWidgetState) {
-        oai.setWidgetState({ done: true, summary: display, status: status });
-      }
-
-      // Send directive to wake up ChatGPT
-      var directive = buildDirective(data);
+    async function onTerminal() {
+      persistState();
+      // Wake ChatGPT with a directive
+      var directive = buildDirective(state);
       try { if (oai.requestTargetedReply) await oai.requestTargetedReply(); } catch(e) {}
       try { if (oai.sendFollowUpMessage) await oai.sendFollowUpMessage(directive); } catch(e) {}
     }
 
-    // Elapsed timer
-    setInterval(function() {
-      if (done) return;
-      var s = Math.round((Date.now() - startTime) / 1000);
-      var m = Math.floor(s / 60);
-      var sec = s % 60;
-      elapsedEl.textContent = m > 0 ? m + 'm ' + sec + 's' : sec + 's';
-    }, 1000);
-
-    async function poll() {
-      if (done || !jobId) return;
-      try {
-        var result = await oai.callTool('check_openclaw_task', { jobId: jobId, knownLogCount: seenLogCount });
-        var data = extractData(result);
-        if (!data) { setTimeout(poll, 3000); return; }
-        if (data.logs) renderLogs(data.logs);
-
-        if (data.status === 'running') {
-          poll();
-        } else {
-          lastData = data;
-          showResult(data);
-        }
-      } catch (err) {
-        setTimeout(poll, 5000);
-      }
+    // ── Data extraction ──────────────────────────────────
+    function extractSnapshot(obj) {
+      if (!obj) return null;
+      if (obj.structuredContent) return obj.structuredContent;
+      if (obj.jobId || obj.status) return obj;
+      return null;
     }
 
+    // ── Tick (updates elapsed + derived status) ──────────
+    function tick() {
+      if (isTerminal(state.status)) return;
+      updateStatus();
+      updateMeta();
+    }
+
+    // ── Init: start from tool output ─────────────────────
     function startFromOutput(output) {
-      if (done || jobId) return;
-      var data = extractData(output);
-      if (data && data.jobId) {
-        jobId = data.jobId;
-        sessionKey = data.sessionKey;
-        startTime = Date.now();
-        setStatus('running');
-        poll();
+      if (state.jobId) return; // already initialized
+      var data = extractSnapshot(output);
+      if (!data || !data.jobId) return;
+      state.jobId = data.jobId;
+      state.sessionKey = data.sessionKey;
+      state.serverStatus = data.status;
+      state.startedAt = data.startedAt || Date.now();
+      state.lastEventAt = data.lastEventAt || Date.now();
+      state.lastPollAt = Date.now();
+      if (data.logs) {
+        state.logs = data.logs;
+        state.seenLogCount = data.logs.length;
+        renderAllLogs();
+      }
+      if (data.artifacts) state.artifacts = data.artifacts;
+      render();
+      persistState();
+      if (data.status === 'running') {
+        schedulePoll(0);
+      } else {
+        onTerminal();
       }
     }
 
-    if (oai.widgetState && oai.widgetState.done) {
-      showResult({ status: oai.widgetState.status, summary: oai.widgetState.summary });
-    } else {
-      if (oai.toolOutput) startFromOutput(oai.toolOutput);
+    // ── Init: rehydrate from widget state ────────────────
+    function rehydrate() {
+      if (!oai.widgetState) return false;
+      var restored = restoreFromWidgetState(oai.widgetState);
+      if (!restored) return false;
+
+      // Render restored state immediately
+      renderAllLogs();
+      render();
+
+      if (isTerminal(deriveUiStatus())) {
+        // Already done, just show it
+        return true;
+      }
+
+      // Still running — try to reconnect
+      state.status = 'reconnecting';
+      render();
+      schedulePoll(0);
+      return true;
+    }
+
+    // ── Boot ─────────────────────────────────────────────
+    state.tickTimer = setInterval(tick, 1000);
+
+    if (!rehydrate()) {
+      // No prior state — wait for tool output
+      if (oai.toolOutput) {
+        startFromOutput(oai.toolOutput);
+      }
       window.addEventListener('openai:set_globals', function() {
-        try { startFromOutput(window.openai.toolOutput); } catch(e) {}
+        oai = window.openai || {};
+        try { startFromOutput(oai.toolOutput); } catch(e) {}
       });
     }
   </script>

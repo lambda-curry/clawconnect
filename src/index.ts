@@ -43,7 +43,7 @@ const TOOLS = [
   },
   {
     name: 'check_openclaw_task',
-    description: 'Check the status of a previously submitted task. Waits up to 50 seconds for completion before returning. Poll until status is "completed" or "error".',
+    description: 'Check the status of a previously submitted task. Waits up to 50 seconds for completion before returning. Poll until status is "completed", "completed_no_summary", or "error".',
     inputSchema: {
       type: 'object',
       properties: {
@@ -64,7 +64,6 @@ hono.get('/health', (c) => c.json({ ok: true }))
 
 const server = createServer(async (req, res) => {
   if (req.url?.startsWith('/mcp')) {
-    // CORS preflight
     if (req.method === 'OPTIONS') {
       res.writeHead(204, CORS_HEADERS)
       res.end()
@@ -73,7 +72,6 @@ const server = createServer(async (req, res) => {
 
     Object.entries(CORS_HEADERS).forEach(([k, v]) => res.setHeader(k, v))
 
-    // Parse body
     const chunks: Buffer[] = []
     for await (const chunk of req) chunks.push(chunk as Buffer)
     const raw = Buffer.concat(chunks).toString()
@@ -151,16 +149,11 @@ const server = createServer(async (req, res) => {
           workspace: args.workspace,
           sessionKey: args.sessionKey,
         })
-        const priorState = args.sessionKey ? openclaw.getSessionState(args.sessionKey) : undefined
         console.log(`[mcp] submitted job ${job.jobId} on session ${job.sessionKey}`)
+        const snapshot = openclaw.buildSnapshot(job)
         respond({
           content: [{ type: 'text', text: `Task submitted. Job ID: ${job.jobId}` }],
-          structuredContent: {
-            jobId: job.jobId,
-            sessionKey: job.sessionKey,
-            status: 'running',
-            ...(priorState ? { continuationState: priorState } : {}),
-          },
+          structuredContent: snapshot,
         })
 
       } else if (name === 'check_openclaw_task') {
@@ -169,33 +162,13 @@ const server = createServer(async (req, res) => {
         if (!job) {
           respond({ content: [{ type: 'text', text: `Unknown jobId: ${args.jobId}` }], isError: true })
         } else {
-          const continuation = openclaw.getSessionState(job.sessionKey)
-          if (job.status === 'running') {
-            const elapsed = Math.round((Date.now() - job.startedAt) / 1000)
-            respond({
-              content: [{ type: 'text', text: `Still running (${elapsed}s elapsed). Poll again.` }],
-              structuredContent: { jobId: job.jobId, sessionKey: job.sessionKey, status: 'running', elapsedSeconds: elapsed, logs: job.logs, artifacts: job.artifacts },
-            })
-          } else if (job.status === 'completed') {
-            respond({
-              content: [{ type: 'text', text: job.summary ?? '' }],
-              structuredContent: {
-                jobId: job.jobId, sessionKey: job.sessionKey, status: 'completed',
-                summary: job.summary, artifacts: job.artifacts, logs: job.logs,
-                ...(continuation ? { continuationState: continuation } : {}),
-              },
-            })
-          } else {
-            respond({
-              content: [{ type: 'text', text: `Task failed: ${job.error}` }],
-              structuredContent: {
-                jobId: job.jobId, sessionKey: job.sessionKey, status: 'error',
-                error: job.error, errorInfo: job.errorInfo, artifacts: job.artifacts, logs: job.logs,
-                ...(continuation ? { continuationState: continuation } : {}),
-              },
-              isError: true,
-            })
-          }
+          const snapshot = openclaw.buildSnapshot(job)
+          const isTerminal = job.status !== 'running'
+          respond({
+            content: [{ type: 'text', text: isTerminal ? (job.summary ?? job.error ?? '') : `Still running. Poll again.` }],
+            structuredContent: snapshot,
+            ...(job.status === 'error' ? { isError: true } : {}),
+          })
         }
 
       } else {
@@ -209,7 +182,6 @@ const server = createServer(async (req, res) => {
     return
   }
 
-  // Route everything else through Hono
   const url = `http://${req.headers.host ?? 'localhost'}${req.url}`
   const webReq = new Request(url, {
     method: req.method,

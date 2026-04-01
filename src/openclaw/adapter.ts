@@ -3,7 +3,7 @@ import { OpenClawGateway, type GatewayEvent } from './gateway.js'
 
 const TIMEOUT_MS = 600_000 // 10 minutes
 const POLL_WAIT_MS = 50_000 // max time check waits before returning
-const MAX_LOG_ENTRIES = 100
+const MAX_LOG_ENTRIES = 200
 const MAX_ARRAY_ITEMS = 50
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -36,7 +36,11 @@ export type ContinuationState = {
   recommendedNextStep?: string
 }
 
-export type JobStatus = 'running' | 'completed' | 'error'
+/**
+ * Server-side job status. The widget derives its own richer UI states
+ * (active, quiet, stalled, etc.) from these plus timestamps.
+ */
+export type JobStatus = 'running' | 'completed' | 'completed_no_summary' | 'error'
 
 export type Job = {
   jobId: string
@@ -46,8 +50,28 @@ export type Job = {
   error?: string
   errorInfo?: ErrorInfo
   startedAt: number
+  lastEventAt: number
   logs: LogEntry[]
   artifacts: Artifacts
+}
+
+/**
+ * The snapshot sent to the widget on every poll. Contains everything
+ * the widget needs to render and persist for rehydration.
+ */
+export type JobSnapshot = {
+  jobId: string
+  sessionKey: string
+  status: JobStatus
+  startedAt: number
+  lastEventAt: number
+  lastPollAt: number
+  summary?: string
+  error?: string
+  errorInfo?: ErrorInfo
+  logs: LogEntry[]
+  artifacts: Artifacts
+  continuationState?: ContinuationState
 }
 
 // ── Artifact extraction ──────────────────────────────────────────────────────
@@ -85,14 +109,12 @@ function extractPatternsFromSummary(artifacts: Artifacts, summary: string) {
     const branchMatch = summary.match(/(?:branch|checkout -b|switch -c)\s+['"]?([^\s'"]+)/)
     if (branchMatch) artifacts.branchName = branchMatch[1]
   }
-  // Check commands for git patterns too
   for (const cmd of artifacts.commandsRun) {
     if (!artifacts.branchName) {
       const m = cmd.match(/(?:checkout -b|switch -c)\s+(\S+)/)
       if (m) artifacts.branchName = m[1]
     }
   }
-  // Detect if agent needs human input
   const lastSentence = summary.slice(-200)
   if (/\?\s*$/.test(lastSentence) || /please confirm|which option|waiting for|choose between/i.test(lastSentence)) {
     artifacts.needsHumanDecision = true
@@ -154,17 +176,21 @@ export class OpenClawAdapter {
     const sessionKey = input.sessionKey ?? `agent:chatgpt:${randomUUID()}`
     const jobId = randomUUID()
     const artifacts = emptyArtifacts()
-    const job: Job = { jobId, sessionKey, status: 'running', startedAt: Date.now(), logs: [], artifacts }
+    const now = Date.now()
+    const job: Job = { jobId, sessionKey, status: 'running', startedAt: now, lastEventAt: now, logs: [], artifacts }
     jobs.set(jobId, job)
 
     gateway.chat(sessionKey, message, TIMEOUT_MS, (event) => {
+      job.lastEventAt = Date.now()
       if (job.logs.length < MAX_LOG_ENTRIES) {
         job.logs.push({ ts: Date.now(), type: event.type, text: event.text })
       }
       processEvent(artifacts, event)
     }).then(
       (reply) => {
-        job.status = 'completed'
+        job.lastEventAt = Date.now()
+        const noSummary = !reply || reply === 'Stream finished with no response collected.'
+        job.status = noSummary ? 'completed_no_summary' : 'completed'
         job.summary = reply
         extractPatternsFromSummary(artifacts, reply)
         sessions.set(sessionKey, {
@@ -173,11 +199,12 @@ export class OpenClawAdapter {
           workspace: input.workspace,
           lastSummary: reply.slice(0, 500),
           artifacts,
-          recommendedNextStep: deriveNextStep(artifacts, 'completed'),
+          recommendedNextStep: deriveNextStep(artifacts, job.status),
         })
-        console.log(`[job ${jobId}] completed, ${reply.length} chars, ${artifacts.filesChanged.length} files`)
+        console.log(`[job ${jobId}] ${job.status}, ${reply.length} chars, ${artifacts.filesChanged.length} files`)
       },
       (err) => {
+        job.lastEventAt = Date.now()
         job.status = 'error'
         job.error = err instanceof Error ? err.message : String(err)
         job.errorInfo = classifyError(job.error)
@@ -196,6 +223,25 @@ export class OpenClawAdapter {
     return job
   }
 
+  /** Build a snapshot suitable for the widget to persist and restore from. */
+  buildSnapshot(job: Job): JobSnapshot {
+    const continuation = sessions.get(job.sessionKey)
+    return {
+      jobId: job.jobId,
+      sessionKey: job.sessionKey,
+      status: job.status,
+      startedAt: job.startedAt,
+      lastEventAt: job.lastEventAt,
+      lastPollAt: Date.now(),
+      summary: job.summary,
+      error: job.error,
+      errorInfo: job.errorInfo,
+      logs: job.logs,
+      artifacts: job.artifacts,
+      ...(continuation ? { continuationState: continuation } : {}),
+    }
+  }
+
   getJob(jobId: string): Job | undefined {
     return jobs.get(jobId)
   }
@@ -210,7 +256,6 @@ export class OpenClawAdapter {
     const deadline = Date.now() + POLL_WAIT_MS
     while (Date.now() < deadline && job.status === 'running') {
       await new Promise(r => setTimeout(r, 500))
-      // Return early if there are new log entries to show
       if (job.logs.length > knownLogCount) return job
     }
     return job
