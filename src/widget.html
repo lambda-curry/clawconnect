@@ -797,29 +797,6 @@
         try { startFromOutput(oai.toolOutput); } catch(e) {}
       });
     }
-
-    function restoreWidgetRun() {
-      var data = widgetStateToData(oai.widgetState);
-      if (!data || !data.jobId) return false;
-      return initializeFromData(data, { announce: false });
-    }
-
-    function bootstrap() {
-      oai = window.openai || oai;
-      if (startFromToolOutput(oai.toolOutput)) return;
-      if (restoreSavedRun()) return;
-      restoreWidgetRun();
-    }
-
-    bootstrap();
-
-    window.addEventListener('openai:set_globals', function() {
-      oai = window.openai || oai;
-      var data = extractData(oai.toolOutput);
-      if (!data || !data.jobId) return;
-      if (data.jobId === jobId) return;
-      startFromToolOutput(oai.toolOutput);
-    });
   </script>
 </body>
 </html>
