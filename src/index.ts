@@ -4,7 +4,14 @@ import { readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Hono } from 'hono'
-import { OpenClawAdapter } from './openclaw/adapter.js'
+import {
+  OpenClawAdapter,
+  type Artifacts,
+  type ContinuationState,
+  type ErrorInfo,
+  type Job,
+  type JobStatus,
+} from './openclaw/adapter.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const WIDGET_HTML = readFileSync(join(__dirname, 'widget.html'), 'utf-8')
@@ -21,17 +28,111 @@ const CORS_HEADERS = {
 
 const WIDGET_URI = 'ui://widget/openclaw-status.html'
 
+type WidgetState = 'queued' | 'running' | 'waiting' | 'completed' | 'error'
+
+type WidgetStatus = {
+  version: 1
+  state: WidgetState
+  reason?: string
+}
+
+type WidgetDetails = {
+  filesChangedCount: number
+  filesChanged: string[]
+  branchName?: string
+  commitSha?: string
+  prUrl?: string
+  needsHumanDecision: boolean
+  recommendedNextStep?: string
+}
+
+function deriveRecommendedNextStep(
+  status: JobStatus,
+  artifacts: Artifacts,
+  continuation?: ContinuationState,
+  errorInfo?: ErrorInfo,
+): string | undefined {
+  if (continuation?.recommendedNextStep) return continuation.recommendedNextStep
+  if (status === 'error') {
+    return errorInfo?.category === 'timeout'
+      ? 'Resume or retry with a smaller scoped follow-up.'
+      : 'Fix the issue and retry.'
+  }
+  if (artifacts.needsHumanDecision) return 'Answer the pending question to continue.'
+  if (artifacts.prUrl) return 'Review or merge the PR.'
+  if (artifacts.filesChanged.length > 0) return 'Review the changes, summarize them, or create a PR.'
+  return undefined
+}
+
+function buildWidgetStatus(
+  status: JobStatus,
+  artifacts: Artifacts,
+  errorInfo?: ErrorInfo,
+): WidgetStatus {
+  if (status === 'error') {
+    return {
+      version: 1,
+      state: 'error',
+      reason: errorInfo?.category === 'timeout' ? 'timeout' : errorInfo?.category ?? 'error',
+    }
+  }
+
+  if (status === 'completed' && artifacts.needsHumanDecision) {
+    return { version: 1, state: 'waiting', reason: 'needs-human-decision' }
+  }
+
+  if (status === 'completed') {
+    return { version: 1, state: 'completed' }
+  }
+
+  return { version: 1, state: 'running' }
+}
+
+function buildWidgetDetails(
+  status: JobStatus,
+  artifacts: Artifacts,
+  continuation?: ContinuationState,
+  errorInfo?: ErrorInfo,
+): WidgetDetails {
+  return {
+    filesChangedCount: artifacts.filesChanged.length,
+    filesChanged: artifacts.filesChanged,
+    branchName: artifacts.branchName,
+    commitSha: artifacts.commitSha,
+    prUrl: artifacts.prUrl,
+    needsHumanDecision: artifacts.needsHumanDecision,
+    recommendedNextStep: deriveRecommendedNextStep(status, artifacts, continuation, errorInfo),
+  }
+}
+
+function buildJobPayload(job: Job, continuation?: ContinuationState) {
+  return {
+    jobId: job.jobId,
+    sessionKey: job.sessionKey,
+    status: job.status,
+    widgetStatus: buildWidgetStatus(job.status, job.artifacts, job.errorInfo),
+    details: buildWidgetDetails(job.status, job.artifacts, continuation, job.errorInfo),
+    summary: job.summary,
+    error: job.error,
+    errorInfo: job.errorInfo,
+    artifacts: job.artifacts,
+    logs: job.logs,
+    startedAt: job.startedAt,
+    ...(continuation ? { continuationState: continuation } : {}),
+  }
+}
+
 const TOOLS = [
   {
     name: 'run_openclaw_task',
-    description: 'Submit a task to OpenClaw. Returns a jobId immediately — the widget will show live progress. Pass sessionKey from a previous result to continue the same conversation.',
+    description: 'Submit a task to OpenClaw. Returns quickly with a jobId and sessionKey so the widget can poll check_openclaw_task for live progress. Pass sessionKey from a previous result to continue the same conversation.',
     inputSchema: {
       type: 'object',
       properties: {
         task: { type: 'string', description: 'The task to perform' },
         context: { type: 'string', description: 'Optional context for the task' },
         workspace: { type: 'string' },
-        sessionKey: { type: 'string', description: 'Session key from a previous call to continue the conversation. Omit to start fresh.' },
+        sessionKey: { type: 'string', description: 'Session key from a previous call to continue the same conversation. Omit to start fresh.' },
       },
       required: ['task'],
     },
@@ -43,7 +144,7 @@ const TOOLS = [
   },
   {
     name: 'check_openclaw_task',
-    description: 'Check the status of a previously submitted task. Waits up to 50 seconds for completion before returning. Poll until status is "completed" or "error".',
+    description: 'Check the status of a previously submitted task. Waits up to 50 seconds for completion before returning. The widget uses this to poll until the run is completed, waiting on a human decision, or errored.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -159,6 +260,8 @@ const server = createServer(async (req, res) => {
             jobId: job.jobId,
             sessionKey: job.sessionKey,
             status: 'running',
+            widgetStatus: { version: 1, state: 'running', reason: 'submitted' },
+            details: buildWidgetDetails('running', job.artifacts, priorState),
             ...(priorState ? { continuationState: priorState } : {}),
           },
         })
@@ -167,32 +270,44 @@ const server = createServer(async (req, res) => {
         const knownLogCount = Number(args.knownLogCount) || 0
         const job = await openclaw.waitForJob(args.jobId, knownLogCount)
         if (!job) {
-          respond({ content: [{ type: 'text', text: `Unknown jobId: ${args.jobId}` }], isError: true })
+          respond({
+            content: [{ type: 'text', text: `Unknown jobId: ${args.jobId}` }],
+            structuredContent: {
+              jobId: args.jobId,
+              status: 'error',
+              widgetStatus: { version: 1, state: 'error', reason: 'not-found' },
+              details: {
+                filesChangedCount: 0,
+                filesChanged: [],
+                needsHumanDecision: false,
+                recommendedNextStep: 'Resubmit the task to start a new run.',
+              },
+              error: 'Job not found. The server may have restarted.',
+            },
+            isError: true,
+          })
         } else {
           const continuation = openclaw.getSessionState(job.sessionKey)
+          const payload = buildJobPayload(job, continuation)
+
           if (job.status === 'running') {
             const elapsed = Math.round((Date.now() - job.startedAt) / 1000)
             respond({
               content: [{ type: 'text', text: `Still running (${elapsed}s elapsed). Poll again.` }],
-              structuredContent: { jobId: job.jobId, sessionKey: job.sessionKey, status: 'running', elapsedSeconds: elapsed, logs: job.logs, artifacts: job.artifacts },
+              structuredContent: {
+                ...payload,
+                elapsedSeconds: elapsed,
+              },
             })
           } else if (job.status === 'completed') {
             respond({
               content: [{ type: 'text', text: job.summary ?? '' }],
-              structuredContent: {
-                jobId: job.jobId, sessionKey: job.sessionKey, status: 'completed',
-                summary: job.summary, artifacts: job.artifacts, logs: job.logs,
-                ...(continuation ? { continuationState: continuation } : {}),
-              },
+              structuredContent: payload,
             })
           } else {
             respond({
               content: [{ type: 'text', text: `Task failed: ${job.error}` }],
-              structuredContent: {
-                jobId: job.jobId, sessionKey: job.sessionKey, status: 'error',
-                error: job.error, errorInfo: job.errorInfo, artifacts: job.artifacts, logs: job.logs,
-                ...(continuation ? { continuationState: continuation } : {}),
-              },
+              structuredContent: payload,
               isError: true,
             })
           }
