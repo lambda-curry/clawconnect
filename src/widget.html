@@ -5,12 +5,82 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>OpenClaw Task</title>
   <style>
+    :root {
+      --page-bg: transparent;
+      --text-primary: #e4e4e7;
+      --text-subtle: #a1a1aa;
+      --label: #71717a;
+
+      --panel-bg: rgba(255, 255, 255, 0.04);
+      --panel-bg-strong: rgba(255, 255, 255, 0.06);
+      --panel-bg-emphasis: rgba(255, 255, 255, 0.08);
+      --panel-border: rgba(255, 255, 255, 0.16);
+
+      --mono-bg: rgba(255, 255, 255, 0.02);
+      --mono-border: rgba(255, 255, 255, 0.14);
+
+      --button-bg: rgba(255, 255, 255, 0.10);
+      --button-bg-hover: rgba(255, 255, 255, 0.16);
+      --button-text: #e4e4e7;
+      --button-border: rgba(255, 255, 255, 0.24);
+
+      --link: #60a5fa;
+      --code-bg: rgba(255, 255, 255, 0.08);
+    }
+
+    .host-light {
+      --page-bg: transparent;
+      --text-primary: #0f172a;
+      --text-subtle: #334155;
+      --label: #64748b;
+
+      --panel-bg: rgba(15, 23, 42, 0.05);
+      --panel-bg-strong: rgba(15, 23, 42, 0.08);
+      --panel-bg-emphasis: rgba(15, 23, 42, 0.10);
+      --panel-border: rgba(15, 23, 42, 0.18);
+
+      --mono-bg: rgba(15, 23, 42, 0.03);
+      --mono-border: rgba(15, 23, 42, 0.15);
+
+      --button-bg: rgba(15, 23, 42, 0.08);
+      --button-bg-hover: rgba(15, 23, 42, 0.14);
+      --button-text: #0f172a;
+      --button-border: rgba(15, 23, 42, 0.24);
+
+      --link: #2563eb;
+      --code-bg: rgba(15, 23, 42, 0.06);
+    }
+
+    :root,
+    .host-dark {
+      --page-bg: transparent;
+      --text-primary: #e4e4e7;
+      --text-subtle: #a1a1aa;
+      --label: #71717a;
+
+      --panel-bg: rgba(255, 255, 255, 0.04);
+      --panel-bg-strong: rgba(255, 255, 255, 0.06);
+      --panel-bg-emphasis: rgba(255, 255, 255, 0.08);
+      --panel-border: rgba(255, 255, 255, 0.16);
+
+      --mono-bg: rgba(255, 255, 255, 0.02);
+      --mono-border: rgba(255, 255, 255, 0.14);
+
+      --button-bg: rgba(255, 255, 255, 0.10);
+      --button-bg-hover: rgba(255, 255, 255, 0.16);
+      --button-text: #e4e4e7;
+      --button-border: rgba(255, 255, 255, 0.24);
+
+      --link: #60a5fa;
+      --code-bg: rgba(255, 255, 255, 0.08);
+    }
+
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       font-size: 14px;
-      color: #e4e4e7;
-      background: #18181b;
+      color: var(--text-primary);
+      background: var(--page-bg);
       padding: 16px;
     }
     .header {
@@ -33,27 +103,33 @@
     .badge.completed { background: #052e16; color: #4ade80; }
     .badge.error { background: #450a0a; color: #f87171; }
     .badge.queued { background: #1e1b4b; color: #a78bfa; }
-    .elapsed { font-size: 12px; color: #71717a; margin-left: auto; }
+    .elapsed { font-size: 12px; color: var(--label); margin-left: auto; }
     .section-label {
       font-size: 11px; font-weight: 600; text-transform: uppercase;
-      letter-spacing: 0.05em; color: #71717a; margin-bottom: 6px;
+      letter-spacing: 0.05em; color: var(--label); margin-bottom: 6px;
     }
     .logs {
-      background: #09090b; border: 1px solid #27272a; border-radius: 8px;
+      background: var(--panel-bg);
+      border: 1px solid var(--panel-border);
+      border-radius: 8px;
       padding: 10px 12px; margin-bottom: 12px; max-height: 140px; overflow-y: auto;
       font-family: "SF Mono", "Fira Code", monospace; font-size: 11px;
-      color: #a1a1aa; line-height: 1.6;
+      color: var(--text-subtle); line-height: 1.6;
+      backdrop-filter: blur(3px);
     }
     .logs .entry { white-space: pre-wrap; word-break: break-word; display: flex; gap: 8px; }
-    .logs .ts { color: #52525b; flex-shrink: 0; }
+    .logs .ts { color: var(--label); flex-shrink: 0; }
     .logs .icon { flex-shrink: 0; }
     .logs .entry.lifecycle .icon { color: #a78bfa; }
     .logs .entry.tool .icon { color: #60a5fa; }
     .logs .entry.tool-result .icon { color: #4ade80; }
     .details-wrap { display: none; margin-bottom: 12px; }
     .details {
-      background: #09090b; border: 1px solid #27272a; border-radius: 8px;
+      background: var(--panel-bg);
+      border: 1px solid var(--panel-border);
+      border-radius: 8px;
       padding: 12px;
+      backdrop-filter: blur(3px);
     }
     .detail-grid {
       display: grid;
@@ -62,8 +138,8 @@
       margin-bottom: 10px;
     }
     .detail-item {
-      background: #111113;
-      border: 1px solid #27272a;
+      background: var(--panel-bg-strong);
+      border: 1px solid var(--panel-border);
       border-radius: 8px;
       padding: 10px;
     }
@@ -72,18 +148,18 @@
       font-weight: 600;
       text-transform: uppercase;
       letter-spacing: 0.05em;
-      color: #71717a;
+      color: var(--label);
       margin-bottom: 4px;
     }
     .detail-value {
       font-size: 13px;
       line-height: 1.5;
-      color: #f4f4f5;
+      color: var(--text-primary);
       word-break: break-word;
     }
-    .detail-value.muted { color: #c4c4c9; }
+    .detail-value.muted { color: var(--text-subtle); }
     .detail-link {
-      color: #60a5fa;
+      color: var(--link);
       text-decoration: none;
     }
     .detail-link:hover { text-decoration: underline; }
@@ -94,22 +170,25 @@
       margin-top: 10px;
     }
     .file-chip {
-      background: #111827;
-      border: 1px solid #1f2937;
+      background: var(--panel-bg-emphasis);
+      border: 1px solid var(--panel-border);
       border-radius: 6px;
       padding: 6px 8px;
       font-family: "SF Mono", "Fira Code", monospace;
       font-size: 11px;
-      color: #cbd5e1;
+      color: var(--text-subtle);
       word-break: break-all;
     }
     .result {
-      background: #09090b; border: 1px solid #27272a; border-radius: 8px;
+      background: var(--panel-bg);
+      border: 1px solid var(--panel-border);
+      border-radius: 8px;
       padding: 12px; max-height: 400px; overflow-y: auto;
       word-break: break-word; font-size: 13px; line-height: 1.6;
+      backdrop-filter: blur(3px);
     }
     .result h1, .result h2, .result h3 {
-      color: #f4f4f5; margin: 12px 0 6px 0; font-size: 15px;
+      color: var(--text-primary); margin: 12px 0 6px 0; font-size: 15px;
     }
     .result h1 { font-size: 17px; }
     .result h3 { font-size: 13px; }
@@ -117,31 +196,36 @@
     .result ul, .result ol { margin: 6px 0; padding-left: 20px; }
     .result li { margin: 2px 0; }
     .result code {
-      background: #27272a; padding: 1px 4px; border-radius: 3px;
+      background: var(--code-bg); padding: 1px 4px; border-radius: 3px;
       font-family: "SF Mono", "Fira Code", monospace; font-size: 12px;
+      color: var(--text-primary);
     }
     .result pre {
-      background: #27272a; padding: 8px 10px; border-radius: 6px;
+      background: var(--mono-bg);
+      border: 1px solid var(--mono-border);
+      padding: 8px 10px; border-radius: 6px;
       overflow-x: auto; margin: 8px 0;
     }
     .result pre code { background: none; padding: 0; }
-    .result strong { color: #f4f4f5; }
-    .result a { color: #60a5fa; text-decoration: none; }
+    .result strong { color: var(--text-primary); }
+    .result a { color: var(--link); text-decoration: none; }
     .result a:hover { text-decoration: underline; }
     .result blockquote {
-      border-left: 3px solid #3f3f46; padding-left: 10px; margin: 8px 0; color: #a1a1aa;
+      border-left: 3px solid var(--panel-border); padding-left: 10px; margin: 8px 0; color: var(--text-subtle);
     }
     .actions {
       display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px;
     }
     .action-btn {
-      background: #27272a; color: #e4e4e7; border: 1px solid #3f3f46;
+      background: var(--button-bg);
+      color: var(--button-text);
+      border: 1px solid var(--button-border);
       border-radius: 6px; padding: 6px 12px; font-size: 12px; font-weight: 500;
       cursor: pointer; transition: background 0.15s;
     }
-    .action-btn:hover { background: #3f3f46; }
+    .action-btn:hover { background: var(--button-bg-hover); }
     .action-btn:disabled { opacity: 0.4; cursor: default; }
-    .action-btn.primary { background: #1d4ed8; border-color: #2563eb; }
+    .action-btn.primary { background: #1d4ed8; border-color: #2563eb; color: #fff; }
     .action-btn.primary:hover { background: #2563eb; }
     .spinner {
       display: inline-block; width: 12px; height: 12px;
@@ -188,7 +272,7 @@
     var oai = window.openai || {};
 
     var ICONS = { lifecycle: '▶', tool: '⚒', 'tool-result': '✔' };
-    var STORAGE_KEY = 'openclaw-status-widget:v1';
+    var STORAGE_KEY = 'openclaw-status-widget:v2';
     var TERMINAL_WIDGET_STATES = { waiting: true, completed: true, error: true };
 
     function renderMarkdown(text) {
@@ -216,6 +300,95 @@
       var d = document.createElement('div');
       d.textContent = s;
       return d.innerHTML;
+    }
+
+    function normalizeTheme(value) {
+      if (!value) return null;
+      var lower = String(value).toLowerCase();
+      if (lower.indexOf('light') !== -1) return 'light';
+      if (lower.indexOf('dark') !== -1) return 'dark';
+      return null;
+    }
+
+    function detectHostTheme() {
+      var theme = oai && oai.theme;
+      if (!theme) return null;
+      if (typeof theme === 'string') return normalizeTheme(theme);
+      if (theme.dark === false) return 'light';
+      if (theme.dark === true) return 'dark';
+      return normalizeTheme(theme.mode || theme.theme || theme.colorMode || theme.name);
+    }
+
+    function applyTheme(themeHint) {
+      var theme = themeHint || detectHostTheme();
+      if (!theme && window.matchMedia) {
+        theme = window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+      }
+      if (theme === 'light') {
+        document.body.classList.remove('host-dark');
+        document.body.classList.add('host-light');
+      } else {
+        document.body.classList.remove('host-light');
+        document.body.classList.add('host-dark');
+      }
+    }
+
+    function setCompletionHandoffState(data, sent, pending) {
+      if (!data) return;
+      data.completionHandoffSent = !!sent;
+      data.completionHandoffPending = !!(pending && !sent);
+    }
+
+    function sendFollowUpMessageSafely(payload) {
+      if (!oai.sendFollowUpMessage) return Promise.resolve(false);
+      try {
+        return Promise.resolve(oai.sendFollowUpMessage(payload)).then(function() {
+          return true;
+        }).catch(function() {
+          return false;
+        });
+      } catch (directErr) {
+        try {
+          return Promise.resolve(oai.sendFollowUpMessage(typeof payload === 'string' ? payload : payload && payload.prompt)).then(function() {
+            return true;
+          }).catch(function() {
+            return false;
+          });
+        } catch (fallbackErr) {
+          return Promise.resolve(false);
+        }
+      }
+    }
+
+    function persistCompletionHandoff(data, sent, pending) {
+      setCompletionHandoffState(data, sent, pending);
+      persistRunState(data);
+    }
+
+    async function ensureCompletionHandoff(data, options) {
+      options = options || {};
+      if (!data || !isTerminalData(data) || data.completionHandoffSent) return false;
+
+      var directive = options.directive || buildDirective(data);
+      var sent = await sendFollowUpMessageSafely({ prompt: directive, scrollToBottom: !options.keepSilent });
+      if (!sent) {
+        sent = await sendFollowUpMessageSafely(directive);
+      }
+
+      if (sent) {
+        persistCompletionHandoff(data, true, false);
+      } else {
+        persistCompletionHandoff(data, false, true);
+      }
+
+      return sent;
+    }
+
+    async function replayPendingCompletionHandoff() {
+      if (!lastData || !isTerminalData(lastData)) return;
+      if (lastData.completionHandoffSent || !lastData.completionHandoffPending) return;
+
+      await ensureCompletionHandoff(lastData, { keepSilent: false });
     }
 
     function resetUi() {
@@ -309,7 +482,7 @@
         ? data.widgetStatus
         : { version: 1, state: getWidgetStatus(data) };
       return {
-        version: 1,
+        version: 2,
         jobId: data.jobId || jobId,
         sessionKey: data.sessionKey || sessionKey,
         startedAt: data.startedAt || startTime,
@@ -320,6 +493,9 @@
         error: data.error,
         errorInfo: data.errorInfo,
         artifacts: data.artifacts,
+        continuationState: data.continuationState,
+        completionHandoffSent: !!data.completionHandoffSent,
+        completionHandoffPending: !!data.completionHandoffPending,
         logs: Array.isArray(data.logs) ? data.logs.slice(-100) : ((lastData && lastData.logs) || []),
       };
     }
@@ -338,6 +514,8 @@
           oai.setWidgetState({
             runState: snapshot,
             done: isTerminalData(snapshot),
+            completionHandoffSent: snapshot.completionHandoffSent,
+            completionHandoffPending: snapshot.completionHandoffPending,
             jobId: snapshot.jobId,
             sessionKey: snapshot.sessionKey,
             startedAt: snapshot.startedAt,
@@ -369,7 +547,7 @@
       if (widgetState.runState && widgetState.runState.jobId) return widgetState.runState;
       if (!(widgetState.jobId || widgetState.summary || widgetState.status || widgetState.details)) return null;
       return {
-        version: 1,
+        version: 2,
         jobId: widgetState.jobId,
         sessionKey: widgetState.sessionKey,
         startedAt: widgetState.startedAt,
@@ -378,6 +556,11 @@
         details: widgetState.details,
         summary: widgetState.status === 'error' ? undefined : widgetState.summary,
         error: widgetState.status === 'error' ? widgetState.summary : undefined,
+        errorInfo: widgetState.errorInfo,
+        artifacts: widgetState.artifacts,
+        continuationState: widgetState.continuationState,
+        completionHandoffSent: !!widgetState.completionHandoffSent,
+        completionHandoffPending: !!widgetState.completionHandoffPending,
         logs: widgetState.logs || [],
       };
     }
@@ -385,19 +568,21 @@
     function mergeWithSavedData(data, saved) {
       if (!data || !saved || saved.jobId !== data.jobId) return data;
       return {
-        version: 1,
+        version: 2,
         jobId: data.jobId,
         sessionKey: data.sessionKey || saved.sessionKey,
-        startedAt: saved.startedAt || data.startedAt,
-        status: saved.status || data.status,
-        widgetStatus: saved.widgetStatus || data.widgetStatus,
-        details: saved.details || data.details,
-        summary: saved.summary || data.summary,
-        error: saved.error || data.error,
-        errorInfo: saved.errorInfo || data.errorInfo,
-        artifacts: saved.artifacts || data.artifacts,
-        logs: saved.logs || data.logs || [],
+        startedAt: data.startedAt || saved.startedAt,
+        status: data.status || saved.status,
+        widgetStatus: data.widgetStatus || saved.widgetStatus,
+        details: data.details || saved.details,
+        summary: data.summary || saved.summary,
+        error: data.error || saved.error,
+        errorInfo: data.errorInfo || saved.errorInfo,
+        artifacts: data.artifacts || saved.artifacts,
+        logs: data.logs || saved.logs || [],
         continuationState: data.continuationState || saved.continuationState,
+        completionHandoffSent: !!(data.completionHandoffSent || saved.completionHandoffSent),
+        completionHandoffPending: !!(data.completionHandoffPending || saved.completionHandoffPending),
       };
     }
 
@@ -575,8 +760,15 @@
       if (options.announce === false) return;
 
       var directive = buildDirective(data);
-      try { if (oai.requestTargetedReply) await oai.requestTargetedReply(); } catch (e) {}
-      try { if (oai.sendFollowUpMessage) await oai.sendFollowUpMessage(directive); } catch (e) {}
+      var canSend = !data.completionHandoffSent;
+      if (canSend) {
+        try {
+          await ensureCompletionHandoff(data, { directive: directive });
+        } catch (err) {
+          syncCompletionHandoffState(data, false, true);
+          persistRunState(data);
+        }
+      }
     }
 
     function attachToResolvedJob(data) {
@@ -658,23 +850,29 @@
       var data = extractData(output);
       if (!data || !data.jobId) return false;
       var saved = loadStoredData();
-      return initializeFromData(mergeWithSavedData(data, saved), { announce: false });
+      var merged = mergeWithSavedData(data, saved);
+      var shouldAnnounce = !merged.completionHandoffSent;
+      return initializeFromData(merged, { announce: shouldAnnounce && isTerminalData(merged) });
     }
 
     function restoreSavedRun() {
       var saved = loadStoredData();
       if (!saved || !saved.jobId) return false;
-      return initializeFromData(saved, { announce: false });
+      var shouldAnnounce = !saved.completionHandoffSent && isTerminalData(saved);
+      return initializeFromData(saved, { announce: shouldAnnounce });
     }
 
     function restoreWidgetRun() {
       var data = widgetStateToData(oai.widgetState);
       if (!data || !data.jobId) return false;
-      return initializeFromData(data, { announce: false });
+      var shouldAnnounce = !data.completionHandoffSent && isTerminalData(data);
+      return initializeFromData(data, { announce: shouldAnnounce });
     }
 
     function bootstrap() {
       oai = window.openai || oai;
+      applyTheme();
+
       if (startFromToolOutput(oai.toolOutput)) return;
       if (restoreSavedRun()) return;
       restoreWidgetRun();
@@ -682,8 +880,15 @@
 
     bootstrap();
 
+    window.addEventListener('visibilitychange', function() {
+      if (!document.hidden) {
+        replayPendingCompletionHandoff();
+      }
+    });
+
     window.addEventListener('openai:set_globals', function() {
       oai = window.openai || oai;
+      applyTheme();
       var data = extractData(oai.toolOutput);
       if (!data || !data.jobId) return;
       if (data.jobId === jobId) return;

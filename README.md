@@ -32,7 +32,9 @@ The widget is responsible for presentation only:
   - live activity log
   - compact outcome/details panel
   - context-aware follow-up actions
-- On terminal states it asks ChatGPT for a targeted reply so the conversation gets a natural summary.
+- On terminal states it asks ChatGPT for a follow-up summary via the host's `sendFollowUpMessage` surface so the chat thread gets a natural continuation.
+  - If the widget is remounted from cached run state, it will also re-emit a summary once if a completion handoff wasn't previously sent.
+  - True push/notification delivery from this surface is not supported; if the widget is fully unmounted, host re-awakening requires a refreshed mount to replay state.
 
 The server now also returns a small `widgetStatus` object and normalized `details` payload so the widget does not need to reverse-engineer state from raw artifacts alone.
 
@@ -85,4 +87,5 @@ This endpoint is the single polling surface for the widget.
 
 - No GitHub Actions or extra infrastructure required.
 - The adapter keeps artifact extraction intentionally lightweight and heuristic-based.
+- The widget uses translucent panels + border accents that adapt to host light/dark theme so it blends in with the ChatGPT surface while preserving contrast.
 - The UI favors clear state semantics over elaborate visuals.
