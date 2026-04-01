@@ -6,18 +6,20 @@
   <title>OpenClaw Task</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { width: 100%; }
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       font-size: 14px;
       color: #e4e4e7;
       background: #18181b;
-      padding: 16px;
+      padding: 14px 16px 16px;
+      overflow-x: hidden;
     }
     .header {
       display: flex;
       align-items: center;
       gap: 8px;
-      margin-bottom: 12px;
+      margin-bottom: 10px;
     }
     .badge {
       display: inline-block;
@@ -38,15 +40,36 @@
       font-size: 11px; font-weight: 600; text-transform: uppercase;
       letter-spacing: 0.05em; color: #71717a; margin-bottom: 6px;
     }
+    .activity-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 8px;
+      font-size: 12px;
+      color: #a1a1aa;
+    }
+    .activity-meta .emphasis { color: #e4e4e7; }
+    .activity-meta .live { color: #fbbf24; }
+    .activity-meta .idle { color: #a1a1aa; }
     .logs {
       background: #09090b; border: 1px solid #27272a; border-radius: 8px;
-      padding: 10px 12px; margin-bottom: 12px; max-height: 140px; overflow-y: auto;
+      padding: 10px 12px; margin-bottom: 12px; max-height: min(136px, 28vh); overflow-y: auto;
       font-family: "SF Mono", "Fira Code", monospace; font-size: 11px;
       color: #a1a1aa; line-height: 1.6;
+      overscroll-behavior: contain;
     }
-    .logs .entry { white-space: pre-wrap; word-break: break-word; display: flex; gap: 8px; }
+    .logs .entry { white-space: pre-wrap; word-break: break-word; display: flex; gap: 8px; align-items: flex-start; }
     .logs .ts { color: #52525b; flex-shrink: 0; }
     .logs .icon { flex-shrink: 0; }
+    .logs .copy { min-width: 0; flex: 1; }
+    .logs .kind {
+      color: #71717a;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      font-size: 10px;
+      margin-right: 6px;
+    }
+    .logs .count { color: #71717a; margin-left: 6px; }
     .logs .entry.lifecycle .icon { color: #a78bfa; }
     .logs .entry.tool .icon { color: #60a5fa; }
     .logs .entry.tool-result .icon { color: #4ade80; }
@@ -105,8 +128,9 @@
     }
     .result {
       background: #09090b; border: 1px solid #27272a; border-radius: 8px;
-      padding: 12px; max-height: 400px; overflow-y: auto;
+      padding: 12px; max-height: min(360px, 46vh); overflow-y: auto;
       word-break: break-word; font-size: 13px; line-height: 1.6;
+      overscroll-behavior: contain;
     }
     .result h1, .result h2, .result h3 {
       color: #f4f4f5; margin: 12px 0 6px 0; font-size: 15px;
@@ -158,6 +182,7 @@
     <span class="elapsed" id="elapsed"></span>
   </div>
   <div class="section-label">Activity</div>
+  <div class="activity-meta" id="activityMeta"></div>
   <div class="logs" id="logs"></div>
   <div class="details-wrap" id="detailsWrap">
     <div class="section-label" id="detailsLabel">Outcome</div>
@@ -171,6 +196,7 @@
     var badgeEl = document.getElementById('badge');
     var spinnerEl = document.getElementById('spinnerWrap');
     var elapsedEl = document.getElementById('elapsed');
+    var activityMetaEl = document.getElementById('activityMeta');
     var logsEl = document.getElementById('logs');
     var detailsWrapEl = document.getElementById('detailsWrap');
     var detailsLabelEl = document.getElementById('detailsLabel');
@@ -185,6 +211,10 @@
     var done = false;
     var seenLogCount = 0;
     var lastData = null;
+    var lastGroupedLogKey = null;
+    var lastGroupedLogCount = 0;
+    var lastGroupedCountEl = null;
+    var lifecycleResumeCount = 0;
     var oai = window.openai || {};
 
     var ICONS = { lifecycle: '▶', tool: '⚒', 'tool-result': '✔' };
@@ -218,6 +248,79 @@
       return d.innerHTML;
     }
 
+    function requestHeightSync() {
+      if (!oai.notifyIntrinsicHeight || !window.requestAnimationFrame) return;
+      window.requestAnimationFrame(function() {
+        try { oai.notifyIntrinsicHeight(); } catch (e) {}
+      });
+    }
+
+    function formatSeconds(seconds) {
+      var s = Math.max(0, Math.round(seconds));
+      var m = Math.floor(s / 60);
+      var sec = s % 60;
+      return m > 0 ? m + 'm ' + sec + 's' : sec + 's';
+    }
+
+    function getActivityState() {
+      var logs = (lastData && lastData.logs) || [];
+      if (!logs.length) return done ? 'No activity events captured' : 'Waiting for first event';
+
+      var lastEntry = logs[logs.length - 1];
+      var sinceLast = Math.round((Date.now() - lastEntry.ts) / 1000);
+      if (!done && sinceLast >= 12) return 'Waiting for next event · last update ' + formatSeconds(sinceLast) + ' ago';
+      if (!done) return 'Active now · last update ' + formatSeconds(sinceLast) + ' ago';
+      return 'Run finished · ' + logs.length + ' events captured';
+    }
+
+    function renderActivityMeta() {
+      if (!activityMetaEl) return;
+      var logs = (lastData && lastData.logs) || [];
+      var parts = [];
+      var statusText = getActivityState();
+      var statusClass = (!done && logs.length && Date.now() - logs[logs.length - 1].ts < 12_000) ? 'live' : 'idle';
+      parts.push('<span class="' + statusClass + '">' + escapeHtml(statusText) + '</span>');
+      if (logs.length) {
+        parts.push('<span>' + logs.length + ' event' + (logs.length === 1 ? '' : 's') + '</span>');
+      }
+      if (lifecycleResumeCount > 0) {
+        parts.push('<span class="emphasis">' + lifecycleResumeCount + ' internal restart' + (lifecycleResumeCount === 1 ? '' : 's') + ' in same run</span>');
+      }
+      activityMetaEl.innerHTML = parts.join(' · ');
+    }
+
+    function normalizeLogEntry(entry) {
+      var text = entry.text || '';
+      var kind = entry.type;
+      var groupKey = entry.type + '|' + text;
+      var canGroup = false;
+
+      if (entry.type === 'lifecycle') {
+        if (text === 'Run started') {
+          kind = 'run';
+          groupKey = 'lifecycle|run-started';
+        } else if (text === 'Agent resumed in same run') {
+          kind = 'same run';
+          groupKey = 'lifecycle|resume';
+          canGroup = true;
+          lifecycleResumeCount += 1;
+        } else if (text === 'Agent phase finished') {
+          kind = 'same run';
+          groupKey = 'lifecycle|phase-finished';
+        } else if (text.indexOf('Lifecycle:') === 0) {
+          kind = 'lifecycle';
+          groupKey = 'lifecycle|' + text;
+        }
+      } else if (entry.type === 'tool') {
+        kind = 'tool start';
+        text = text.replace(/^([^:]+):\s*/, '$1 · ');
+      } else if (entry.type === 'tool-result') {
+        kind = 'tool result';
+      }
+
+      return { text: text, kind: kind, groupKey: groupKey, canGroup: canGroup };
+    }
+
     function resetUi() {
       logsEl.innerHTML = '';
       detailsWrapEl.style.display = 'none';
@@ -229,27 +332,54 @@
       resultEl.innerHTML = '';
       actionsEl.style.display = 'none';
       actionsEl.innerHTML = '';
+      lastData = null;
       seenLogCount = 0;
+      lastGroupedLogKey = null;
+      lastGroupedLogCount = 0;
+      lastGroupedCountEl = null;
+      lifecycleResumeCount = 0;
       done = false;
       setStatus('queued');
       elapsedEl.textContent = '';
+      renderActivityMeta();
+      requestHeightSync();
     }
 
     function addLogEntry(entry) {
+      var info = normalizeLogEntry(entry);
+      if (info.canGroup && lastGroupedLogKey === info.groupKey && lastGroupedCountEl) {
+        lastGroupedLogCount += 1;
+        lastGroupedCountEl.textContent = '×' + lastGroupedLogCount;
+        renderActivityMeta();
+        return;
+      }
+
       var el = document.createElement('div');
       el.className = 'entry ' + entry.type;
       var elapsed = Math.round((entry.ts - startTime) / 1000);
       el.innerHTML = '<span class="ts">' + elapsed + 's</span>'
         + '<span class="icon">' + (ICONS[entry.type] || '•') + '</span>'
-        + '<span>' + escapeHtml(entry.text) + '</span>';
+        + '<span class="copy"><span class="kind">' + escapeHtml(info.kind) + '</span>' + escapeHtml(info.text) + '<span class="count"></span></span>';
       logsEl.appendChild(el);
       logsEl.scrollTop = logsEl.scrollHeight;
+
+      if (info.canGroup) {
+        lastGroupedLogKey = info.groupKey;
+        lastGroupedLogCount = 1;
+        lastGroupedCountEl = el.querySelector('.count');
+      } else {
+        lastGroupedLogKey = null;
+        lastGroupedLogCount = 0;
+        lastGroupedCountEl = null;
+      }
     }
 
     function renderLogs(logs) {
       if (!logs || logs.length <= seenLogCount) return;
       for (var i = seenLogCount; i < logs.length; i++) addLogEntry(logs[i]);
       seenLogCount = logs.length;
+      renderActivityMeta();
+      requestHeightSync();
     }
 
     function setStatus(status) {
@@ -262,6 +392,7 @@
         spinnerEl.style.display = 'inline-block';
         done = false;
       }
+      renderActivityMeta();
     }
 
     function extractData(obj) {
@@ -459,6 +590,7 @@
       }
 
       detailsEl.innerHTML = blocks.join('');
+      requestHeightSync();
     }
 
     function makeFollowUpAction(label, msg, primary) {
@@ -544,6 +676,7 @@
         };
         actionsEl.appendChild(btn);
       });
+      requestHeightSync();
     }
 
     async function showResult(data, options) {
@@ -571,6 +704,8 @@
       if (options.persist !== false) {
         persistRunState(data);
       }
+
+      requestHeightSync();
 
       if (options.announce === false) return;
 
@@ -615,10 +750,8 @@
 
     setInterval(function() {
       if (done) return;
-      var s = Math.round((Date.now() - startTime) / 1000);
-      var m = Math.floor(s / 60);
-      var sec = s % 60;
-      elapsedEl.textContent = m > 0 ? m + 'm ' + sec + 's' : sec + 's';
+      elapsedEl.textContent = formatSeconds((Date.now() - startTime) / 1000);
+      renderActivityMeta();
     }, 1000);
 
     async function poll() {
@@ -675,9 +808,11 @@
 
     function bootstrap() {
       oai = window.openai || oai;
+      renderActivityMeta();
       if (startFromToolOutput(oai.toolOutput)) return;
       if (restoreSavedRun()) return;
       restoreWidgetRun();
+      requestHeightSync();
     }
 
     bootstrap();
@@ -688,6 +823,7 @@
       if (!data || !data.jobId) return;
       if (data.jobId === jobId) return;
       startFromToolOutput(oai.toolOutput);
+      requestHeightSync();
     });
   </script>
 </body>

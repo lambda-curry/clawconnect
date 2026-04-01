@@ -32,6 +32,7 @@ The widget is responsible for presentation only:
   - live activity log
   - compact outcome/details panel
   - context-aware follow-up actions
+- The activity log is run-scoped: repeated lifecycle starts are not new top-level jobs, they are additional lifecycle/resume events within the same run. The widget labels those as same-run activity and shows a last-event indicator when the stream goes quiet.
 - On terminal states it asks ChatGPT for a targeted reply so the conversation gets a natural summary.
 
 The server now also returns a small `widgetStatus` object and normalized `details` payload so the widget does not need to reverse-engineer state from raw artifacts alone.

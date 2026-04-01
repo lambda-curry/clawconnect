@@ -276,6 +276,7 @@ export class OpenClawGateway {
 
       // Track agent stream events for logs + text fallback
       let agentStreamText = ''
+      let lifecycleStartCount = 0
       const agentSubId = randomUUID()
       this.subscribers.set(agentSubId, (frame) => {
         if (frame.type !== 'event' || frame.event !== 'agent') return
@@ -289,7 +290,17 @@ export class OpenClawGateway {
         if (onEvent) {
           if (p.stream === 'lifecycle') {
             const phase = p.data?.phase as string
-            onEvent({ type: 'lifecycle', text: phase === 'start' ? 'Agent started' : 'Agent finished' })
+            if (phase === 'start') {
+              lifecycleStartCount += 1
+              onEvent({
+                type: 'lifecycle',
+                text: lifecycleStartCount === 1 ? 'Run started' : 'Agent resumed in same run',
+              })
+            } else if (phase === 'finish') {
+              onEvent({ type: 'lifecycle', text: 'Agent phase finished' })
+            } else {
+              onEvent({ type: 'lifecycle', text: `Lifecycle: ${phase || 'update'}` })
+            }
           } else if (p.stream === 'tool' && p.data?.phase === 'start') {
             const toolName = p.data?.name as string ?? 'unknown'
             const args = p.data?.args as Record<string, unknown> ?? {}
