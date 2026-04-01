@@ -401,11 +401,12 @@
       for (var i = 0; i < state.logs.length; i++) {
         var norm = normalizeLogEntry(state.logs[i]);
         if (shouldDedup(prev, norm)) {
-          // Replace last child
           if (logsEl.lastChild) logsEl.removeChild(logsEl.lastChild);
         }
         var elapsed = Math.round((state.logs[i].ts - (state.startedAt || state.logs[i].ts)) / 1000);
-        logsEl.appendChild(renderLogEntry(norm, elapsed));
+        var el = renderLogEntry(norm, elapsed);
+        el._normalized = norm;
+        logsEl.appendChild(el);
         prev = norm;
       }
       logsEl.scrollTop = logsEl.scrollHeight;
