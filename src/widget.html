@@ -29,6 +29,7 @@
       letter-spacing: 0.05em;
     }
     .badge.running { background: #422006; color: #fbbf24; }
+    .badge.waiting { background: #172554; color: #93c5fd; }
     .badge.completed { background: #052e16; color: #4ade80; }
     .badge.error { background: #450a0a; color: #f87171; }
     .badge.queued { background: #1e1b4b; color: #a78bfa; }
@@ -49,6 +50,59 @@
     .logs .entry.lifecycle .icon { color: #a78bfa; }
     .logs .entry.tool .icon { color: #60a5fa; }
     .logs .entry.tool-result .icon { color: #4ade80; }
+    .details-wrap { display: none; margin-bottom: 12px; }
+    .details {
+      background: #09090b; border: 1px solid #27272a; border-radius: 8px;
+      padding: 12px;
+    }
+    .detail-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+    .detail-item {
+      background: #111113;
+      border: 1px solid #27272a;
+      border-radius: 8px;
+      padding: 10px;
+    }
+    .detail-key {
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: #71717a;
+      margin-bottom: 4px;
+    }
+    .detail-value {
+      font-size: 13px;
+      line-height: 1.5;
+      color: #f4f4f5;
+      word-break: break-word;
+    }
+    .detail-value.muted { color: #c4c4c9; }
+    .detail-link {
+      color: #60a5fa;
+      text-decoration: none;
+    }
+    .detail-link:hover { text-decoration: underline; }
+    .file-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      margin-top: 10px;
+    }
+    .file-chip {
+      background: #111827;
+      border: 1px solid #1f2937;
+      border-radius: 6px;
+      padding: 6px 8px;
+      font-family: "SF Mono", "Fira Code", monospace;
+      font-size: 11px;
+      color: #cbd5e1;
+      word-break: break-all;
+    }
     .result {
       background: #09090b; border: 1px solid #27272a; border-radius: 8px;
       padding: 12px; max-height: 400px; overflow-y: auto;
@@ -105,6 +159,10 @@
   </div>
   <div class="section-label">Activity</div>
   <div class="logs" id="logs"></div>
+  <div class="details-wrap" id="detailsWrap">
+    <div class="section-label" id="detailsLabel">Outcome</div>
+    <div class="details" id="details"></div>
+  </div>
   <div class="section-label" id="resultLabel" style="display:none">Clawdy's response</div>
   <div class="result" id="result" style="display:none"></div>
   <div class="actions" id="actions" style="display:none"></div>
@@ -114,6 +172,9 @@
     var spinnerEl = document.getElementById('spinnerWrap');
     var elapsedEl = document.getElementById('elapsed');
     var logsEl = document.getElementById('logs');
+    var detailsWrapEl = document.getElementById('detailsWrap');
+    var detailsLabelEl = document.getElementById('detailsLabel');
+    var detailsEl = document.getElementById('details');
     var resultLabel = document.getElementById('resultLabel');
     var resultEl = document.getElementById('result');
     var actionsEl = document.getElementById('actions');
@@ -185,9 +246,11 @@
     function setStatus(status) {
       badgeEl.className = 'badge ' + status;
       badgeEl.textContent = status;
-      if (status === 'completed' || status === 'error') {
+      if (status === 'completed' || status === 'waiting' || status === 'error') {
         spinnerEl.style.display = 'none';
         done = true;
+      } else {
+        spinnerEl.style.display = 'inline-block';
       }
     }
 
@@ -198,17 +261,116 @@
       return null;
     }
 
+    function getWidgetStatus(data) {
+      if (data && data.widgetStatus && data.widgetStatus.state) return data.widgetStatus.state;
+      var details = getDetails(data);
+      if (data.status === 'error') return 'error';
+      if (details.needsHumanDecision) return 'waiting';
+      if (data.status === 'completed') return 'completed';
+      return 'running';
+    }
+
+    function getDetails(data) {
+      if (data && data.details) return data.details;
+      var artifacts = (data && data.artifacts) || {};
+      var continuation = data && data.continuationState;
+      return {
+        filesChangedCount: (artifacts.filesChanged || []).length,
+        filesChanged: artifacts.filesChanged || [],
+        branchName: artifacts.branchName,
+        commitSha: artifacts.commitSha,
+        prUrl: artifacts.prUrl,
+        needsHumanDecision: !!artifacts.needsHumanDecision,
+        recommendedNextStep: continuation && continuation.recommendedNextStep,
+      };
+    }
+
+    function renderDetails(data) {
+      var details = getDetails(data);
+      var hasAny = !!(
+        details.filesChangedCount ||
+        details.branchName ||
+        details.commitSha ||
+        details.prUrl ||
+        details.needsHumanDecision ||
+        details.recommendedNextStep
+      );
+
+      if (!hasAny) {
+        detailsWrapEl.style.display = 'none';
+        detailsEl.innerHTML = '';
+        return;
+      }
+
+      detailsWrapEl.style.display = 'block';
+      detailsLabelEl.textContent = getWidgetStatus(data) === 'waiting' ? 'Waiting on you' : 'Outcome';
+
+      var blocks = [];
+      blocks.push('<div class="detail-grid">');
+
+      if (details.prUrl) {
+        blocks.push('<div class="detail-item"><div class="detail-key">Pull request</div><div class="detail-value"><a class="detail-link" href="' + escapeHtml(details.prUrl) + '" target="_blank">' + escapeHtml(details.prUrl) + '</a></div></div>');
+      }
+      if (details.branchName) {
+        blocks.push('<div class="detail-item"><div class="detail-key">Branch</div><div class="detail-value">' + escapeHtml(details.branchName) + '</div></div>');
+      }
+      if (details.commitSha) {
+        blocks.push('<div class="detail-item"><div class="detail-key">Commit</div><div class="detail-value">' + escapeHtml(details.commitSha) + '</div></div>');
+      }
+      if (details.filesChangedCount) {
+        blocks.push('<div class="detail-item"><div class="detail-key">Files changed</div><div class="detail-value">' + details.filesChangedCount + '</div></div>');
+      }
+      if (details.needsHumanDecision) {
+        blocks.push('<div class="detail-item"><div class="detail-key">Needs human input</div><div class="detail-value muted">Clawdy is waiting for a decision before continuing.</div></div>');
+      }
+      if (details.recommendedNextStep) {
+        blocks.push('<div class="detail-item"><div class="detail-key">Recommended next step</div><div class="detail-value muted">' + escapeHtml(details.recommendedNextStep) + '</div></div>');
+      }
+
+      blocks.push('</div>');
+
+      if (details.filesChangedCount) {
+        var maxFiles = 8;
+        blocks.push('<div class="detail-key">Changed files</div>');
+        blocks.push('<div class="file-list">');
+        for (var i = 0; i < Math.min(details.filesChanged.length, maxFiles); i++) {
+          blocks.push('<div class="file-chip">' + escapeHtml(details.filesChanged[i]) + '</div>');
+        }
+        if (details.filesChanged.length > maxFiles) {
+          blocks.push('<div class="file-chip">+' + (details.filesChanged.length - maxFiles) + ' more</div>');
+        }
+        blocks.push('</div>');
+      }
+
+      detailsEl.innerHTML = blocks.join('');
+    }
+
+    function makeFollowUpAction(label, msg, primary) {
+      return { kind: 'message', label: label, msg: msg, primary: !!primary };
+    }
+
+    function makeLinkAction(label, href) {
+      return { kind: 'link', label: label, href: href };
+    }
+
     // Build a directive message for ChatGPT based on outcome
     function buildDirective(data) {
-      if (data.status === 'error') {
+      var details = getDetails(data);
+      var status = getWidgetStatus(data);
+
+      if (status === 'error') {
         var ei = data.errorInfo;
+        if (ei && ei.category === 'timeout') {
+          return 'Clawdy timed out. Explain that the run likely needs to be resumed or retried with a smaller scope, and suggest continuing with the same sessionKey.';
+        }
         if (ei) return 'Clawdy encountered a ' + ei.category + ' error. ' + ei.suggestedRecovery + ' Explain what happened and suggest how to fix it.';
         return 'Clawdy encountered an error. Explain what went wrong and suggest recovery steps.';
       }
-      var a = data.artifacts || {};
-      if (a.prUrl) return 'Clawdy created a PR at ' + a.prUrl + '. Summarize the changes and ask if the user wants to review or merge.';
-      if (a.needsHumanDecision) return 'Clawdy needs a decision from the user. Present the options clearly.';
-      if ((a.filesChanged || []).length > 0) return 'Clawdy modified ' + a.filesChanged.length + ' file(s). Summarize what changed and propose next steps.';
+      if (status === 'waiting') {
+        return 'Clawdy is waiting on a human decision. Summarize the decision needed, list the options if they are present, and point the user to the recommended next step.';
+      }
+      if (details.prUrl) return 'Clawdy created a PR at ' + details.prUrl + '. Summarize the PR and suggest reviewing it next.';
+      if (details.filesChangedCount > 0) return 'Clawdy modified ' + details.filesChangedCount + ' file(s). Summarize the changes and suggest the next step.';
       return 'Clawdy completed the task. Summarize the result and propose next steps.';
     }
 
@@ -216,19 +378,34 @@
     function renderActions(data) {
       actionsEl.style.display = 'flex';
       actionsEl.innerHTML = '';
-      var a = data.artifacts || {};
+      var details = getDetails(data);
+      var status = getWidgetStatus(data);
       var sk = data.sessionKey || sessionKey;
-
       var buttons = [];
-      if (data.status === 'error') {
-        buttons.push({ label: 'Retry', msg: 'Retry the failed task using sessionKey: ' + sk, primary: true });
-        buttons.push({ label: 'Explain error', msg: 'Explain in detail what went wrong and why.' });
-      } else {
-        buttons.push({ label: 'Continue', msg: 'Continue working on this using sessionKey: ' + sk, primary: true });
-        buttons.push({ label: 'Explain changes', msg: 'Explain the changes Clawdy made in detail.' });
-        if (!a.prUrl && (a.filesChanged || []).length > 0) {
-          buttons.push({ label: 'Create PR', msg: 'Ask Clawdy to create a PR for these changes using sessionKey: ' + sk });
+
+      if (status === 'error') {
+        var isTimeout = data.errorInfo && data.errorInfo.category === 'timeout';
+        if (isTimeout) {
+          buttons.push(makeFollowUpAction('Resume task', 'Resume the interrupted task using sessionKey: ' + sk, true));
+          buttons.push(makeFollowUpAction('Retry smaller scope', 'Retry this task with a smaller scope using sessionKey: ' + sk));
+        } else {
+          buttons.push(makeFollowUpAction('Retry', 'Retry the failed task using sessionKey: ' + sk, true));
+          buttons.push(makeFollowUpAction('Explain error', 'Explain in detail what went wrong and why.'));
         }
+      } else if (details.prUrl) {
+        buttons.push(makeFollowUpAction('Review PR', 'Review the PR at ' + details.prUrl + ' and summarize the important changes.', true));
+        buttons.push(makeFollowUpAction('Summarize PR', 'Summarize the PR at ' + details.prUrl + ' in plain English.'));
+        buttons.push(makeLinkAction('Open PR', details.prUrl));
+      } else if (status === 'waiting' || details.needsHumanDecision) {
+        buttons.push(makeFollowUpAction('Help me decide', 'Clawdy is waiting on a human decision. Summarize the decision to make, the options, and the recommended next step.', true));
+        buttons.push(makeFollowUpAction('Continue with session', 'Continue this task using sessionKey: ' + sk));
+      } else if (details.filesChangedCount > 0) {
+        buttons.push(makeFollowUpAction('Summarize changes', 'Summarize the code changes Clawdy made.', true));
+        buttons.push(makeFollowUpAction('Create PR', 'Ask Clawdy to create a PR for these changes using sessionKey: ' + sk));
+        buttons.push(makeFollowUpAction('Continue', 'Continue working on this using sessionKey: ' + sk));
+      } else {
+        buttons.push(makeFollowUpAction('Continue', 'Continue working on this using sessionKey: ' + sk, true));
+        buttons.push(makeFollowUpAction('Explain result', 'Explain the result in more detail.'));
       }
 
       buttons.forEach(function(b) {
@@ -237,6 +414,11 @@
         btn.textContent = b.label;
         btn.onclick = function() {
           btn.disabled = true;
+          if (b.kind === 'link') {
+            window.open(b.href, '_blank');
+            btn.disabled = false;
+            return;
+          }
           if (oai.sendFollowUpMessage) oai.sendFollowUpMessage(b.msg);
         };
         actionsEl.appendChild(btn);
@@ -245,14 +427,19 @@
 
     async function showResult(data) {
       done = true;
-      var status = data.status;
-      setStatus(status === 'error' ? 'error' : 'completed');
+      var displayStatus = getWidgetStatus(data);
+      setStatus(displayStatus);
       if (data.logs) renderLogs(data.logs);
+      renderDetails(data);
 
-      var display = status === 'error' ? (data.error || 'Unknown error') : (data.summary || '');
+      var display = data.status === 'error' ? (data.error || 'Unknown error') : (data.summary || '');
       if (display) {
         resultLabel.style.display = 'block';
-        resultLabel.textContent = status === 'error' ? 'Error' : "Clawdy's response";
+        resultLabel.textContent = displayStatus === 'waiting'
+          ? 'Clawdy is waiting on you'
+          : data.status === 'error'
+            ? 'Error'
+            : "Clawdy's response";
         resultEl.style.display = 'block';
         resultEl.innerHTML = renderMarkdown(display);
       }
@@ -260,7 +447,7 @@
       renderActions(data);
 
       if (oai.setWidgetState) {
-        oai.setWidgetState({ done: true, summary: display, status: status });
+        oai.setWidgetState({ done: true, summary: display, status: data.status, widgetState: displayStatus, details: getDetails(data) });
       }
 
       // Send directive to wake up ChatGPT
@@ -287,6 +474,11 @@
         if (data.logs) renderLogs(data.logs);
 
         if (data.status === 'running') {
+          if (oai.setWidgetState) {
+            oai.setWidgetState({ done: false, jobId: jobId, sessionKey: sessionKey });
+          }
+          renderDetails(data);
+          setStatus(getWidgetStatus(data));
           poll();
         } else {
           lastData = data;
@@ -303,14 +495,20 @@
       if (data && data.jobId) {
         jobId = data.jobId;
         sessionKey = data.sessionKey;
-        startTime = Date.now();
-        setStatus('running');
+        startTime = data.startedAt || Date.now();
+        renderDetails(data);
+        setStatus(getWidgetStatus(data));
         poll();
       }
     }
 
     if (oai.widgetState && oai.widgetState.done) {
-      showResult({ status: oai.widgetState.status, summary: oai.widgetState.summary });
+      showResult({
+        status: oai.widgetState.status,
+        summary: oai.widgetState.summary,
+        widgetStatus: { state: oai.widgetState.widgetState },
+        details: oai.widgetState.details,
+      });
     } else {
       if (oai.toolOutput) startFromOutput(oai.toolOutput);
       window.addEventListener('openai:set_globals', function() {

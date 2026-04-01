@@ -3,7 +3,7 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "build": "tsc",
+    "build": "tsc && node -e \"require('node:fs').copyFileSync('src/widget.html','dist/widget.html')\"",
     "start": "node dist/index.js"
   },
   "dependencies": {

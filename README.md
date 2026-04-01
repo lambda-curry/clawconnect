@@ -1,8 +1,84 @@
-```
+# chatgpt-openclaw
+
+A small MCP app that lets ChatGPT hand work off to OpenClaw, then watch the run through a polling widget.
+
+## Development
+
+```bash
 npm install
 npm run dev
 ```
 
-```
-open http://localhost:7331
-```
+Then open <http://localhost:7331>.
+
+## Tool lifecycle
+
+The app intentionally keeps the server-side flow simple:
+
+1. `run_openclaw_task` submits work to OpenClaw and returns quickly.
+2. The tool response includes a `jobId` plus the `sessionKey` that owns the OpenClaw conversation.
+3. ChatGPT mounts the widget from the same tool response.
+4. The widget polls `check_openclaw_task` until the run finishes, errors, or reaches a user-waiting state.
+
+This keeps `run_openclaw_task` cheap and retry-friendly while preserving live progress in the widget.
+
+## Widget lifecycle
+
+The widget is responsible for presentation only:
+
+- It starts from the `run_openclaw_task` tool output.
+- It calls `check_openclaw_task` with `knownLogCount` so the server can return early when new log lines arrive.
+- It renders three layers of state:
+  - live activity log
+  - compact outcome/details panel
+  - context-aware follow-up actions
+- On terminal states it asks ChatGPT for a targeted reply so the conversation gets a natural summary.
+
+The server now also returns a small `widgetStatus` object and normalized `details` payload so the widget does not need to reverse-engineer state from raw artifacts alone.
+
+## `sessionKey` continuation
+
+`sessionKey` is the continuity handle for the underlying OpenClaw conversation.
+
+- Omit it to start a fresh conversation.
+- Pass a previous `sessionKey` back into `run_openclaw_task` to continue the same thread.
+- The adapter stores the most recent continuation state per session so the widget and follow-up prompts can surface recommended next steps.
+
+This means you can do multi-step work like:
+
+1. ask OpenClaw to make changes
+2. review the outcome
+3. continue with the same `sessionKey` to create a PR, answer a question, or refine the result
+
+## How `run_openclaw_task` and `check_openclaw_task` are expected to work
+
+### `run_openclaw_task`
+
+Expected behavior:
+
+- accept a task plus optional context/workspace/sessionKey
+- enqueue/send the task to OpenClaw
+- return immediately with identifying state (`jobId`, `sessionKey`)
+- include lightweight UI metadata needed by the widget to start cleanly
+
+It should **not** block waiting for the full run to finish.
+
+### `check_openclaw_task`
+
+Expected behavior:
+
+- accept a `jobId`
+- wait briefly for progress or completion (long-poll style)
+- return normalized state for the widget:
+  - raw run status (`running`, `completed`, `error`)
+  - widget-facing status (`running`, `waiting`, `completed`, `error`)
+  - normalized details (files changed, branch, commit, PR URL, human-decision flag, recommended next step)
+  - logs and final summary/error text when available
+
+This endpoint is the single polling surface for the widget.
+
+## Notes
+
+- No GitHub Actions or extra infrastructure required.
+- The adapter keeps artifact extraction intentionally lightweight and heuristic-based.
+- The UI favors clear state semantics over elaborate visuals.

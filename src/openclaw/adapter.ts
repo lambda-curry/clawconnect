@@ -56,18 +56,53 @@ function emptyArtifacts(): Artifacts {
   return { filesChanged: [], commandsRun: [], needsHumanDecision: false }
 }
 
-function processEvent(artifacts: Artifacts, event: GatewayEvent) {
-  if (event.type === 'tool' && artifacts.commandsRun.length < MAX_ARRAY_ITEMS) {
-    const name = event.toolName
-    if (name === 'Bash' || name === 'exec') {
-      const cmd = String(event.args.command ?? '').slice(0, 120)
-      if (cmd) artifacts.commandsRun.push(cmd)
+function addChangedFile(artifacts: Artifacts, filePath: string | undefined) {
+  if (!filePath) return
+  if (artifacts.filesChanged.length >= MAX_ARRAY_ITEMS) return
+  if (!artifacts.filesChanged.includes(filePath)) {
+    artifacts.filesChanged.push(filePath)
+  }
+}
+
+function extractChangedFilesFromPatch(input: unknown): string[] {
+  if (typeof input !== 'string') return []
+  const matches = new Set<string>()
+
+  for (const line of input.split('\n')) {
+    let match = line.match(/^\*\*\* (?:Add|Update|Delete) File: (.+)$/)
+    if (match) {
+      matches.add(match[1].trim())
+      continue
     }
-    if ((name === 'Edit' || name === 'Write' || name === 'read') && event.args.file_path) {
-      const fp = String(event.args.file_path)
-      if (artifacts.filesChanged.length < MAX_ARRAY_ITEMS && !artifacts.filesChanged.includes(fp)) {
-        artifacts.filesChanged.push(fp)
-      }
+
+    match = line.match(/^\+\+\+ b\/(.+)$/)
+    if (match) {
+      matches.add(match[1].trim())
+    }
+  }
+
+  return [...matches]
+}
+
+function processEvent(artifacts: Artifacts, event: GatewayEvent) {
+  if (event.type !== 'tool') return
+
+  const name = event.toolName
+  if ((name === 'Bash' || name === 'exec') && artifacts.commandsRun.length < MAX_ARRAY_ITEMS) {
+    const cmd = String(event.args.command ?? '').slice(0, 120)
+    if (cmd) artifacts.commandsRun.push(cmd)
+  }
+
+  const directFilePath = [event.args.file_path, event.args.filePath, event.args.path, event.args.file]
+    .find((value) => typeof value === 'string') as string | undefined
+
+  if (name === 'Edit' || name === 'Write' || name === 'edit' || name === 'write') {
+    addChangedFile(artifacts, directFilePath)
+  }
+
+  if (name === 'ApplyPatch' || name === 'apply_patch') {
+    for (const filePath of extractChangedFilesFromPatch(event.args.input)) {
+      addChangedFile(artifacts, filePath)
     }
   }
 }
