@@ -579,14 +579,23 @@
       try { if (oai.sendFollowUpMessage) await oai.sendFollowUpMessage(directive); } catch (e) {}
     }
 
+    function attachToResolvedJob(data) {
+      if (!data) return;
+      var nextJobId = data.jobId || jobId;
+      if (nextJobId !== jobId) {
+        resetUi();
+      }
+      jobId = nextJobId;
+      sessionKey = data.sessionKey || sessionKey || null;
+      startTime = data.startedAt || startTime || Date.now();
+      lastData = data;
+    }
+
     function initializeFromData(data, options) {
       if (!data || !data.jobId) return false;
       options = options || {};
       resetUi();
-      jobId = data.jobId;
-      sessionKey = data.sessionKey || null;
-      startTime = data.startedAt || Date.now();
-      lastData = data;
+      attachToResolvedJob(data);
       if (data.logs) renderLogs(data.logs);
 
       if (isTerminalData(data)) {
@@ -615,12 +624,18 @@
     async function poll() {
       if (done || !jobId) return;
       try {
-        var result = await oai.callTool('check_openclaw_task', { jobId: jobId, knownLogCount: seenLogCount });
+        var result = await oai.callTool('check_openclaw_task', {
+          jobId: jobId,
+          sessionKey: sessionKey,
+          knownLogCount: seenLogCount
+        });
         var data = extractData(result);
         if (!data) {
           setTimeout(poll, 3000);
           return;
         }
+
+        attachToResolvedJob(data);
         if (data.logs) renderLogs(data.logs);
 
         if (data.status === 'running') {
