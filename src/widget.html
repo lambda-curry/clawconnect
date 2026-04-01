@@ -300,7 +300,26 @@
 
     // ── Markdown renderer ────────────────────────────────
     function escapeHtml(s) {
-      var d = document.createElement('div'); d.textContent = s; return d.innerHTML;
+      var d = document.createElement('div');
+      d.textContent = s;
+      return d.innerHTML;
+    }
+
+    function resetUi() {
+      logsEl.innerHTML = '';
+      detailsWrapEl.style.display = 'none';
+      detailsLabelEl.textContent = 'Outcome';
+      detailsEl.innerHTML = '';
+      resultLabel.style.display = 'none';
+      resultLabel.textContent = "Clawdy's response";
+      resultEl.style.display = 'none';
+      resultEl.innerHTML = '';
+      actionsEl.style.display = 'none';
+      actionsEl.innerHTML = '';
+      seenLogCount = 0;
+      done = false;
+      setStatus('queued');
+      elapsedEl.textContent = '';
     }
 
     function renderMarkdown(text) {
@@ -779,6 +798,29 @@
         try { startFromOutput(oai.toolOutput); } catch(e) {}
       });
     }
+
+    function restoreWidgetRun() {
+      var data = widgetStateToData(oai.widgetState);
+      if (!data || !data.jobId) return false;
+      return initializeFromData(data, { announce: false });
+    }
+
+    function bootstrap() {
+      oai = window.openai || oai;
+      if (startFromToolOutput(oai.toolOutput)) return;
+      if (restoreSavedRun()) return;
+      restoreWidgetRun();
+    }
+
+    bootstrap();
+
+    window.addEventListener('openai:set_globals', function() {
+      oai = window.openai || oai;
+      var data = extractData(oai.toolOutput);
+      if (!data || !data.jobId) return;
+      if (data.jobId === jobId) return;
+      startFromToolOutput(oai.toolOutput);
+    });
   </script>
 </body>
 </html>

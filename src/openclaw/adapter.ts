@@ -80,18 +80,53 @@ function emptyArtifacts(): Artifacts {
   return { filesChanged: [], commandsRun: [], needsHumanDecision: false }
 }
 
-function processEvent(artifacts: Artifacts, event: GatewayEvent) {
-  if (event.type === 'tool' && artifacts.commandsRun.length < MAX_ARRAY_ITEMS) {
-    const name = event.toolName
-    if (name === 'Bash' || name === 'exec') {
-      const cmd = String(event.args.command ?? '').slice(0, 120)
-      if (cmd) artifacts.commandsRun.push(cmd)
+function addChangedFile(artifacts: Artifacts, filePath: string | undefined) {
+  if (!filePath) return
+  if (artifacts.filesChanged.length >= MAX_ARRAY_ITEMS) return
+  if (!artifacts.filesChanged.includes(filePath)) {
+    artifacts.filesChanged.push(filePath)
+  }
+}
+
+function extractChangedFilesFromPatch(input: unknown): string[] {
+  if (typeof input !== 'string') return []
+  const matches = new Set<string>()
+
+  for (const line of input.split('\n')) {
+    let match = line.match(/^\*\*\* (?:Add|Update|Delete) File: (.+)$/)
+    if (match) {
+      matches.add(match[1].trim())
+      continue
     }
-    if ((name === 'Edit' || name === 'Write' || name === 'read') && event.args.file_path) {
-      const fp = String(event.args.file_path)
-      if (artifacts.filesChanged.length < MAX_ARRAY_ITEMS && !artifacts.filesChanged.includes(fp)) {
-        artifacts.filesChanged.push(fp)
-      }
+
+    match = line.match(/^\+\+\+ b\/(.+)$/)
+    if (match) {
+      matches.add(match[1].trim())
+    }
+  }
+
+  return [...matches]
+}
+
+function processEvent(artifacts: Artifacts, event: GatewayEvent) {
+  if (event.type !== 'tool') return
+
+  const name = event.toolName
+  if ((name === 'Bash' || name === 'exec') && artifacts.commandsRun.length < MAX_ARRAY_ITEMS) {
+    const cmd = String(event.args.command ?? '').slice(0, 120)
+    if (cmd) artifacts.commandsRun.push(cmd)
+  }
+
+  const directFilePath = [event.args.file_path, event.args.filePath, event.args.path, event.args.file]
+    .find((value) => typeof value === 'string') as string | undefined
+
+  if (name === 'Edit' || name === 'Write' || name === 'edit' || name === 'write') {
+    addChangedFile(artifacts, directFilePath)
+  }
+
+  if (name === 'ApplyPatch' || name === 'apply_patch') {
+    for (const filePath of extractChangedFilesFromPatch(event.args.input)) {
+      addChangedFile(artifacts, filePath)
     }
   }
 }
@@ -161,6 +196,7 @@ const gateway = new OpenClawGateway(
 )
 
 const jobs = new Map<string, Job>()
+const latestJobBySession = new Map<string, string>()
 
 export class OpenClawAdapter {
   submitTask(input: {
@@ -179,6 +215,14 @@ export class OpenClawAdapter {
     const now = Date.now()
     const job: Job = { jobId, sessionKey, status: 'running', startedAt: now, lastEventAt: now, logs: [], artifacts }
     jobs.set(jobId, job)
+    latestJobBySession.set(sessionKey, jobId)
+    sessions.set(sessionKey, {
+      sessionKey,
+      lastJobId: jobId,
+      workspace: input.workspace,
+      lastSummary: '',
+      artifacts,
+    })
 
     gateway.chat(sessionKey, message, TIMEOUT_MS, (event) => {
       job.lastEventAt = Date.now()
@@ -246,12 +290,30 @@ export class OpenClawAdapter {
     return jobs.get(jobId)
   }
 
+  getLatestJobForSession(sessionKey: string): Job | undefined {
+    const latestJobId = latestJobBySession.get(sessionKey) ?? sessions.get(sessionKey)?.lastJobId
+    return latestJobId ? jobs.get(latestJobId) : undefined
+  }
+
   getSessionState(sessionKey: string): ContinuationState | undefined {
     return sessions.get(sessionKey)
   }
 
-  async waitForJob(jobId: string, knownLogCount = 0): Promise<Job | undefined> {
-    const job = jobs.get(jobId)
+  resolveJob(jobId?: string, sessionKey?: string): Job | undefined {
+    if (jobId) {
+      const job = jobs.get(jobId)
+      if (job) return job
+    }
+
+    if (sessionKey) {
+      return this.getLatestJobForSession(sessionKey)
+    }
+
+    return undefined
+  }
+
+  async waitForJob(jobId: string | undefined, knownLogCount = 0, sessionKey?: string): Promise<Job | undefined> {
+    const job = this.resolveJob(jobId, sessionKey)
     if (!job || job.status !== 'running') return job
     const deadline = Date.now() + POLL_WAIT_MS
     while (Date.now() < deadline && job.status === 'running') {
