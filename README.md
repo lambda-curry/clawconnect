@@ -36,6 +36,8 @@ The widget is responsible for presentation only:
 
 The server now also returns a small `widgetStatus` object and normalized `details` payload so the widget does not need to reverse-engineer state from raw artifacts alone.
 
+The widget also persists the active run snapshot locally (`jobId`, `sessionKey`, `startedAt`, current widget status, details, logs, and final summary/error payload) so a refresh can recover cleanly. On reload it prefers the latest tool output when present, otherwise it restores the last saved run, reattaches polling for in-flight jobs, and restores terminal views without unnecessary re-polling. Status checks now include both `jobId` and `sessionKey`, which lets the server reattach more reliably when a refreshed client has stale local job state.
+
 ## `sessionKey` continuation
 
 `sessionKey` is the continuity handle for the underlying OpenClaw conversation.
@@ -49,6 +51,8 @@ This means you can do multi-step work like:
 1. ask OpenClaw to make changes
 2. review the outcome
 3. continue with the same `sessionKey` to create a PR, answer a question, or refine the result
+
+The widget keeps that resume path explicit in its follow-up actions: resuming the previous session is presented separately from starting a fresh task so users do not accidentally fork the wrong thread of work.
 
 ## How `run_openclaw_task` and `check_openclaw_task` are expected to work
 
@@ -67,7 +71,7 @@ It should **not** block waiting for the full run to finish.
 
 Expected behavior:
 
-- accept a `jobId`
+- accept a `jobId` (and optionally a `sessionKey` for refresh recovery / stale-client reattachment)
 - wait briefly for progress or completion (long-poll style)
 - return normalized state for the widget:
   - raw run status (`running`, `completed`, `error`)

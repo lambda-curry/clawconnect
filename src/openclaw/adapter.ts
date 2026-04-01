@@ -174,6 +174,7 @@ const gateway = new OpenClawGateway(
 )
 
 const jobs = new Map<string, Job>()
+const latestJobBySession = new Map<string, string>()
 
 export class OpenClawAdapter {
   submitTask(input: {
@@ -191,6 +192,14 @@ export class OpenClawAdapter {
     const artifacts = emptyArtifacts()
     const job: Job = { jobId, sessionKey, status: 'running', startedAt: Date.now(), logs: [], artifacts }
     jobs.set(jobId, job)
+    latestJobBySession.set(sessionKey, jobId)
+    sessions.set(sessionKey, {
+      sessionKey,
+      lastJobId: jobId,
+      workspace: input.workspace,
+      lastSummary: '',
+      artifacts,
+    })
 
     gateway.chat(sessionKey, message, TIMEOUT_MS, (event) => {
       if (job.logs.length < MAX_LOG_ENTRIES) {
@@ -235,17 +244,34 @@ export class OpenClawAdapter {
     return jobs.get(jobId)
   }
 
+  getLatestJobForSession(sessionKey: string): Job | undefined {
+    const latestJobId = latestJobBySession.get(sessionKey) ?? sessions.get(sessionKey)?.lastJobId
+    return latestJobId ? jobs.get(latestJobId) : undefined
+  }
+
   getSessionState(sessionKey: string): ContinuationState | undefined {
     return sessions.get(sessionKey)
   }
 
-  async waitForJob(jobId: string, knownLogCount = 0): Promise<Job | undefined> {
-    const job = jobs.get(jobId)
+  resolveJob(jobId?: string, sessionKey?: string): Job | undefined {
+    if (jobId) {
+      const job = jobs.get(jobId)
+      if (job) return job
+    }
+
+    if (sessionKey) {
+      return this.getLatestJobForSession(sessionKey)
+    }
+
+    return undefined
+  }
+
+  async waitForJob(jobId: string | undefined, knownLogCount = 0, sessionKey?: string): Promise<Job | undefined> {
+    const job = this.resolveJob(jobId, sessionKey)
     if (!job || job.status !== 'running') return job
     const deadline = Date.now() + POLL_WAIT_MS
     while (Date.now() < deadline && job.status === 'running') {
       await new Promise(r => setTimeout(r, 500))
-      // Return early if there are new log entries to show
       if (job.logs.length > knownLogCount) return job
     }
     return job

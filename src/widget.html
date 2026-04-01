@@ -187,43 +187,52 @@
     var lastData = null;
     var oai = window.openai || {};
 
-    var ICONS = { lifecycle: '\u25B6', tool: '\u2692', 'tool-result': '\u2714' };
+    var ICONS = { lifecycle: '▶', tool: '⚒', 'tool-result': '✔' };
+    var STORAGE_KEY = 'openclaw-status-widget:v1';
+    var TERMINAL_WIDGET_STATES = { waiting: true, completed: true, error: true };
 
-    // Lightweight markdown to HTML
     function renderMarkdown(text) {
       var html = escapeHtml(text);
-      // Code blocks (``` ... ```)
       html = html.replace(/```(\w*)\n([\s\S]*?)```/g, function(_, lang, code) {
         return '<pre><code>' + code.trim() + '</code></pre>';
       });
-      // Inline code
       html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
-      // Headers
       html = html.replace(/^### (.+)$/gm, '<h3>$1</h3>');
       html = html.replace(/^## (.+)$/gm, '<h2>$1</h2>');
       html = html.replace(/^# (.+)$/gm, '<h1>$1</h1>');
-      // Bold
       html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-      // Italic
       html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
-      // Links
       html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank">$1</a>');
-      // Blockquotes
       html = html.replace(/^&gt; (.+)$/gm, '<blockquote>$1</blockquote>');
-      // Unordered lists
       html = html.replace(/^- (.+)$/gm, '<li>$1</li>');
       html = html.replace(/(<li>.*<\/li>\n?)+/g, '<ul>$&</ul>');
-      // Ordered lists
       html = html.replace(/^\d+\. (.+)$/gm, '<li>$1</li>');
-      // Paragraphs (double newlines)
       html = html.replace(/\n\n/g, '</p><p>');
-      // Single newlines within paragraphs
       html = html.replace(/\n/g, '<br>');
       return '<p>' + html + '</p>';
     }
 
     function escapeHtml(s) {
-      var d = document.createElement('div'); d.textContent = s; return d.innerHTML;
+      var d = document.createElement('div');
+      d.textContent = s;
+      return d.innerHTML;
+    }
+
+    function resetUi() {
+      logsEl.innerHTML = '';
+      detailsWrapEl.style.display = 'none';
+      detailsLabelEl.textContent = 'Outcome';
+      detailsEl.innerHTML = '';
+      resultLabel.style.display = 'none';
+      resultLabel.textContent = "Clawdy's response";
+      resultEl.style.display = 'none';
+      resultEl.innerHTML = '';
+      actionsEl.style.display = 'none';
+      actionsEl.innerHTML = '';
+      seenLogCount = 0;
+      done = false;
+      setStatus('queued');
+      elapsedEl.textContent = '';
     }
 
     function addLogEntry(entry) {
@@ -231,7 +240,7 @@
       el.className = 'entry ' + entry.type;
       var elapsed = Math.round((entry.ts - startTime) / 1000);
       el.innerHTML = '<span class="ts">' + elapsed + 's</span>'
-        + '<span class="icon">' + (ICONS[entry.type] || '\u2022') + '</span>'
+        + '<span class="icon">' + (ICONS[entry.type] || '•') + '</span>'
         + '<span>' + escapeHtml(entry.text) + '</span>';
       logsEl.appendChild(el);
       logsEl.scrollTop = logsEl.scrollHeight;
@@ -246,11 +255,12 @@
     function setStatus(status) {
       badgeEl.className = 'badge ' + status;
       badgeEl.textContent = status;
-      if (status === 'completed' || status === 'waiting' || status === 'error') {
+      if (isTerminalWidgetState(status)) {
         spinnerEl.style.display = 'none';
         done = true;
       } else {
         spinnerEl.style.display = 'inline-block';
+        done = false;
       }
     }
 
@@ -261,6 +271,10 @@
       return null;
     }
 
+    function isTerminalWidgetState(state) {
+      return !!TERMINAL_WIDGET_STATES[state];
+    }
+
     function getWidgetStatus(data) {
       if (data && data.widgetStatus && data.widgetStatus.state) return data.widgetStatus.state;
       var details = getDetails(data);
@@ -268,6 +282,10 @@
       if (details.needsHumanDecision) return 'waiting';
       if (data.status === 'completed') return 'completed';
       return 'running';
+    }
+
+    function isTerminalData(data) {
+      return isTerminalWidgetState(getWidgetStatus(data));
     }
 
     function getDetails(data) {
@@ -282,6 +300,104 @@
         prUrl: artifacts.prUrl,
         needsHumanDecision: !!artifacts.needsHumanDecision,
         recommendedNextStep: continuation && continuation.recommendedNextStep,
+      };
+    }
+
+    function buildStoredData(data) {
+      if (!data) return null;
+      var widgetStatus = data.widgetStatus && data.widgetStatus.state
+        ? data.widgetStatus
+        : { version: 1, state: getWidgetStatus(data) };
+      return {
+        version: 1,
+        jobId: data.jobId || jobId,
+        sessionKey: data.sessionKey || sessionKey,
+        startedAt: data.startedAt || startTime,
+        status: data.status || (isTerminalWidgetState(widgetStatus.state) ? 'completed' : 'running'),
+        widgetStatus: widgetStatus,
+        details: getDetails(data),
+        summary: data.summary,
+        error: data.error,
+        errorInfo: data.errorInfo,
+        artifacts: data.artifacts,
+        logs: Array.isArray(data.logs) ? data.logs.slice(-100) : ((lastData && lastData.logs) || []),
+      };
+    }
+
+    function persistRunState(data) {
+      var snapshot = buildStoredData(data);
+      if (!snapshot || !snapshot.jobId) return null;
+      lastData = snapshot;
+
+      try {
+        window.localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot));
+      } catch (e) {}
+
+      try {
+        if (oai.setWidgetState) {
+          oai.setWidgetState({
+            runState: snapshot,
+            done: isTerminalData(snapshot),
+            jobId: snapshot.jobId,
+            sessionKey: snapshot.sessionKey,
+            startedAt: snapshot.startedAt,
+            status: snapshot.status,
+            widgetState: getWidgetStatus(snapshot),
+            summary: snapshot.status === 'error' ? snapshot.error : snapshot.summary,
+            details: snapshot.details,
+            logs: snapshot.logs,
+          });
+        }
+      } catch (e) {}
+
+      return snapshot;
+    }
+
+    function loadStoredData() {
+      try {
+        var raw = window.localStorage.getItem(STORAGE_KEY);
+        if (!raw) return null;
+        var parsed = JSON.parse(raw);
+        return parsed && parsed.jobId ? parsed : null;
+      } catch (e) {
+        return null;
+      }
+    }
+
+    function widgetStateToData(widgetState) {
+      if (!widgetState) return null;
+      if (widgetState.runState && widgetState.runState.jobId) return widgetState.runState;
+      if (!(widgetState.jobId || widgetState.summary || widgetState.status || widgetState.details)) return null;
+      return {
+        version: 1,
+        jobId: widgetState.jobId,
+        sessionKey: widgetState.sessionKey,
+        startedAt: widgetState.startedAt,
+        status: widgetState.status || (widgetState.done ? 'completed' : 'running'),
+        widgetStatus: { version: 1, state: widgetState.widgetState || (widgetState.done ? 'completed' : 'running') },
+        details: widgetState.details,
+        summary: widgetState.status === 'error' ? undefined : widgetState.summary,
+        error: widgetState.status === 'error' ? widgetState.summary : undefined,
+        logs: widgetState.logs || [],
+      };
+    }
+
+    function mergeWithSavedData(data, saved) {
+      if (!data || !saved || saved.jobId !== data.jobId) return data;
+      return {
+        version: 1,
+        jobId: data.jobId,
+        sessionKey: data.sessionKey || saved.sessionKey,
+        startedAt: saved.startedAt || data.startedAt,
+        status: saved.status || data.status,
+        widgetStatus: saved.widgetStatus || data.widgetStatus,
+        details: saved.details || data.details,
+        summary: saved.summary || data.summary,
+        error: saved.error || data.error,
+        errorInfo: saved.errorInfo || data.errorInfo,
+        artifacts: saved.artifacts || data.artifacts,
+        logs: saved.logs || data.logs || [],
+        continuationState: data.continuationState || saved.continuationState,
       };
     }
 
@@ -353,7 +469,14 @@
       return { kind: 'link', label: label, href: href };
     }
 
-    // Build a directive message for ChatGPT based on outcome
+    function makeResumeSessionAction(sk, primary) {
+      return makeFollowUpAction('Resume previous session', 'Continue the previous OpenClaw session using sessionKey: ' + sk, primary);
+    }
+
+    function makeStartFreshAction(sk) {
+      return makeFollowUpAction('Start new task', 'Start a new OpenClaw task for a separate request. Do not reuse the previous sessionKey: ' + sk + '.', false);
+    }
+
     function buildDirective(data) {
       var details = getDetails(data);
       var status = getWidgetStatus(data);
@@ -374,7 +497,6 @@
       return 'Clawdy completed the task. Summarize the result and propose next steps.';
     }
 
-    // Render action buttons based on outcome
     function renderActions(data) {
       actionsEl.style.display = 'flex';
       actionsEl.innerHTML = '';
@@ -384,28 +506,27 @@
       var buttons = [];
 
       if (status === 'error') {
-        var isTimeout = data.errorInfo && data.errorInfo.category === 'timeout';
-        if (isTimeout) {
-          buttons.push(makeFollowUpAction('Resume task', 'Resume the interrupted task using sessionKey: ' + sk, true));
-          buttons.push(makeFollowUpAction('Retry smaller scope', 'Retry this task with a smaller scope using sessionKey: ' + sk));
-        } else {
-          buttons.push(makeFollowUpAction('Retry', 'Retry the failed task using sessionKey: ' + sk, true));
-          buttons.push(makeFollowUpAction('Explain error', 'Explain in detail what went wrong and why.'));
-        }
+        buttons.push(makeResumeSessionAction(sk, true));
+        buttons.push(makeStartFreshAction(sk));
+        buttons.push(makeFollowUpAction('Explain error', 'Explain in detail what went wrong and why.'));
       } else if (details.prUrl) {
         buttons.push(makeFollowUpAction('Review PR', 'Review the PR at ' + details.prUrl + ' and summarize the important changes.', true));
-        buttons.push(makeFollowUpAction('Summarize PR', 'Summarize the PR at ' + details.prUrl + ' in plain English.'));
+        buttons.push(makeResumeSessionAction(sk, false));
+        buttons.push(makeStartFreshAction(sk));
         buttons.push(makeLinkAction('Open PR', details.prUrl));
       } else if (status === 'waiting' || details.needsHumanDecision) {
         buttons.push(makeFollowUpAction('Help me decide', 'Clawdy is waiting on a human decision. Summarize the decision to make, the options, and the recommended next step.', true));
-        buttons.push(makeFollowUpAction('Continue with session', 'Continue this task using sessionKey: ' + sk));
+        buttons.push(makeResumeSessionAction(sk, false));
+        buttons.push(makeStartFreshAction(sk));
       } else if (details.filesChangedCount > 0) {
         buttons.push(makeFollowUpAction('Summarize changes', 'Summarize the code changes Clawdy made.', true));
+        buttons.push(makeResumeSessionAction(sk, false));
         buttons.push(makeFollowUpAction('Create PR', 'Ask Clawdy to create a PR for these changes using sessionKey: ' + sk));
-        buttons.push(makeFollowUpAction('Continue', 'Continue working on this using sessionKey: ' + sk));
+        buttons.push(makeStartFreshAction(sk));
       } else {
-        buttons.push(makeFollowUpAction('Continue', 'Continue working on this using sessionKey: ' + sk, true));
-        buttons.push(makeFollowUpAction('Explain result', 'Explain the result in more detail.'));
+        buttons.push(makeFollowUpAction('Explain result', 'Explain the result in more detail.', true));
+        buttons.push(makeResumeSessionAction(sk, false));
+        buttons.push(makeStartFreshAction(sk));
       }
 
       buttons.forEach(function(b) {
@@ -425,7 +546,8 @@
       });
     }
 
-    async function showResult(data) {
+    async function showResult(data, options) {
+      options = options || {};
       done = true;
       var displayStatus = getWidgetStatus(data);
       setStatus(displayStatus);
@@ -446,17 +568,51 @@
 
       renderActions(data);
 
-      if (oai.setWidgetState) {
-        oai.setWidgetState({ done: true, summary: display, status: data.status, widgetState: displayStatus, details: getDetails(data) });
+      if (options.persist !== false) {
+        persistRunState(data);
       }
 
-      // Send directive to wake up ChatGPT
+      if (options.announce === false) return;
+
       var directive = buildDirective(data);
-      try { if (oai.requestTargetedReply) await oai.requestTargetedReply(); } catch(e) {}
-      try { if (oai.sendFollowUpMessage) await oai.sendFollowUpMessage(directive); } catch(e) {}
+      try { if (oai.requestTargetedReply) await oai.requestTargetedReply(); } catch (e) {}
+      try { if (oai.sendFollowUpMessage) await oai.sendFollowUpMessage(directive); } catch (e) {}
     }
 
-    // Elapsed timer
+    function attachToResolvedJob(data) {
+      if (!data) return;
+      var nextJobId = data.jobId || jobId;
+      if (nextJobId !== jobId) {
+        resetUi();
+      }
+      jobId = nextJobId;
+      sessionKey = data.sessionKey || sessionKey || null;
+      startTime = data.startedAt || startTime || Date.now();
+      lastData = data;
+    }
+
+    function initializeFromData(data, options) {
+      if (!data || !data.jobId) return false;
+      options = options || {};
+      resetUi();
+      attachToResolvedJob(data);
+      if (data.logs) renderLogs(data.logs);
+
+      if (isTerminalData(data)) {
+        showResult(data, {
+          announce: options.announce,
+          persist: options.persist,
+        });
+      } else {
+        setStatus(getWidgetStatus(data));
+        renderDetails(data);
+        if (options.persist !== false) persistRunState(data);
+        if (options.poll !== false) poll();
+      }
+
+      return true;
+    }
+
     setInterval(function() {
       if (done) return;
       var s = Math.round((Date.now() - startTime) / 1000);
@@ -468,20 +624,29 @@
     async function poll() {
       if (done || !jobId) return;
       try {
-        var result = await oai.callTool('check_openclaw_task', { jobId: jobId, knownLogCount: seenLogCount });
+        var result = await oai.callTool('check_openclaw_task', {
+          jobId: jobId,
+          sessionKey: sessionKey,
+          knownLogCount: seenLogCount
+        });
         var data = extractData(result);
-        if (!data) { setTimeout(poll, 3000); return; }
+        if (!data) {
+          setTimeout(poll, 3000);
+          return;
+        }
+
+        attachToResolvedJob(data);
         if (data.logs) renderLogs(data.logs);
 
         if (data.status === 'running') {
-          if (oai.setWidgetState) {
-            oai.setWidgetState({ done: false, jobId: jobId, sessionKey: sessionKey });
-          }
-          renderDetails(data);
+          data.jobId = data.jobId || jobId;
+          data.sessionKey = data.sessionKey || sessionKey;
+          data.startedAt = data.startedAt || startTime;
           setStatus(getWidgetStatus(data));
+          renderDetails(data);
+          persistRunState(data);
           poll();
         } else {
-          lastData = data;
           showResult(data);
         }
       } catch (err) {
@@ -489,32 +654,41 @@
       }
     }
 
-    function startFromOutput(output) {
-      if (done || jobId) return;
+    function startFromToolOutput(output) {
       var data = extractData(output);
-      if (data && data.jobId) {
-        jobId = data.jobId;
-        sessionKey = data.sessionKey;
-        startTime = data.startedAt || Date.now();
-        renderDetails(data);
-        setStatus(getWidgetStatus(data));
-        poll();
-      }
+      if (!data || !data.jobId) return false;
+      var saved = loadStoredData();
+      return initializeFromData(mergeWithSavedData(data, saved), { announce: false });
     }
 
-    if (oai.widgetState && oai.widgetState.done) {
-      showResult({
-        status: oai.widgetState.status,
-        summary: oai.widgetState.summary,
-        widgetStatus: { state: oai.widgetState.widgetState },
-        details: oai.widgetState.details,
-      });
-    } else {
-      if (oai.toolOutput) startFromOutput(oai.toolOutput);
-      window.addEventListener('openai:set_globals', function() {
-        try { startFromOutput(window.openai.toolOutput); } catch(e) {}
-      });
+    function restoreSavedRun() {
+      var saved = loadStoredData();
+      if (!saved || !saved.jobId) return false;
+      return initializeFromData(saved, { announce: false });
     }
+
+    function restoreWidgetRun() {
+      var data = widgetStateToData(oai.widgetState);
+      if (!data || !data.jobId) return false;
+      return initializeFromData(data, { announce: false });
+    }
+
+    function bootstrap() {
+      oai = window.openai || oai;
+      if (startFromToolOutput(oai.toolOutput)) return;
+      if (restoreSavedRun()) return;
+      restoreWidgetRun();
+    }
+
+    bootstrap();
+
+    window.addEventListener('openai:set_globals', function() {
+      oai = window.openai || oai;
+      var data = extractData(oai.toolOutput);
+      if (!data || !data.jobId) return;
+      if (data.jobId === jobId) return;
+      startFromToolOutput(oai.toolOutput);
+    });
   </script>
 </body>
 </html>

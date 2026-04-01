@@ -144,11 +144,12 @@ const TOOLS = [
   },
   {
     name: 'check_openclaw_task',
-    description: 'Check the status of a previously submitted task. Waits up to 50 seconds for completion before returning. The widget uses this to poll until the run is completed, waiting on a human decision, or errored.',
+    description: 'Check the status of a previously submitted task. Waits up to 50 seconds for completion before returning. The widget uses this to poll until the run is completed, waiting on a human decision, or errored. Pass sessionKey too so refresh recovery can reattach even if the local jobId is stale.',
     inputSchema: {
       type: 'object',
       properties: {
         jobId: { type: 'string', description: 'The jobId returned by run_openclaw_task' },
+        sessionKey: { type: 'string', description: 'Optional session key for reattaching status checks after refresh or stale local state.' },
         knownLogCount: { type: 'number', description: 'Number of log entries already seen. Server returns as soon as new entries appear.' },
       },
       required: ['jobId'],
@@ -246,34 +247,40 @@ const server = createServer(async (req, res) => {
       const { name, arguments: args } = msg.params as { name: string; arguments: Record<string, string> }
 
       if (name === 'run_openclaw_task') {
+        const priorState = args.sessionKey ? openclaw.getSessionState(args.sessionKey) : undefined
         const job = openclaw.submitTask({
           task: args.task,
           context: args.context,
           workspace: args.workspace,
           sessionKey: args.sessionKey,
         })
-        const priorState = args.sessionKey ? openclaw.getSessionState(args.sessionKey) : undefined
         console.log(`[mcp] submitted job ${job.jobId} on session ${job.sessionKey}`)
         respond({
           content: [{ type: 'text', text: `Task submitted. Job ID: ${job.jobId}` }],
           structuredContent: {
             jobId: job.jobId,
             sessionKey: job.sessionKey,
+            startedAt: job.startedAt,
             status: 'running',
             widgetStatus: { version: 1, state: 'running', reason: 'submitted' },
             details: buildWidgetDetails('running', job.artifacts, priorState),
+            artifacts: job.artifacts,
+            logs: job.logs,
             ...(priorState ? { continuationState: priorState } : {}),
           },
         })
 
       } else if (name === 'check_openclaw_task') {
         const knownLogCount = Number(args.knownLogCount) || 0
-        const job = await openclaw.waitForJob(args.jobId, knownLogCount)
+        const requestedJobId = typeof args.jobId === 'string' ? args.jobId : undefined
+        const requestedSessionKey = typeof args.sessionKey === 'string' ? args.sessionKey : undefined
+        const job = await openclaw.waitForJob(requestedJobId, knownLogCount, requestedSessionKey)
         if (!job) {
           respond({
-            content: [{ type: 'text', text: `Unknown jobId: ${args.jobId}` }],
+            content: [{ type: 'text', text: requestedSessionKey ? `Unknown task state for session ${requestedSessionKey}` : `Unknown jobId: ${requestedJobId}` }],
             structuredContent: {
-              jobId: args.jobId,
+              jobId: requestedJobId,
+              sessionKey: requestedSessionKey,
               status: 'error',
               widgetStatus: { version: 1, state: 'error', reason: 'not-found' },
               details: {
@@ -282,7 +289,9 @@ const server = createServer(async (req, res) => {
                 needsHumanDecision: false,
                 recommendedNextStep: 'Resubmit the task to start a new run.',
               },
-              error: 'Job not found. The server may have restarted.',
+              error: requestedSessionKey
+                ? 'Task state not found for that session. The server may have restarted or forgotten the run.'
+                : 'Job not found. The server may have restarted.',
             },
             isError: true,
           })
