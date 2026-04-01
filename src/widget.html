@@ -589,9 +589,27 @@
         var btn = document.createElement('button');
         btn.className = 'action-btn' + (b.primary ? ' primary' : '');
         btn.textContent = b.label;
-        btn.onclick = function() {
+        btn.onclick = async function() {
           btn.disabled = true;
-          if (oai.sendFollowUpMessage) oai.sendFollowUpMessage(b.msg);
+          console.log('[widget] button clicked:', b.label);
+          console.log('[widget] oai keys:', Object.keys(window.openai || {}));
+          console.log('[widget] sendFollowUpMessage?', typeof (window.openai || {}).sendFollowUpMessage);
+          console.log('[widget] requestTargetedReply?', typeof (window.openai || {}).requestTargetedReply);
+          var api = window.openai || {};
+          try {
+            if (api.requestTargetedReply) {
+              var r1 = await api.requestTargetedReply();
+              console.log('[widget] requestTargetedReply result:', r1);
+            }
+          } catch(e) { console.error('[widget] requestTargetedReply error:', e); }
+          try {
+            if (api.sendFollowUpMessage) {
+              var r2 = await api.sendFollowUpMessage(b.msg);
+              console.log('[widget] sendFollowUpMessage result:', r2);
+            } else {
+              console.warn('[widget] sendFollowUpMessage not available');
+            }
+          } catch(e) { console.error('[widget] sendFollowUpMessage error:', e); }
         };
         actionsEl.appendChild(btn);
       });
