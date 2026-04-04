@@ -272,6 +272,7 @@
     // ── Constants ─────────────────────────────────────────
     var QUIET_THRESHOLD_S  = 15;
     var STALLED_THRESHOLD_S = 60;
+    var POLL_CALL_TIMEOUT_MS = 65000; // Must exceed server's 50s long-poll
 
     // ── State ─────────────────────────────────────────────
     var state = {
@@ -721,33 +722,44 @@
 
     function renderActions() {
       var uiStatus = state.status;
-      if (!isTerminal(uiStatus)) { actionsEl.className = 'actions'; return; }
-
-      actionsEl.className = 'actions visible';
-      actionsEl.innerHTML = '';
       var sk = state.sessionKey;
       var a = state.artifacts || {};
       var buttons = [];
 
-      if (uiStatus === 'failed') {
-        buttons.push({ label: 'Retry', msg: 'Retry the failed task using sessionKey: ' + sk, primary: true });
-        buttons.push({ label: 'Explain error', msg: 'Explain in detail what went wrong and why.' });
-      } else if (uiStatus === 'completed_no_summary') {
-        buttons.push({ label: 'Continue session', msg: 'Continue working on this using sessionKey: ' + sk, primary: true });
-        buttons.push({ label: 'Reconstruct summary', msg: 'Ask Clawdy to summarize what it did using sessionKey: ' + sk });
-        buttons.push({ label: 'Show raw events', msg: 'Show the raw activity log from the last task.' });
-      } else {
-        // completed
-        buttons.push({ label: 'Continue session', msg: 'Continue working on this using sessionKey: ' + sk, primary: true });
-        buttons.push({ label: 'Explain changes', msg: 'Explain the changes Clawdy made in detail.' });
-        if (!a.prUrl && (a.filesChanged || []).length > 0) {
-          buttons.push({ label: 'Create PR', msg: 'Ask Clawdy to create a PR for these changes using sessionKey: ' + sk });
-        }
+      if (uiStatus === 'stalled' || uiStatus === 'quiet' || uiStatus === 'service_unavailable') {
+        buttons.push({
+          label: 'Check in',
+          msg: 'The Clawdy widget has not received events for a while. Use the check_openclaw_task tool with sessionKey "' + sk + '" to get the latest status, then report what you find.',
+          primary: true,
+        });
+      } else if (!isTerminal(uiStatus)) {
+        actionsEl.className = 'actions';
+        return;
       }
 
-      // Always offer "Start new task" when terminal
-      buttons.push({ label: 'New task', msg: 'Start a fresh task with Clawdy (new session).' });
+      if (isTerminal(uiStatus)) {
+        if (uiStatus === 'failed') {
+          buttons.push({ label: 'Retry', msg: 'Retry the failed task using sessionKey: ' + sk, primary: true });
+          buttons.push({ label: 'Explain error', msg: 'Explain in detail what went wrong and why.' });
+        } else if (uiStatus === 'completed_no_summary') {
+          buttons.push({ label: 'Continue session', msg: 'Continue working on this using sessionKey: ' + sk, primary: true });
+          buttons.push({ label: 'Reconstruct summary', msg: 'Ask Clawdy to summarize what it did using sessionKey: ' + sk });
+          buttons.push({ label: 'Show raw events', msg: 'Show the raw activity log from the last task.' });
+        } else {
+          // completed
+          buttons.push({ label: 'Continue session', msg: 'Continue working on this using sessionKey: ' + sk, primary: true });
+          buttons.push({ label: 'Explain changes', msg: 'Explain the changes Clawdy made in detail.' });
+          if (!a.prUrl && (a.filesChanged || []).length > 0) {
+            buttons.push({ label: 'Create PR', msg: 'Ask Clawdy to create a PR for these changes using sessionKey: ' + sk });
+          }
+        }
 
+        // Always offer "Start new task" when terminal
+        buttons.push({ label: 'New task', msg: 'Start a fresh task with Clawdy (new session).' });
+      }
+
+      actionsEl.className = 'actions visible';
+      actionsEl.innerHTML = '';
       buttons.forEach(function(b) {
         var btn = document.createElement('button');
         btn.className = 'action-btn' + (b.primary ? ' primary' : '');
@@ -773,15 +785,28 @@
     }
 
     // ── Polling ──────────────────────────────────────────
+    function callToolWithTimeout(name, args, timeoutMs) {
+      return new Promise(function (resolve, reject) {
+        var settled = false;
+        var timer = setTimeout(function () {
+          if (!settled) { settled = true; reject(new Error('Tool call timed out')); }
+        }, timeoutMs);
+        oai.callTool(name, args).then(
+          function (v) { if (!settled) { settled = true; clearTimeout(timer); resolve(v); } },
+          function (e) { if (!settled) { settled = true; clearTimeout(timer); reject(e); } }
+        );
+      });
+    }
+
     async function poll() {
       if (isTerminal(deriveUiStatus()) || (!state.jobId && !state.sessionKey) || !oai.callTool) return;
       try {
         var prevJobId = state.jobId;
-        var result = await oai.callTool('check_openclaw_task', {
+        var result = await callToolWithTimeout('check_openclaw_task', {
           jobId: state.jobId,
           sessionKey: state.sessionKey,
           knownLogCount: state.seenLogCount,
-        });
+        }, POLL_CALL_TIMEOUT_MS);
         var data = extractSnapshot(result);
         if (!data) { schedulePoll(3000); return; }
 
