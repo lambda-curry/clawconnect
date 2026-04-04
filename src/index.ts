@@ -56,7 +56,7 @@ const TOOLS = [
       ],
     },
     _meta: {
-      ui: { resourceUri: WIDGET_URI, visibility: ['app'] },
+      ui: { resourceUri: WIDGET_URI },
       'ui/resourceUri': WIDGET_URI,
     },
   },
