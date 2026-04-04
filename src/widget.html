@@ -358,7 +358,7 @@
 
     function snapshotTs(snapshot) {
       if (!snapshot) return 0;
-      return snapshot.lastEventAt || snapshot.lastPollAt || snapshot.startedAt || 0;
+      return snapshot.lastEventAt || snapshot.startedAt || 0;
     }
 
     function currentSnapshot() {
@@ -368,7 +368,6 @@
         status: state.serverStatus,
         startedAt: state.startedAt,
         lastEventAt: state.lastEventAt,
-        lastPollAt: state.lastPollAt,
         summary: state.summary,
         error: state.error,
         errorInfo: state.errorInfo,
@@ -433,7 +432,8 @@
       if (state.pollFailures >= 5) return 'service_unavailable';
       if (state.pollFailures > 0) return 'reconnecting';
       var now = Date.now();
-      var sinceLast = state.lastEventAt ? (now - state.lastEventAt) / 1000 : 999;
+      var ref = state.lastEventAt || state.startedAt;
+      var sinceLast = ref ? (now - ref) / 1000 : 999;
       if (sinceLast > STALLED_THRESHOLD_S) return 'stalled';
       if (sinceLast > QUIET_THRESHOLD_S) return 'quiet';
       return 'active';
@@ -812,15 +812,17 @@
 
         var prevSeenLogCount = state.seenLogCount;
         var prevLogsLength = state.logs.length;
-        reconcileSnapshot(data, { renderLogs: false });
+        var adopted = reconcileSnapshot(data, { renderLogs: false });
 
-        if (data.logs && data.jobId !== prevJobId) {
-          renderAllLogs();
-        } else if (data.logs && data.logs.length > prevSeenLogCount && prevLogsLength > 0) {
-          var newLogs = data.logs.slice(prevSeenLogCount);
-          renderIncrementalLogs(newLogs);
-        } else if (data.logs && data.logs.length !== prevLogsLength) {
-          renderAllLogs();
+        if (adopted) {
+          if (data.logs && data.jobId !== prevJobId) {
+            renderAllLogs();
+          } else if (data.logs && data.logs.length > prevSeenLogCount && prevLogsLength > 0) {
+            var newLogs = data.logs.slice(prevSeenLogCount);
+            renderIncrementalLogs(newLogs);
+          } else if (data.logs && data.logs.length !== prevLogsLength) {
+            renderAllLogs();
+          }
         }
 
         render();
@@ -897,7 +899,8 @@
       // Inject heartbeat entries when crossing quiet/stalled thresholds
       var cur = state.status;
       if (cur !== lastHeartbeatStatus && (cur === 'quiet' || cur === 'stalled')) {
-        var sinceLast = state.lastEventAt ? Math.round((Date.now() - state.lastEventAt) / 1000) : 0;
+        var hbRef = state.lastEventAt || state.startedAt;
+        var sinceLast = hbRef ? Math.round((Date.now() - hbRef) / 1000) : 0;
         var hbText = cur === 'stalled'
           ? 'No fresh events for ' + sinceLast + 's \u2014 task may be working on something complex'
           : 'No fresh events for ' + sinceLast + 's \u2014 polling healthy';

@@ -233,7 +233,7 @@ export class OpenClawAdapter {
       logs.push({ ts: now, type: 'lifecycle', text: `Migrated legacy ChatGPT session to new Clawdy thread: ${sessionKey}` })
     }
 
-    const job: Job = { jobId, sessionKey, status: 'running', startedAt: now, lastEventAt: now, logs, artifacts }
+    const job: Job = { jobId, sessionKey, status: 'running', startedAt: now, lastEventAt: logs.length > 0 ? now : 0, logs, artifacts }
     jobs.set(jobId, job)
     latestJobBySession.set(sessionKey, jobId)
     sessions.set(sessionKey, {
