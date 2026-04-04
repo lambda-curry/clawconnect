@@ -42,7 +42,7 @@ const TOOLS = [
   },
   {
     name: 'check_openclaw_task',
-    description: 'Check the status of a previously submitted task. Waits up to 50 seconds for completion before returning. Poll until status is "completed", "completed_no_summary", or "error".',
+    description: 'Check the status of a previously submitted task. Waits up to 50 seconds for completion before returning. Poll with jobId and sessionKey when possible so the server can recover cleanly after refresh or stale local state.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -50,7 +50,10 @@ const TOOLS = [
         sessionKey: { type: 'string', description: 'Optional session key for reattaching status checks after refresh or stale local state.' },
         knownLogCount: { type: 'number', description: 'Number of log entries already seen. Server returns as soon as new entries appear.' },
       },
-      required: ['jobId'],
+      anyOf: [
+        { required: ['jobId'] },
+        { required: ['sessionKey'] },
+      ],
     },
     _meta: {
       ui: { resourceUri: WIDGET_URI, visibility: ['app'] },

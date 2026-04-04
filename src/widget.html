@@ -334,7 +334,7 @@
     }
 
     function restoreFromWidgetState(ws) {
-      if (!ws || !ws.jobId) return false;
+      if (!ws || (!ws.jobId && !ws.sessionKey)) return false;
       state.jobId = ws.jobId;
       state.sessionKey = ws.sessionKey;
       state.serverStatus = ws.serverStatus;
@@ -351,6 +351,72 @@
       return true;
     }
 
+    function isTerminalServerStatus(status) {
+      return status === 'completed' || status === 'completed_no_summary' || status === 'error';
+    }
+
+    function snapshotTs(snapshot) {
+      if (!snapshot) return 0;
+      return snapshot.lastEventAt || snapshot.lastPollAt || snapshot.startedAt || 0;
+    }
+
+    function currentSnapshot() {
+      return {
+        jobId: state.jobId,
+        sessionKey: state.sessionKey,
+        status: state.serverStatus,
+        startedAt: state.startedAt,
+        lastEventAt: state.lastEventAt,
+        lastPollAt: state.lastPollAt,
+        summary: state.summary,
+        error: state.error,
+        errorInfo: state.errorInfo,
+        logs: state.logs,
+        artifacts: state.artifacts,
+        continuationState: state.continuationState,
+      };
+    }
+
+    function shouldPreferSnapshot(next, current) {
+      if (!next || (!next.jobId && !next.sessionKey)) return false;
+      if (!current || (!current.jobId && !current.sessionKey)) return true;
+
+      var nextTerminal = isTerminalServerStatus(next.status);
+      var currentTerminal = isTerminalServerStatus(current.status);
+      if (nextTerminal !== currentTerminal) return nextTerminal;
+
+      return snapshotTs(next) >= snapshotTs(current);
+    }
+
+    function applySnapshot(data, opts) {
+      if (!data || (!data.jobId && !data.sessionKey)) return false;
+      var renderLogs = !opts || opts.renderLogs !== false;
+
+      if (Object.prototype.hasOwnProperty.call(data, 'jobId')) state.jobId = data.jobId;
+      if (Object.prototype.hasOwnProperty.call(data, 'sessionKey')) state.sessionKey = data.sessionKey;
+      if (Object.prototype.hasOwnProperty.call(data, 'status')) state.serverStatus = data.status;
+      if (Object.prototype.hasOwnProperty.call(data, 'startedAt') && data.startedAt) state.startedAt = data.startedAt;
+      if (Object.prototype.hasOwnProperty.call(data, 'lastEventAt') && data.lastEventAt) state.lastEventAt = data.lastEventAt;
+      state.lastPollAt = Date.now();
+      if (Object.prototype.hasOwnProperty.call(data, 'summary')) state.summary = data.summary;
+      if (Object.prototype.hasOwnProperty.call(data, 'error')) state.error = data.error;
+      if (Object.prototype.hasOwnProperty.call(data, 'errorInfo')) state.errorInfo = data.errorInfo;
+      if (Object.prototype.hasOwnProperty.call(data, 'artifacts')) state.artifacts = data.artifacts;
+      if (Object.prototype.hasOwnProperty.call(data, 'continuationState')) state.continuationState = data.continuationState;
+      if (Object.prototype.hasOwnProperty.call(data, 'logs') && data.logs) {
+        state.logs = data.logs;
+        state.seenLogCount = data.logs.length;
+        if (renderLogs) renderAllLogs();
+      }
+      state.pollFailures = 0;
+      return true;
+    }
+
+    function reconcileSnapshot(data, opts) {
+      if (!shouldPreferSnapshot(data, currentSnapshot())) return false;
+      return applySnapshot(data, opts);
+    }
+
     // ── Derived UI state ─────────────────────────────────
     // The server sends: running | completed | completed_no_summary | error
     // The widget derives richer states from timestamps.
@@ -363,6 +429,8 @@
       if (ss === 'error') return 'failed';
       // ss === 'running'
       if (state.artifacts && state.artifacts.needsHumanDecision) return 'waiting_on_user';
+      if (state.pollFailures >= 5) return 'service_unavailable';
+      if (state.pollFailures > 0) return 'reconnecting';
       var now = Date.now();
       var sinceLast = state.lastEventAt ? (now - state.lastEventAt) / 1000 : 999;
       if (sinceLast > STALLED_THRESHOLD_S) return 'stalled';
@@ -706,31 +774,28 @@
 
     // ── Polling ──────────────────────────────────────────
     async function poll() {
-      if (isTerminal(deriveUiStatus()) || !state.jobId) return;
+      if (isTerminal(deriveUiStatus()) || (!state.jobId && !state.sessionKey) || !oai.callTool) return;
       try {
+        var prevJobId = state.jobId;
         var result = await oai.callTool('check_openclaw_task', {
           jobId: state.jobId,
+          sessionKey: state.sessionKey,
           knownLogCount: state.seenLogCount,
         });
         var data = extractSnapshot(result);
         if (!data) { schedulePoll(3000); return; }
 
-        state.pollFailures = 0;
-        state.serverStatus = data.status;
-        state.lastPollAt = Date.now();
-        if (data.lastEventAt) state.lastEventAt = data.lastEventAt;
-        if (data.summary) state.summary = data.summary;
-        if (data.error) state.error = data.error;
-        if (data.errorInfo) state.errorInfo = data.errorInfo;
-        if (data.artifacts) state.artifacts = data.artifacts;
-        if (data.continuationState) state.continuationState = data.continuationState;
+        var prevSeenLogCount = state.seenLogCount;
+        var prevLogsLength = state.logs.length;
+        reconcileSnapshot(data, { renderLogs: false });
 
-        // Incremental log update
-        if (data.logs && data.logs.length > state.seenLogCount) {
-          var newLogs = data.logs.slice(state.seenLogCount);
-          state.logs = data.logs;
-          state.seenLogCount = data.logs.length;
+        if (data.logs && data.jobId !== prevJobId) {
+          renderAllLogs();
+        } else if (data.logs && data.logs.length > prevSeenLogCount && prevLogsLength > 0) {
+          var newLogs = data.logs.slice(prevSeenLogCount);
           renderIncrementalLogs(newLogs);
+        } else if (data.logs && data.logs.length !== prevLogsLength) {
+          renderAllLogs();
         }
 
         render();
@@ -743,11 +808,9 @@
         }
       } catch (err) {
         state.pollFailures++;
-        // Differentiate transient failures from hard failures
-        if (state.pollFailures >= 5) {
-          state.status = 'service_unavailable';
-          render();
-        }
+        state.lastPollAt = Date.now();
+        render();
+        persistState();
         schedulePoll(Math.min(5000 * state.pollFailures, 30000));
       }
     }
@@ -769,8 +832,32 @@
     function extractSnapshot(obj) {
       if (!obj) return null;
       if (obj.structuredContent) return obj.structuredContent;
-      if (obj.jobId || obj.status) return obj;
+      if (obj.jobId || obj.sessionKey || obj.status) return obj;
       return null;
+    }
+
+    function maybeReconnect() {
+      if (!oai.callTool) return false;
+      if (isTerminal(deriveUiStatus()) || (!state.jobId && !state.sessionKey)) return false;
+      state.status = 'reconnecting';
+      render();
+      schedulePoll(0);
+      return true;
+    }
+
+    function reconcileFromOutput(output) {
+      var data = extractSnapshot(output);
+      if (!data) return false;
+      var adopted = reconcileSnapshot(data, { renderLogs: true });
+      if (!adopted) return false;
+      render();
+      persistState();
+      if (isTerminalServerStatus(state.serverStatus)) {
+        onTerminal();
+      } else {
+        maybeReconnect();
+      }
+      return true;
     }
 
     // ── Tick (updates elapsed + derived status + heartbeat) ──
@@ -800,25 +887,13 @@
 
     // ── Init: start from tool output ─────────────────────
     function startFromOutput(output) {
-      if (state.jobId) return; // already initialized
       var data = extractSnapshot(output);
-      if (!data || !data.jobId) return;
-      state.jobId = data.jobId;
-      state.sessionKey = data.sessionKey;
-      state.serverStatus = data.status;
-      state.startedAt = data.startedAt || Date.now();
-      state.lastEventAt = data.lastEventAt || Date.now();
-      state.lastPollAt = Date.now();
-      if (data.logs) {
-        state.logs = data.logs;
-        state.seenLogCount = data.logs.length;
-        renderAllLogs();
-      }
-      if (data.artifacts) state.artifacts = data.artifacts;
+      if (!data) return;
+      if (!reconcileSnapshot(data, { renderLogs: true })) return;
       render();
       persistState();
-      if (data.status === 'running') {
-        schedulePoll(0);
+      if (state.serverStatus === 'running') {
+        maybeReconnect();
       } else {
         onTerminal();
       }
@@ -840,24 +915,24 @@
       }
 
       // Still running — try to reconnect
-      state.status = 'reconnecting';
-      render();
-      schedulePoll(0);
+      maybeReconnect();
       return true;
     }
 
     // ── Boot ─────────────────────────────────────────────
+    function handleGlobalsReady() {
+      oai = window.openai || {};
+      if (reconcileFromOutput(oai.toolOutput)) return;
+      maybeReconnect();
+    }
+
     state.tickTimer = setInterval(tick, 1000);
+    window.addEventListener('openai:set_globals', handleGlobalsReady);
 
     if (!rehydrate()) {
-      // No prior state — wait for tool output
-      if (oai.toolOutput) {
-        startFromOutput(oai.toolOutput);
-      }
-      window.addEventListener('openai:set_globals', function() {
-        oai = window.openai || {};
-        try { startFromOutput(oai.toolOutput); } catch(e) {}
-      });
+      startFromOutput(oai.toolOutput);
+    } else {
+      reconcileFromOutput(oai.toolOutput);
     }
   </script>
 </body>
