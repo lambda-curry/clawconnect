@@ -163,7 +163,7 @@
     .result-wrap.visible { display: flex; }
     .result {
       background: #09090b; border: 1px solid #27272a; border-radius: 6px;
-      padding: 10px 12px; flex: 1; min-height: 0; min-width: 0;
+      padding: 10px 12px; overflow-y: auto; flex: 1; min-height: 0; min-width: 0;
       word-break: break-word; overflow-wrap: anywhere; font-size: 13px; line-height: 1.6;
     }
     .result h1, .result h2, .result h3 { color: #f4f4f5; margin: 10px 0 4px 0; font-size: 15px; }
@@ -810,25 +810,25 @@
         var data = extractSnapshot(result);
         if (!data) { schedulePoll(3000); return; }
 
+        // Poll responses are always authoritative — apply directly
         var prevSeenLogCount = state.seenLogCount;
-        var prevLogsLength = state.logs.length;
-        var adopted = reconcileSnapshot(data, { renderLogs: false });
+        applySnapshot(data, { renderLogs: false });
 
-        if (adopted) {
-          if (data.logs && data.jobId !== prevJobId) {
-            renderAllLogs();
-          } else if (data.logs && data.logs.length > prevSeenLogCount && prevLogsLength > 0) {
-            var newLogs = data.logs.slice(prevSeenLogCount);
-            renderIncrementalLogs(newLogs);
-          } else if (data.logs && data.logs.length !== prevLogsLength) {
-            renderAllLogs();
-          }
+        if (data.logs && data.jobId !== prevJobId) {
+          renderAllLogs();
+        } else if (data.logs && data.logs.length > prevSeenLogCount) {
+          var newLogs = data.logs.slice(prevSeenLogCount);
+          renderIncrementalLogs(newLogs);
         }
 
         render();
-        persistState();
 
         if (state.serverStatus === 'running') {
+          // Only persist periodically while running to avoid thrashing widget state
+          if (!state._lastPersistAt || Date.now() - state._lastPersistAt > 10000) {
+            state._lastPersistAt = Date.now();
+            persistState();
+          }
           schedulePoll(0);
         } else {
           onTerminal();
@@ -837,7 +837,6 @@
         state.pollFailures++;
         state.lastPollAt = Date.now();
         render();
-        persistState();
         schedulePoll(Math.min(5000 * state.pollFailures, 30000));
       }
     }
