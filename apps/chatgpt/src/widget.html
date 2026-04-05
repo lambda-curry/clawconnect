@@ -24,54 +24,53 @@
       flex: 1;
       min-width: 0;
       overflow: hidden;
-      padding: 12px 14px;
+      padding: 0;
       gap: 8px;
     }
-    .widget-main {
-      display: grid;
-      min-height: 0;
-      min-width: 0;
-      flex: 1;
-      grid-template-columns: minmax(0, 1fr);
-      gap: 12px;
-      overflow: hidden;
-    }
-    .response-panel,
-    .activity-panel {
-      min-height: 0;
-      min-width: 0;
-    }
-    .response-panel {
-      display: flex;
-      flex-direction: column;
-      overflow: hidden;
-      gap: 8px;
-    }
-    .response-header {
+    /* ── View toggle ────────────────────────────────────── */
+    .view-toggle {
+      display: none;
+      gap: 2px;
+      padding: 2px;
+      border-radius: 6px;
+      background: #18181b;
+      border: 1px solid #27272a;
       flex-shrink: 0;
-      min-width: 0;
     }
-    .response-body {
+    .view-toggle.visible { display: inline-flex; }
+    .toggle-btn {
+      padding: 4px 10px;
+      border-radius: 4px;
+      border: none;
+      background: transparent;
+      color: #71717a;
+      font-size: 11px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+    }
+    .toggle-btn:hover { color: #a1a1aa; }
+    .toggle-btn.active { background: #27272a; color: #e4e4e7; }
+
+    /* ── Main panel (single view) ────────────────────────── */
+    .main-panel {
+      flex: 1;
       min-height: 0;
       min-width: 0;
-      flex: 1;
-      overflow-y: auto;
-      overflow-x: hidden;
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-    }
-    .activity-panel {
       display: flex;
       flex-direction: column;
       overflow: hidden;
+    }
+    .panel-view {
+      display: none;
+      flex-direction: column;
+      flex: 1;
+      min-height: 0;
+      min-width: 0;
+      overflow: hidden;
       gap: 8px;
     }
-    @media (min-width: 768px) {
-      .widget-main {
-        grid-template-columns: minmax(0, 1fr) 320px;
-      }
-    }
+    .panel-view.active { display: flex; }
 
     /* ── Header ─────────────────────────────────────────── */
     .header {
@@ -130,10 +129,6 @@
       letter-spacing: 0.06em; color: #52525b; margin-bottom: 4px;
       flex-shrink: 0;
     }
-    .response-header .section-label,
-    .activity-panel .section-label {
-      margin-bottom: 0;
-    }
     .logs {
       background: #09090b; border: 1px solid #27272a; border-radius: 6px;
       padding: 8px 10px;
@@ -161,6 +156,7 @@
       flex-direction: column;
     }
     .result-wrap.visible { display: flex; }
+    .result-wrap.empty { display: none; }
     .result {
       background: #09090b; border: 1px solid #27272a; border-radius: 6px;
       padding: 10px 12px; overflow-y: auto; flex: 1; min-height: 0; min-width: 0;
@@ -213,16 +209,18 @@
       border-radius: 5px; padding: 8px 14px; font-size: 13px; font-weight: 500;
       cursor: pointer; transition: background 0.15s;
       min-height: 40px;
-      max-width: 100%;
+      white-space: nowrap;
+      flex-shrink: 0;
     }
     .action-btn:hover { background: #3f3f46; }
     .action-btn:focus-visible { outline: 2px solid #60a5fa; outline-offset: 2px; }
     .action-btn:disabled { opacity: 0.35; cursor: default; }
     .action-btn.primary { background: #1d4ed8; border-color: #2563eb80; color: #e4e4e7; }
     .action-btn.primary:hover { background: #2563eb; }
-    @media (max-width: 640px) {
-      .actions.visible { display: grid; grid-template-columns: 1fr; }
-      .action-btn.primary { order: -1; }
+    .actions.visible {
+      flex-wrap: nowrap;
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
     }
   </style>
 </head>
@@ -238,21 +236,19 @@
       </div>
     </div>
     <div class="identity" id="identity"></div>
-    <div class="widget-main">
-      <div class="response-panel">
-        <div class="response-header">
-          <div class="section-label" id="resultLabel">Clawdy's response</div>
-        </div>
-        <div class="response-body">
-          <div class="result-wrap" id="resultWrap">
-            <div class="result" id="result"></div>
-          </div>
-          <div class="fallback-summary" id="fallback"></div>
-        </div>
-      </div>
-      <div class="activity-panel" id="activityPanel">
-        <div class="section-label">Activity</div>
+    <div class="view-toggle" id="viewToggle">
+      <button class="toggle-btn" data-view="response" id="toggleResponse">Response</button>
+      <button class="toggle-btn active" data-view="activity" id="toggleActivity">Activity</button>
+    </div>
+    <div class="main-panel">
+      <div class="panel-view active" id="activityView">
         <div class="logs" id="logs"></div>
+      </div>
+      <div class="panel-view" id="responseView">
+        <div class="result-wrap visible" id="resultWrap">
+          <div class="result" id="result"></div>
+        </div>
+        <div class="fallback-summary" id="fallback"></div>
       </div>
     </div>
     <div class="actions" id="actions"></div>
@@ -260,21 +256,25 @@
 
   <script>
     // ── DOM refs ──────────────────────────────────────────
-    var badgeEl    = document.getElementById('badge');
-    var spinnerEl  = document.getElementById('spinnerWrap');
-    var elapsedEl  = document.getElementById('elapsed');
-    var lastEvtEl  = document.getElementById('lastEvent');
-    var versionEl  = document.getElementById('version');
-    var identityEl = document.getElementById('identity');
-    var logsEl     = document.getElementById('logs');
-    var resultWrap = document.getElementById('resultWrap');
-    var resultLabel= document.getElementById('resultLabel');
-    var resultEl   = document.getElementById('result');
-    var fallbackEl = document.getElementById('fallback');
-    var actionsEl  = document.getElementById('actions');
+    var badgeEl       = document.getElementById('badge');
+    var spinnerEl    = document.getElementById('spinnerWrap');
+    var elapsedEl    = document.getElementById('elapsed');
+    var lastEvtEl    = document.getElementById('lastEvent');
+    var versionEl    = document.getElementById('version');
+    var identityEl   = document.getElementById('identity');
+    var logsEl       = document.getElementById('logs');
+    var resultWrap   = document.getElementById('resultWrap');
+    var resultEl     = document.getElementById('result');
+    var fallbackEl   = document.getElementById('fallback');
+    var actionsEl    = document.getElementById('actions');
+    var viewToggleEl = document.getElementById('viewToggle');
+    var toggleRespEl = document.getElementById('toggleResponse');
+    var toggleActEl  = document.getElementById('toggleActivity');
+    var activityView = document.getElementById('activityView');
+    var responseView = document.getElementById('responseView');
 
     var oai = window.openai || {};
-    var WIDGET_VERSION = 11;
+    var WIDGET_VERSION = 13;
 
     // ── Constants ─────────────────────────────────────────
     var QUIET_THRESHOLD_S  = 15;
@@ -318,6 +318,60 @@
       reconnecting: 'Reconnecting',
       service_unavailable: 'Temporarily unavailable',
     };
+
+    // ── View toggle ───────────────────────────────────────
+    var activeView = 'activity';
+    var userSelectedView = false;
+    var hasAutoSwitched = false;
+
+    function hasResponse() {
+      return !!(state.summary || state.error);
+    }
+
+    function getDefaultView() {
+      if (!isTerminalServerStatus(state.serverStatus)) return 'activity';
+      if (state.serverStatus === 'error') return 'response';
+      if (state.serverStatus === 'completed' && hasResponse()) return 'response';
+      return 'activity';
+    }
+
+    function setView(view) {
+      activeView = view;
+      activityView.className = 'panel-view' + (view === 'activity' ? ' active' : '');
+      responseView.className = 'panel-view' + (view === 'response' ? ' active' : '');
+      toggleActEl.className = 'toggle-btn' + (view === 'activity' ? ' active' : '');
+      toggleRespEl.className = 'toggle-btn' + (view === 'response' ? ' active' : '');
+      if (view === 'activity') logsEl.scrollTop = logsEl.scrollHeight;
+    }
+
+    function syncView() {
+      if (userSelectedView) return;
+      var def = getDefaultView();
+      if (def !== activeView) {
+        if (isTerminalServerStatus(state.serverStatus) && !hasAutoSwitched) {
+          hasAutoSwitched = true;
+          setView(def);
+        } else if (!isTerminalServerStatus(state.serverStatus)) {
+          setView(def);
+        }
+      }
+    }
+
+    function updateViewToggle() {
+      var showToggle = hasResponse() && state.logs.length > 0;
+      viewToggleEl.className = 'view-toggle' + (showToggle ? ' visible' : '');
+      var count = state.logs.length;
+      toggleActEl.textContent = 'Activity' + (count > 0 ? ' (' + count + ')' : '');
+    }
+
+    toggleRespEl.addEventListener('click', function() {
+      userSelectedView = true;
+      setView('response');
+    });
+    toggleActEl.addEventListener('click', function() {
+      userSelectedView = true;
+      setView('activity');
+    });
 
     // ── Persistence (widget-instance scoped) ─────────────
     // Note: ChatGPT does not expose a stable chat/thread ID to widgets.
@@ -672,7 +726,6 @@
       var uiStatus = state.status;
 
       if (uiStatus === 'failed') {
-        resultLabel.textContent = 'Error';
         resultEl.innerHTML = renderMarkdown(state.error || 'Unknown error');
         resultWrap.className = 'result-wrap visible';
         fallbackEl.className = 'fallback-summary';
@@ -686,7 +739,6 @@
       }
 
       if (uiStatus === 'completed' && state.summary) {
-        resultLabel.textContent = "Clawdy's response";
         resultEl.innerHTML = renderMarkdown(state.summary);
         resultWrap.className = 'result-wrap visible';
         fallbackEl.className = 'fallback-summary';
@@ -776,6 +828,8 @@
       renderIdentity();
       renderResult();
       renderActions();
+      syncView();
+      updateViewToggle();
     }
 
     // ── Polling ──────────────────────────────────────────
