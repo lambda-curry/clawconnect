@@ -47,8 +47,7 @@
       overflow: hidden;
       gap: 8px;
     }
-    .response-header,
-    .response-footer {
+    .response-header {
       flex-shrink: 0;
       min-width: 0;
     }
@@ -66,11 +65,8 @@
       display: flex;
       flex-direction: column;
       overflow: hidden;
+      gap: 8px;
     }
-    .activity-panel.collapsed .logs { display: none; }
-    .activity-toggle { cursor: default; }
-    .activity-panel.collapsed .activity-toggle { cursor: pointer; }
-    .activity-toggle:hover { color: #71717a; }
     @media (min-width: 768px) {
       .widget-main {
         grid-template-columns: minmax(0, 1fr) 320px;
@@ -253,15 +249,13 @@
           </div>
           <div class="fallback-summary" id="fallback"></div>
         </div>
-        <div class="response-footer">
-          <div class="actions" id="actions"></div>
-        </div>
       </div>
       <div class="activity-panel" id="activityPanel">
-        <div class="section-label activity-toggle" id="activityToggle">Activity</div>
+        <div class="section-label">Activity</div>
         <div class="logs" id="logs"></div>
       </div>
     </div>
+    <div class="actions" id="actions"></div>
   </div>
 
   <script>
@@ -271,8 +265,6 @@
     var elapsedEl  = document.getElementById('elapsed');
     var lastEvtEl  = document.getElementById('lastEvent');
     var versionEl  = document.getElementById('version');
-    var activityPanel = document.getElementById('activityPanel');
-    var activityToggle = document.getElementById('activityToggle');
     var identityEl = document.getElementById('identity');
     var logsEl     = document.getElementById('logs');
     var resultWrap = document.getElementById('resultWrap');
@@ -282,7 +274,7 @@
     var actionsEl  = document.getElementById('actions');
 
     var oai = window.openai || {};
-    var WIDGET_VERSION = 9;
+    var WIDGET_VERSION = 11;
 
     // ── Constants ─────────────────────────────────────────
     var QUIET_THRESHOLD_S  = 15;
@@ -777,30 +769,6 @@
       });
     }
 
-    // ── Activity collapse ────────────────────────────────
-    var activityManuallyToggled = false;
-
-    function updateActivityPanel() {
-      var terminal = isTerminal(state.status);
-      var count = state.logs.length;
-      if (terminal && !activityManuallyToggled) {
-        activityPanel.classList.add('collapsed');
-      }
-      if (activityPanel.classList.contains('collapsed')) {
-        activityToggle.textContent = 'Activity (' + count + ' event' + (count !== 1 ? 's' : '') + ')';
-      } else {
-        activityToggle.textContent = 'Activity';
-      }
-    }
-
-    activityToggle.addEventListener('click', function() {
-      if (!activityPanel.classList.contains('collapsed')) return;
-      activityManuallyToggled = true;
-      activityPanel.classList.remove('collapsed');
-      activityToggle.textContent = 'Activity';
-      logsEl.scrollTop = logsEl.scrollHeight;
-    });
-
     // ── Full render ──────────────────────────────────────
     function render() {
       updateStatus();
@@ -808,7 +776,6 @@
       renderIdentity();
       renderResult();
       renderActions();
-      updateActivityPanel();
     }
 
     // ── Polling ──────────────────────────────────────────
