@@ -30,6 +30,9 @@ importers:
 
   apps/chatgpt:
     dependencies:
+      '@clawconnect/core':
+        specifier: workspace:*
+        version: link:../../packages/core
       '@hono/node-server':
         specifier: ^1.19.12
         version: 1.19.12(hono@4.12.10)
@@ -45,9 +48,6 @@ importers:
       hono:
         specifier: ^4.12.9
         version: 4.12.10
-      ws:
-        specifier: ^8.20.0
-        version: 8.20.0
       zod:
         specifier: ^4.3.6
         version: 4.3.6
@@ -55,15 +55,31 @@ importers:
       '@types/node':
         specifier: 'catalog:'
         version: 22.19.17
-      '@types/ws':
-        specifier: ^8.18.1
-        version: 8.18.1
       tsx:
         specifier: ^4.7.1
         version: 4.21.0
       typescript:
         specifier: 'catalog:'
         version: 5.9.3
+
+  packages/core:
+    dependencies:
+      ws:
+        specifier: ^8.20.0
+        version: 8.20.0
+    devDependencies:
+      '@types/node':
+        specifier: 'catalog:'
+        version: 22.19.17
+      '@types/ws':
+        specifier: ^8.18.1
+        version: 8.18.1
+      typescript:
+        specifier: 'catalog:'
+        version: 5.9.3
+      vite-plus:
+        specifier: 'catalog:'
+        version: 0.1.15(@types/node@22.19.17)(esbuild@0.27.7)(tsx@4.21.0)(typescript@5.9.3)(vite@8.0.3(@emnapi/core@1.9.2)(@emnapi/runtime@1.9.2)(@types/node@22.19.17)(esbuild@0.27.7)(tsx@4.21.0))
 
 packages:
 

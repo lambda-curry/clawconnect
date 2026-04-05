@@ -4,13 +4,17 @@ import { readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Hono } from 'hono'
-import { OpenClawAdapter } from './openclaw/adapter.js'
+import { OpenClawGateway, SessionManager } from '@clawconnect/core'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const WIDGET_HTML = readFileSync(join(__dirname, 'widget.html'), 'utf-8')
 
 const hono = new Hono()
-const openclaw = new OpenClawAdapter()
+const gateway = new OpenClawGateway({
+  url: process.env.OPENCLAW_URL!,
+  token: process.env.OPENCLAW_PASSWORD!,
+})
+const sessions = new SessionManager(gateway, process.env.OPENCLAW_AGENT_ID?.trim() || 'main')
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
@@ -146,13 +150,13 @@ const server = createServer(async (req, res) => {
       const { name, arguments: args } = msg.params as { name: string; arguments: Record<string, string> }
 
       if (name === 'run_openclaw_task') {
-        const job = openclaw.submitTask({
+        const job = sessions.submitTask({
           task: args.task,
           context: args.context,
           sessionKey: args.sessionKey,
         })
         console.log(`[mcp] submitted job ${job.jobId} on session ${job.sessionKey}`)
-        const snapshot = openclaw.buildSnapshot(job)
+        const snapshot = sessions.buildSnapshot(job)
         respond({
           content: [{ type: 'text', text: `Task submitted. Job ID: ${job.jobId}` }],
           structuredContent: snapshot,
@@ -162,7 +166,7 @@ const server = createServer(async (req, res) => {
         const knownLogCount = Number(args.knownLogCount) || 0
         const requestedJobId = typeof args.jobId === 'string' ? args.jobId : undefined
         const requestedSessionKey = typeof args.sessionKey === 'string' ? args.sessionKey : undefined
-        const job = await openclaw.waitForJob(requestedJobId, knownLogCount, requestedSessionKey)
+        const job = await sessions.waitForJob(requestedJobId, knownLogCount, requestedSessionKey)
         if (!job) {
           const notFoundMsg = requestedSessionKey
             ? 'Task state not found for that session. The server may have restarted.'
@@ -178,7 +182,7 @@ const server = createServer(async (req, res) => {
             isError: true,
           })
         } else {
-          const snapshot = openclaw.buildSnapshot(job)
+          const snapshot = sessions.buildSnapshot(job)
           const isTerminal = job.status !== 'running'
           respond({
             content: [{ type: 'text', text: isTerminal ? (job.summary ?? job.error ?? '') : `Still running. Poll again.` }],
