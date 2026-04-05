@@ -1,0 +1,36 @@
+{
+  "name": "@clawconnect/mcp",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "clawconnect-mcp": "./dist/bin.mjs"
+  },
+  "exports": {
+    ".": "./dist/index.mjs",
+    "./bin": "./dist/bin.mjs",
+    "./package.json": "./package.json"
+  },
+  "publishConfig": {
+    "exports": {
+      ".": "./dist/index.mjs"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "vp pack",
+    "dev": "vp pack --watch"
+  },
+  "dependencies": {
+    "@clawconnect/core": "workspace:*",
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "typescript": "catalog:",
+    "vite-plus": "catalog:"
+  }
+}

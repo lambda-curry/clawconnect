@@ -1,0 +1,34 @@
+{
+  "name": "@clawconnect/cli",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "clawconnect": "./dist/bin.mjs"
+  },
+  "exports": {
+    ".": "./dist/index.mjs",
+    "./bin": "./dist/bin.mjs",
+    "./package.json": "./package.json"
+  },
+  "publishConfig": {
+    "exports": {
+      ".": "./dist/index.mjs"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "vp pack",
+    "dev": "vp pack --watch"
+  },
+  "dependencies": {
+    "@clawconnect/core": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "typescript": "catalog:",
+    "vite-plus": "catalog:"
+  }
+}
