@@ -270,7 +270,7 @@
     var actionsEl  = document.getElementById('actions');
 
     var oai = window.openai || {};
-    var WIDGET_VERSION = 7;
+    var WIDGET_VERSION = 8;
 
     // ── Constants ─────────────────────────────────────────
     var QUIET_THRESHOLD_S  = 15;
@@ -959,11 +959,17 @@
     }
 
     // ── Boot ─────────────────────────────────────────────
+    var inGlobalsReady = false;
     function handleGlobalsReady() {
-      if (destroyed) return;
-      oai = window.openai || {};
-      if (reconcileFromOutput(oai.toolOutput)) return;
-      maybeReconnect();
+      if (destroyed || inGlobalsReady) return;
+      inGlobalsReady = true;
+      try {
+        oai = window.openai || {};
+        if (reconcileFromOutput(oai.toolOutput)) return;
+        maybeReconnect();
+      } finally {
+        inGlobalsReady = false;
+      }
     }
 
     versionEl.textContent = 'v' + WIDGET_VERSION;
