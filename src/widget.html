@@ -228,6 +228,7 @@
       <div class="meta">
         <span id="elapsed"></span>
         <span id="lastEvent"></span>
+      <span id="version" style="color:#3f3f46;font-size:9px;"></span>
       </div>
     </div>
     <div class="identity" id="identity"></div>
@@ -259,6 +260,7 @@
     var spinnerEl  = document.getElementById('spinnerWrap');
     var elapsedEl  = document.getElementById('elapsed');
     var lastEvtEl  = document.getElementById('lastEvent');
+    var versionEl  = document.getElementById('version');
     var identityEl = document.getElementById('identity');
     var logsEl     = document.getElementById('logs');
     var resultWrap = document.getElementById('resultWrap');
@@ -268,11 +270,15 @@
     var actionsEl  = document.getElementById('actions');
 
     var oai = window.openai || {};
+    var WIDGET_VERSION = 7;
 
     // ── Constants ─────────────────────────────────────────
     var QUIET_THRESHOLD_S  = 15;
     var STALLED_THRESHOLD_S = 60;
     var POLL_CALL_TIMEOUT_MS = 65000; // Must exceed server's 50s long-poll
+    var MAX_CLIENT_LOG_ENTRIES = 200;
+    var destroyed = false;
+    var pollInFlight = false;
 
     // ── State ─────────────────────────────────────────────
     var state = {
@@ -318,6 +324,7 @@
 
     function persistState() {
       if (!oai.setWidgetState) return;
+      // Only persist lightweight fields — logs are re-fetched from server on reconnect
       oai.setWidgetState({
         jobId: state.jobId,
         sessionKey: state.sessionKey,
@@ -328,9 +335,9 @@
         summary: state.summary,
         error: state.error,
         errorInfo: state.errorInfo,
-        logs: state.logs,
         artifacts: state.artifacts,
         continuationState: state.continuationState,
+        seenLogCount: state.seenLogCount,
       });
     }
 
@@ -345,10 +352,10 @@
       state.summary = ws.summary;
       state.error = ws.error;
       state.errorInfo = ws.errorInfo;
-      state.logs = ws.logs || [];
+      state.logs = []; // Logs re-fetched from server on reconnect
       state.artifacts = ws.artifacts;
       state.continuationState = ws.continuationState;
-      state.seenLogCount = state.logs.length;
+      state.seenLogCount = 0; // Force full log fetch on reconnect
       return true;
     }
 
@@ -448,23 +455,6 @@
       var d = document.createElement('div');
       d.textContent = s;
       return d.innerHTML;
-    }
-
-    function resetUi() {
-      logsEl.innerHTML = '';
-      detailsWrapEl.style.display = 'none';
-      detailsLabelEl.textContent = 'Outcome';
-      detailsEl.innerHTML = '';
-      resultLabel.style.display = 'none';
-      resultLabel.textContent = "Clawdy's response";
-      resultEl.style.display = 'none';
-      resultEl.innerHTML = '';
-      actionsEl.style.display = 'none';
-      actionsEl.innerHTML = '';
-      seenLogCount = 0;
-      done = false;
-      setStatus('queued');
-      elapsedEl.textContent = '';
     }
 
     function renderMarkdown(text) {
@@ -799,7 +789,9 @@
     }
 
     async function poll() {
+      if (destroyed || pollInFlight) return;
       if (isTerminal(deriveUiStatus()) || (!state.jobId && !state.sessionKey) || !oai.callTool) return;
+      pollInFlight = true;
       try {
         var prevJobId = state.jobId;
         var result = await callToolWithTimeout('check_openclaw_task', {
@@ -838,10 +830,18 @@
         state.lastPollAt = Date.now();
         render();
         schedulePoll(Math.min(5000 * state.pollFailures, 30000));
+      } finally {
+        pollInFlight = false;
       }
     }
 
+    function stopPolling() {
+      clearTimeout(state.pollTimer);
+      state.pollTimer = null;
+    }
+
     function schedulePoll(delayMs) {
+      if (destroyed) return;
       clearTimeout(state.pollTimer);
       state.pollTimer = setTimeout(poll, delayMs);
     }
@@ -890,7 +890,7 @@
     var lastHeartbeatStatus = null;
 
     function tick() {
-      if (isTerminal(state.status)) return;
+      if (destroyed || isTerminal(state.status)) return;
       var prev = state.status;
       updateStatus();
       updateMeta();
@@ -904,6 +904,9 @@
           ? 'No fresh events for ' + sinceLast + 's \u2014 task may be working on something complex'
           : 'No fresh events for ' + sinceLast + 's \u2014 polling healthy';
         var hbEntry = { ts: Date.now(), type: 'heartbeat', text: hbText };
+        if (state.logs.length >= MAX_CLIENT_LOG_ENTRIES) {
+          state.logs.splice(0, state.logs.length - MAX_CLIENT_LOG_ENTRIES + 1);
+        }
         state.logs.push(hbEntry);
         renderIncrementalLogs([hbEntry]);
         lastHeartbeatStatus = cur;
@@ -946,15 +949,27 @@
       return true;
     }
 
+    // ── Teardown ─────────────────────────────────────────
+    function destroy() {
+      destroyed = true;
+      stopPolling();
+      clearInterval(state.tickTimer);
+      state.tickTimer = null;
+      window.removeEventListener('openai:set_globals', handleGlobalsReady);
+    }
+
     // ── Boot ─────────────────────────────────────────────
     function handleGlobalsReady() {
+      if (destroyed) return;
       oai = window.openai || {};
       if (reconcileFromOutput(oai.toolOutput)) return;
       maybeReconnect();
     }
 
+    versionEl.textContent = 'v' + WIDGET_VERSION;
     state.tickTimer = setInterval(tick, 1000);
     window.addEventListener('openai:set_globals', handleGlobalsReady);
+    window.addEventListener('beforeunload', destroy);
 
     if (!rehydrate()) {
       startFromOutput(oai.toolOutput);
