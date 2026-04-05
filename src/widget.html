@@ -67,6 +67,10 @@
       flex-direction: column;
       overflow: hidden;
     }
+    .activity-panel.collapsed .logs { display: none; }
+    .activity-toggle { cursor: default; }
+    .activity-panel.collapsed .activity-toggle { cursor: pointer; }
+    .activity-toggle:hover { color: #71717a; }
     @media (min-width: 768px) {
       .widget-main {
         grid-template-columns: minmax(0, 1fr) 320px;
@@ -118,7 +122,7 @@
 
     /* ── Identity row ───────────────────────────────────── */
     .identity {
-      display: flex; gap: 12px; font-size: 10px; color: #3f3f46;
+      display: flex; gap: 12px; font-size: 11px; color: #3f3f46;
       flex-wrap: wrap; flex-shrink: 0; min-width: 0;
       font-family: "SF Mono", "Fira Code", monospace;
     }
@@ -126,7 +130,7 @@
 
     /* ── Activity / Logs ────────────────────────────────── */
     .section-label {
-      font-size: 10px; font-weight: 600; text-transform: uppercase;
+      font-size: 11px; font-weight: 600; text-transform: uppercase;
       letter-spacing: 0.06em; color: #52525b; margin-bottom: 4px;
       flex-shrink: 0;
     }
@@ -138,7 +142,7 @@
       background: #09090b; border: 1px solid #27272a; border-radius: 6px;
       padding: 8px 10px;
       min-height: 0; max-height: none; overflow-y: auto;
-      font-family: "SF Mono", "Fira Code", monospace; font-size: 10px;
+      font-family: "SF Mono", "Fira Code", monospace; font-size: 11px;
       color: #71717a; line-height: 1.5;
       flex: 1;
       min-width: 0;
@@ -210,14 +214,20 @@
     .actions.visible { display: flex; }
     .action-btn {
       background: #27272a; color: #d4d4d8; border: 1px solid #3f3f4680;
-      border-radius: 5px; padding: 5px 10px; font-size: 11px; font-weight: 500;
+      border-radius: 5px; padding: 8px 14px; font-size: 13px; font-weight: 500;
       cursor: pointer; transition: background 0.15s;
+      min-height: 40px;
       max-width: 100%;
     }
     .action-btn:hover { background: #3f3f46; }
+    .action-btn:focus-visible { outline: 2px solid #60a5fa; outline-offset: 2px; }
     .action-btn:disabled { opacity: 0.35; cursor: default; }
     .action-btn.primary { background: #1d4ed8; border-color: #2563eb80; color: #e4e4e7; }
     .action-btn.primary:hover { background: #2563eb; }
+    @media (max-width: 640px) {
+      .actions.visible { display: grid; grid-template-columns: 1fr; }
+      .action-btn.primary { order: -1; }
+    }
   </style>
 </head>
 <body>
@@ -247,8 +257,8 @@
           <div class="actions" id="actions"></div>
         </div>
       </div>
-      <div class="activity-panel">
-        <div class="section-label">Activity</div>
+      <div class="activity-panel" id="activityPanel">
+        <div class="section-label activity-toggle" id="activityToggle">Activity</div>
         <div class="logs" id="logs"></div>
       </div>
     </div>
@@ -261,6 +271,8 @@
     var elapsedEl  = document.getElementById('elapsed');
     var lastEvtEl  = document.getElementById('lastEvent');
     var versionEl  = document.getElementById('version');
+    var activityPanel = document.getElementById('activityPanel');
+    var activityToggle = document.getElementById('activityToggle');
     var identityEl = document.getElementById('identity');
     var logsEl     = document.getElementById('logs');
     var resultWrap = document.getElementById('resultWrap');
@@ -270,7 +282,7 @@
     var actionsEl  = document.getElementById('actions');
 
     var oai = window.openai || {};
-    var WIDGET_VERSION = 8;
+    var WIDGET_VERSION = 9;
 
     // ── Constants ─────────────────────────────────────────
     var QUIET_THRESHOLD_S  = 15;
@@ -304,15 +316,15 @@
     // ── UI state labels ──────────────────────────────────
     var STATUS_LABELS = {
       starting: 'Starting',
-      active: 'Active',
-      quiet: 'Quiet',
-      stalled: 'Stalled',
+      active: 'Working',
+      quiet: 'Still working',
+      stalled: 'Taking longer',
       waiting_on_user: 'Waiting on you',
       completed: 'Completed',
       completed_no_summary: 'Done (no summary)',
       failed: 'Failed',
       reconnecting: 'Reconnecting',
-      service_unavailable: 'Unavailable',
+      service_unavailable: 'Temporarily unavailable',
     };
 
     // ── Persistence (widget-instance scoped) ─────────────
@@ -765,6 +777,30 @@
       });
     }
 
+    // ── Activity collapse ────────────────────────────────
+    var activityManuallyToggled = false;
+
+    function updateActivityPanel() {
+      var terminal = isTerminal(state.status);
+      var count = state.logs.length;
+      if (terminal && !activityManuallyToggled) {
+        activityPanel.classList.add('collapsed');
+      }
+      if (activityPanel.classList.contains('collapsed')) {
+        activityToggle.textContent = 'Activity (' + count + ' event' + (count !== 1 ? 's' : '') + ')';
+      } else {
+        activityToggle.textContent = 'Activity';
+      }
+    }
+
+    activityToggle.addEventListener('click', function() {
+      if (!activityPanel.classList.contains('collapsed')) return;
+      activityManuallyToggled = true;
+      activityPanel.classList.remove('collapsed');
+      activityToggle.textContent = 'Activity';
+      logsEl.scrollTop = logsEl.scrollHeight;
+    });
+
     // ── Full render ──────────────────────────────────────
     function render() {
       updateStatus();
@@ -772,6 +808,7 @@
       renderIdentity();
       renderResult();
       renderActions();
+      updateActivityPanel();
     }
 
     // ── Polling ──────────────────────────────────────────
