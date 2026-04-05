@@ -13,22 +13,74 @@
       color: #e4e4e7;
       display: flex;
       flex-direction: column;
+      min-height: 0;
+      overflow: hidden;
     }
     .widget {
       display: flex;
       flex-direction: column;
+      height: 100%;
       min-height: 0;
       flex: 1;
+      min-width: 0;
+      overflow: hidden;
       padding: 12px 14px;
+      gap: 8px;
+    }
+    .widget-main {
+      display: grid;
+      min-height: 0;
+      min-width: 0;
+      flex: 1;
+      grid-template-columns: minmax(0, 1fr);
+      gap: 12px;
+      overflow: hidden;
+    }
+    .response-panel,
+    .activity-panel {
+      min-height: 0;
+      min-width: 0;
+    }
+    .response-panel {
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      gap: 8px;
+    }
+    .response-header {
+      flex-shrink: 0;
+      min-width: 0;
+    }
+    .response-body {
+      min-height: 0;
+      min-width: 0;
+      flex: 1;
+      overflow-y: auto;
+      overflow-x: hidden;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .activity-panel {
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      gap: 8px;
+    }
+    @media (min-width: 768px) {
+      .widget-main {
+        grid-template-columns: minmax(0, 1fr) 320px;
+      }
     }
 
     /* ── Header ─────────────────────────────────────────── */
     .header {
       display: flex;
       align-items: center;
+      flex-wrap: wrap;
       gap: 8px;
-      margin-bottom: 8px;
       flex-shrink: 0;
+      min-width: 0;
     }
     .badge {
       display: inline-block;
@@ -52,6 +104,9 @@
     .meta {
       font-size: 11px; color: #52525b; margin-left: auto;
       display: flex; gap: 10px; align-items: center;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      min-width: 0;
     }
     .meta span { white-space: nowrap; }
     .spinner {
@@ -63,29 +118,36 @@
 
     /* ── Identity row ───────────────────────────────────── */
     .identity {
-      display: flex; gap: 12px; font-size: 10px; color: #3f3f46;
-      margin-bottom: 8px; flex-shrink: 0;
+      display: flex; gap: 12px; font-size: 11px; color: #3f3f46;
+      flex-wrap: wrap; flex-shrink: 0; min-width: 0;
       font-family: "SF Mono", "Fira Code", monospace;
     }
     .identity .label { color: #52525b; }
 
     /* ── Activity / Logs ────────────────────────────────── */
     .section-label {
-      font-size: 10px; font-weight: 600; text-transform: uppercase;
+      font-size: 11px; font-weight: 600; text-transform: uppercase;
       letter-spacing: 0.06em; color: #52525b; margin-bottom: 4px;
       flex-shrink: 0;
     }
+    .response-header .section-label,
+    .activity-panel .section-label {
+      margin-bottom: 0;
+    }
     .logs {
       background: #09090b; border: 1px solid #27272a; border-radius: 6px;
-      padding: 8px 10px; margin-bottom: 8px;
-      min-height: 48px; max-height: 120px; overflow-y: auto;
-      font-family: "SF Mono", "Fira Code", monospace; font-size: 10px;
+      padding: 8px 10px;
+      min-height: 0; max-height: none; overflow-y: auto;
+      font-family: "SF Mono", "Fira Code", monospace; font-size: 11px;
       color: #71717a; line-height: 1.5;
-      flex-shrink: 0;
+      flex: 1;
+      min-width: 0;
+      overflow-x: hidden;
     }
     .logs .entry { white-space: pre-wrap; word-break: break-word; display: flex; gap: 6px; }
     .logs .ts { color: #3f3f46; flex-shrink: 0; min-width: 28px; }
     .logs .icon { flex-shrink: 0; width: 12px; text-align: center; }
+    .logs .entry span:last-child { min-width: 0; overflow-wrap: anywhere; }
     .logs .entry.phase .icon { color: #a78bfa; }
     .logs .entry.tool .icon { color: #60a5fa; }
     .logs .entry.tool-result .icon { color: #4ade80; }
@@ -95,14 +157,14 @@
 
     /* ── Result ─────────────────────────────────────────── */
     .result-wrap {
-      flex: 1; min-height: 0; display: none;
+      flex: 1; min-height: 0; min-width: 0; display: none;
       flex-direction: column;
     }
     .result-wrap.visible { display: flex; }
     .result {
       background: #09090b; border: 1px solid #27272a; border-radius: 6px;
-      padding: 10px 12px; overflow-y: auto; flex: 1; min-height: 0;
-      word-break: break-word; font-size: 13px; line-height: 1.6;
+      padding: 10px 12px; overflow-y: auto; flex: 1; min-height: 0; min-width: 0;
+      word-break: break-word; overflow-wrap: anywhere; font-size: 13px; line-height: 1.6;
     }
     .result h1, .result h2, .result h3 { color: #f4f4f5; margin: 10px 0 4px 0; font-size: 15px; }
     .result h1 { font-size: 17px; }
@@ -131,6 +193,8 @@
       background: #09090b; border: 1px solid #27272a; border-radius: 6px;
       padding: 10px 12px; font-size: 12px; color: #a1a1aa; line-height: 1.5;
       display: none;
+      min-width: 0;
+      overflow-wrap: anywhere;
     }
     .fallback-summary.visible { display: block; }
     .fallback-summary .note {
@@ -141,18 +205,25 @@
 
     /* ── Actions ─────────────────────────────────────────── */
     .actions {
-      display: none; gap: 6px; flex-wrap: wrap; margin-top: 8px; flex-shrink: 0;
+      display: none; gap: 8px; flex-wrap: wrap; flex-shrink: 0; min-width: 0;
     }
     .actions.visible { display: flex; }
     .action-btn {
       background: #27272a; color: #d4d4d8; border: 1px solid #3f3f4680;
-      border-radius: 5px; padding: 5px 10px; font-size: 11px; font-weight: 500;
+      border-radius: 5px; padding: 8px 14px; font-size: 13px; font-weight: 500;
       cursor: pointer; transition: background 0.15s;
+      min-height: 40px;
+      max-width: 100%;
     }
     .action-btn:hover { background: #3f3f46; }
+    .action-btn:focus-visible { outline: 2px solid #60a5fa; outline-offset: 2px; }
     .action-btn:disabled { opacity: 0.35; cursor: default; }
     .action-btn.primary { background: #1d4ed8; border-color: #2563eb80; color: #e4e4e7; }
     .action-btn.primary:hover { background: #2563eb; }
+    @media (max-width: 640px) {
+      .actions.visible { display: grid; grid-template-columns: 1fr; }
+      .action-btn.primary { order: -1; }
+    }
   </style>
 </head>
 <body>
@@ -163,16 +234,27 @@
       <div class="meta">
         <span id="elapsed"></span>
         <span id="lastEvent"></span>
+      <span id="version" style="color:#3f3f46;font-size:9px;"></span>
       </div>
     </div>
     <div class="identity" id="identity"></div>
-    <div class="section-label">Activity</div>
-    <div class="logs" id="logs"></div>
-    <div class="result-wrap" id="resultWrap">
-      <div class="section-label" id="resultLabel">Clawdy's response</div>
-      <div class="result" id="result"></div>
+    <div class="widget-main">
+      <div class="response-panel">
+        <div class="response-header">
+          <div class="section-label" id="resultLabel">Clawdy's response</div>
+        </div>
+        <div class="response-body">
+          <div class="result-wrap" id="resultWrap">
+            <div class="result" id="result"></div>
+          </div>
+          <div class="fallback-summary" id="fallback"></div>
+        </div>
+      </div>
+      <div class="activity-panel" id="activityPanel">
+        <div class="section-label">Activity</div>
+        <div class="logs" id="logs"></div>
+      </div>
     </div>
-    <div class="fallback-summary" id="fallback"></div>
     <div class="actions" id="actions"></div>
   </div>
 
@@ -182,6 +264,7 @@
     var spinnerEl  = document.getElementById('spinnerWrap');
     var elapsedEl  = document.getElementById('elapsed');
     var lastEvtEl  = document.getElementById('lastEvent');
+    var versionEl  = document.getElementById('version');
     var identityEl = document.getElementById('identity');
     var logsEl     = document.getElementById('logs');
     var resultWrap = document.getElementById('resultWrap');
@@ -191,10 +274,15 @@
     var actionsEl  = document.getElementById('actions');
 
     var oai = window.openai || {};
+    var WIDGET_VERSION = 11;
 
     // ── Constants ─────────────────────────────────────────
     var QUIET_THRESHOLD_S  = 15;
     var STALLED_THRESHOLD_S = 60;
+    var POLL_CALL_TIMEOUT_MS = 65000; // Must exceed server's 50s long-poll
+    var MAX_CLIENT_LOG_ENTRIES = 200;
+    var destroyed = false;
+    var pollInFlight = false;
 
     // ── State ─────────────────────────────────────────────
     var state = {
@@ -220,15 +308,15 @@
     // ── UI state labels ──────────────────────────────────
     var STATUS_LABELS = {
       starting: 'Starting',
-      active: 'Active',
-      quiet: 'Quiet',
-      stalled: 'Stalled',
+      active: 'Working',
+      quiet: 'Still working',
+      stalled: 'Taking longer',
       waiting_on_user: 'Waiting on you',
       completed: 'Completed',
       completed_no_summary: 'Done (no summary)',
       failed: 'Failed',
       reconnecting: 'Reconnecting',
-      service_unavailable: 'Unavailable',
+      service_unavailable: 'Temporarily unavailable',
     };
 
     // ── Persistence (widget-instance scoped) ─────────────
@@ -240,6 +328,7 @@
 
     function persistState() {
       if (!oai.setWidgetState) return;
+      // Only persist lightweight fields — logs are re-fetched from server on reconnect
       oai.setWidgetState({
         jobId: state.jobId,
         sessionKey: state.sessionKey,
@@ -250,14 +339,14 @@
         summary: state.summary,
         error: state.error,
         errorInfo: state.errorInfo,
-        logs: state.logs,
         artifacts: state.artifacts,
         continuationState: state.continuationState,
+        seenLogCount: state.seenLogCount,
       });
     }
 
     function restoreFromWidgetState(ws) {
-      if (!ws || !ws.jobId) return false;
+      if (!ws || (!ws.jobId && !ws.sessionKey)) return false;
       state.jobId = ws.jobId;
       state.sessionKey = ws.sessionKey;
       state.serverStatus = ws.serverStatus;
@@ -267,11 +356,76 @@
       state.summary = ws.summary;
       state.error = ws.error;
       state.errorInfo = ws.errorInfo;
-      state.logs = ws.logs || [];
+      state.logs = []; // Logs re-fetched from server on reconnect
       state.artifacts = ws.artifacts;
       state.continuationState = ws.continuationState;
-      state.seenLogCount = state.logs.length;
+      state.seenLogCount = 0; // Force full log fetch on reconnect
       return true;
+    }
+
+    function isTerminalServerStatus(status) {
+      return status === 'completed' || status === 'completed_no_summary' || status === 'error';
+    }
+
+    function snapshotTs(snapshot) {
+      if (!snapshot) return 0;
+      return snapshot.lastEventAt || snapshot.startedAt || 0;
+    }
+
+    function currentSnapshot() {
+      return {
+        jobId: state.jobId,
+        sessionKey: state.sessionKey,
+        status: state.serverStatus,
+        startedAt: state.startedAt,
+        lastEventAt: state.lastEventAt,
+        summary: state.summary,
+        error: state.error,
+        errorInfo: state.errorInfo,
+        logs: state.logs,
+        artifacts: state.artifacts,
+        continuationState: state.continuationState,
+      };
+    }
+
+    function shouldPreferSnapshot(next, current) {
+      if (!next || (!next.jobId && !next.sessionKey)) return false;
+      if (!current || (!current.jobId && !current.sessionKey)) return true;
+
+      var nextTerminal = isTerminalServerStatus(next.status);
+      var currentTerminal = isTerminalServerStatus(current.status);
+      if (nextTerminal !== currentTerminal) return nextTerminal;
+
+      return snapshotTs(next) >= snapshotTs(current);
+    }
+
+    function applySnapshot(data, opts) {
+      if (!data || (!data.jobId && !data.sessionKey)) return false;
+      var renderLogs = !opts || opts.renderLogs !== false;
+
+      if (Object.prototype.hasOwnProperty.call(data, 'jobId')) state.jobId = data.jobId;
+      if (Object.prototype.hasOwnProperty.call(data, 'sessionKey')) state.sessionKey = data.sessionKey;
+      if (Object.prototype.hasOwnProperty.call(data, 'status')) state.serverStatus = data.status;
+      if (Object.prototype.hasOwnProperty.call(data, 'startedAt') && data.startedAt) state.startedAt = data.startedAt;
+      if (Object.prototype.hasOwnProperty.call(data, 'lastEventAt') && data.lastEventAt) state.lastEventAt = data.lastEventAt;
+      state.lastPollAt = Date.now();
+      if (Object.prototype.hasOwnProperty.call(data, 'summary')) state.summary = data.summary;
+      if (Object.prototype.hasOwnProperty.call(data, 'error')) state.error = data.error;
+      if (Object.prototype.hasOwnProperty.call(data, 'errorInfo')) state.errorInfo = data.errorInfo;
+      if (Object.prototype.hasOwnProperty.call(data, 'artifacts')) state.artifacts = data.artifacts;
+      if (Object.prototype.hasOwnProperty.call(data, 'continuationState')) state.continuationState = data.continuationState;
+      if (Object.prototype.hasOwnProperty.call(data, 'logs') && data.logs) {
+        state.logs = data.logs;
+        state.seenLogCount = data.logs.length;
+        if (renderLogs) renderAllLogs();
+      }
+      state.pollFailures = 0;
+      return true;
+    }
+
+    function reconcileSnapshot(data, opts) {
+      if (!shouldPreferSnapshot(data, currentSnapshot())) return false;
+      return applySnapshot(data, opts);
     }
 
     // ── Derived UI state ─────────────────────────────────
@@ -286,8 +440,11 @@
       if (ss === 'error') return 'failed';
       // ss === 'running'
       if (state.artifacts && state.artifacts.needsHumanDecision) return 'waiting_on_user';
+      if (state.pollFailures >= 5) return 'service_unavailable';
+      if (state.pollFailures > 0) return 'reconnecting';
       var now = Date.now();
-      var sinceLast = state.lastEventAt ? (now - state.lastEventAt) / 1000 : 999;
+      var ref = state.lastEventAt || state.startedAt;
+      var sinceLast = ref ? (now - ref) / 1000 : 999;
       if (sinceLast > STALLED_THRESHOLD_S) return 'stalled';
       if (sinceLast > QUIET_THRESHOLD_S) return 'quiet';
       return 'active';
@@ -302,23 +459,6 @@
       var d = document.createElement('div');
       d.textContent = s;
       return d.innerHTML;
-    }
-
-    function resetUi() {
-      logsEl.innerHTML = '';
-      detailsWrapEl.style.display = 'none';
-      detailsLabelEl.textContent = 'Outcome';
-      detailsEl.innerHTML = '';
-      resultLabel.style.display = 'none';
-      resultLabel.textContent = "Clawdy's response";
-      resultEl.style.display = 'none';
-      resultEl.innerHTML = '';
-      actionsEl.style.display = 'none';
-      actionsEl.innerHTML = '';
-      seenLogCount = 0;
-      done = false;
-      setStatus('queued');
-      elapsedEl.textContent = '';
     }
 
     function renderMarkdown(text) {
@@ -576,33 +716,44 @@
 
     function renderActions() {
       var uiStatus = state.status;
-      if (!isTerminal(uiStatus)) { actionsEl.className = 'actions'; return; }
-
-      actionsEl.className = 'actions visible';
-      actionsEl.innerHTML = '';
       var sk = state.sessionKey;
       var a = state.artifacts || {};
       var buttons = [];
 
-      if (uiStatus === 'failed') {
-        buttons.push({ label: 'Retry', msg: 'Retry the failed task using sessionKey: ' + sk, primary: true });
-        buttons.push({ label: 'Explain error', msg: 'Explain in detail what went wrong and why.' });
-      } else if (uiStatus === 'completed_no_summary') {
-        buttons.push({ label: 'Continue session', msg: 'Continue working on this using sessionKey: ' + sk, primary: true });
-        buttons.push({ label: 'Reconstruct summary', msg: 'Ask Clawdy to summarize what it did using sessionKey: ' + sk });
-        buttons.push({ label: 'Show raw events', msg: 'Show the raw activity log from the last task.' });
-      } else {
-        // completed
-        buttons.push({ label: 'Continue session', msg: 'Continue working on this using sessionKey: ' + sk, primary: true });
-        buttons.push({ label: 'Explain changes', msg: 'Explain the changes Clawdy made in detail.' });
-        if (!a.prUrl && (a.filesChanged || []).length > 0) {
-          buttons.push({ label: 'Create PR', msg: 'Ask Clawdy to create a PR for these changes using sessionKey: ' + sk });
-        }
+      if (uiStatus === 'stalled' || uiStatus === 'quiet' || uiStatus === 'service_unavailable') {
+        buttons.push({
+          label: 'Check in',
+          msg: 'The Clawdy widget has not received events for a while. Use the check_openclaw_task tool with sessionKey "' + sk + '" to get the latest status, then report what you find.',
+          primary: true,
+        });
+      } else if (!isTerminal(uiStatus)) {
+        actionsEl.className = 'actions';
+        return;
       }
 
-      // Always offer "Start new task" when terminal
-      buttons.push({ label: 'New task', msg: 'Start a fresh task with Clawdy (new session).' });
+      if (isTerminal(uiStatus)) {
+        if (uiStatus === 'failed') {
+          buttons.push({ label: 'Retry', msg: 'Retry the failed task using sessionKey: ' + sk, primary: true });
+          buttons.push({ label: 'Explain error', msg: 'Explain in detail what went wrong and why.' });
+        } else if (uiStatus === 'completed_no_summary') {
+          buttons.push({ label: 'Continue session', msg: 'Continue working on this using sessionKey: ' + sk, primary: true });
+          buttons.push({ label: 'Reconstruct summary', msg: 'Ask Clawdy to summarize what it did using sessionKey: ' + sk });
+          buttons.push({ label: 'Show raw events', msg: 'Show the raw activity log from the last task.' });
+        } else {
+          // completed
+          buttons.push({ label: 'Continue session', msg: 'Continue working on this using sessionKey: ' + sk, primary: true });
+          buttons.push({ label: 'Explain changes', msg: 'Explain the changes Clawdy made in detail.' });
+          if (!a.prUrl && (a.filesChanged || []).length > 0) {
+            buttons.push({ label: 'Create PR', msg: 'Ask Clawdy to create a PR for these changes using sessionKey: ' + sk });
+          }
+        }
 
+        // Always offer "Start new task" when terminal
+        buttons.push({ label: 'New task', msg: 'Start a fresh task with Clawdy (new session).' });
+      }
+
+      actionsEl.className = 'actions visible';
+      actionsEl.innerHTML = '';
       buttons.forEach(function(b) {
         var btn = document.createElement('button');
         btn.className = 'action-btn' + (b.primary ? ' primary' : '');
@@ -628,54 +779,73 @@
     }
 
     // ── Polling ──────────────────────────────────────────
+    function callToolWithTimeout(name, args, timeoutMs) {
+      return new Promise(function (resolve, reject) {
+        var settled = false;
+        var timer = setTimeout(function () {
+          if (!settled) { settled = true; reject(new Error('Tool call timed out')); }
+        }, timeoutMs);
+        oai.callTool(name, args).then(
+          function (v) { if (!settled) { settled = true; clearTimeout(timer); resolve(v); } },
+          function (e) { if (!settled) { settled = true; clearTimeout(timer); reject(e); } }
+        );
+      });
+    }
+
     async function poll() {
-      if (isTerminal(deriveUiStatus()) || !state.jobId) return;
+      if (destroyed || pollInFlight) return;
+      if (isTerminal(deriveUiStatus()) || (!state.jobId && !state.sessionKey) || !oai.callTool) return;
+      pollInFlight = true;
       try {
-        var result = await oai.callTool('check_openclaw_task', {
+        var prevJobId = state.jobId;
+        var result = await callToolWithTimeout('check_openclaw_task', {
           jobId: state.jobId,
+          sessionKey: state.sessionKey,
           knownLogCount: state.seenLogCount,
-        });
+        }, POLL_CALL_TIMEOUT_MS);
         var data = extractSnapshot(result);
         if (!data) { schedulePoll(3000); return; }
 
-        state.pollFailures = 0;
-        state.serverStatus = data.status;
-        state.lastPollAt = Date.now();
-        if (data.lastEventAt) state.lastEventAt = data.lastEventAt;
-        if (data.summary) state.summary = data.summary;
-        if (data.error) state.error = data.error;
-        if (data.errorInfo) state.errorInfo = data.errorInfo;
-        if (data.artifacts) state.artifacts = data.artifacts;
-        if (data.continuationState) state.continuationState = data.continuationState;
+        // Poll responses are always authoritative — apply directly
+        var prevSeenLogCount = state.seenLogCount;
+        applySnapshot(data, { renderLogs: false });
 
-        // Incremental log update
-        if (data.logs && data.logs.length > state.seenLogCount) {
-          var newLogs = data.logs.slice(state.seenLogCount);
-          state.logs = data.logs;
-          state.seenLogCount = data.logs.length;
+        if (data.logs && data.jobId !== prevJobId) {
+          renderAllLogs();
+        } else if (data.logs && data.logs.length > prevSeenLogCount) {
+          var newLogs = data.logs.slice(prevSeenLogCount);
           renderIncrementalLogs(newLogs);
         }
 
         render();
-        persistState();
 
         if (state.serverStatus === 'running') {
+          // Only persist periodically while running to avoid thrashing widget state
+          if (!state._lastPersistAt || Date.now() - state._lastPersistAt > 10000) {
+            state._lastPersistAt = Date.now();
+            persistState();
+          }
           schedulePoll(0);
         } else {
           onTerminal();
         }
       } catch (err) {
         state.pollFailures++;
-        // Differentiate transient failures from hard failures
-        if (state.pollFailures >= 5) {
-          state.status = 'service_unavailable';
-          render();
-        }
+        state.lastPollAt = Date.now();
+        render();
         schedulePoll(Math.min(5000 * state.pollFailures, 30000));
+      } finally {
+        pollInFlight = false;
       }
     }
 
+    function stopPolling() {
+      clearTimeout(state.pollTimer);
+      state.pollTimer = null;
+    }
+
     function schedulePoll(delayMs) {
+      if (destroyed) return;
       clearTimeout(state.pollTimer);
       state.pollTimer = setTimeout(poll, delayMs);
     }
@@ -692,15 +862,39 @@
     function extractSnapshot(obj) {
       if (!obj) return null;
       if (obj.structuredContent) return obj.structuredContent;
-      if (obj.jobId || obj.status) return obj;
+      if (obj.jobId || obj.sessionKey || obj.status) return obj;
       return null;
+    }
+
+    function maybeReconnect() {
+      if (!oai.callTool) return false;
+      if (isTerminal(deriveUiStatus()) || (!state.jobId && !state.sessionKey)) return false;
+      state.status = 'reconnecting';
+      render();
+      schedulePoll(0);
+      return true;
+    }
+
+    function reconcileFromOutput(output) {
+      var data = extractSnapshot(output);
+      if (!data) return false;
+      var adopted = reconcileSnapshot(data, { renderLogs: true });
+      if (!adopted) return false;
+      render();
+      persistState();
+      if (isTerminalServerStatus(state.serverStatus)) {
+        onTerminal();
+      } else {
+        maybeReconnect();
+      }
+      return true;
     }
 
     // ── Tick (updates elapsed + derived status + heartbeat) ──
     var lastHeartbeatStatus = null;
 
     function tick() {
-      if (isTerminal(state.status)) return;
+      if (destroyed || isTerminal(state.status)) return;
       var prev = state.status;
       updateStatus();
       updateMeta();
@@ -708,11 +902,15 @@
       // Inject heartbeat entries when crossing quiet/stalled thresholds
       var cur = state.status;
       if (cur !== lastHeartbeatStatus && (cur === 'quiet' || cur === 'stalled')) {
-        var sinceLast = state.lastEventAt ? Math.round((Date.now() - state.lastEventAt) / 1000) : 0;
+        var hbRef = state.lastEventAt || state.startedAt;
+        var sinceLast = hbRef ? Math.round((Date.now() - hbRef) / 1000) : 0;
         var hbText = cur === 'stalled'
           ? 'No fresh events for ' + sinceLast + 's \u2014 task may be working on something complex'
           : 'No fresh events for ' + sinceLast + 's \u2014 polling healthy';
         var hbEntry = { ts: Date.now(), type: 'heartbeat', text: hbText };
+        if (state.logs.length >= MAX_CLIENT_LOG_ENTRIES) {
+          state.logs.splice(0, state.logs.length - MAX_CLIENT_LOG_ENTRIES + 1);
+        }
         state.logs.push(hbEntry);
         renderIncrementalLogs([hbEntry]);
         lastHeartbeatStatus = cur;
@@ -723,25 +921,13 @@
 
     // ── Init: start from tool output ─────────────────────
     function startFromOutput(output) {
-      if (state.jobId) return; // already initialized
       var data = extractSnapshot(output);
-      if (!data || !data.jobId) return;
-      state.jobId = data.jobId;
-      state.sessionKey = data.sessionKey;
-      state.serverStatus = data.status;
-      state.startedAt = data.startedAt || Date.now();
-      state.lastEventAt = data.lastEventAt || Date.now();
-      state.lastPollAt = Date.now();
-      if (data.logs) {
-        state.logs = data.logs;
-        state.seenLogCount = data.logs.length;
-        renderAllLogs();
-      }
-      if (data.artifacts) state.artifacts = data.artifacts;
+      if (!data) return;
+      if (!reconcileSnapshot(data, { renderLogs: true })) return;
       render();
       persistState();
-      if (data.status === 'running') {
-        schedulePoll(0);
+      if (state.serverStatus === 'running') {
+        maybeReconnect();
       } else {
         onTerminal();
       }
@@ -763,24 +949,42 @@
       }
 
       // Still running — try to reconnect
-      state.status = 'reconnecting';
-      render();
-      schedulePoll(0);
+      maybeReconnect();
       return true;
     }
 
+    // ── Teardown ─────────────────────────────────────────
+    function destroy() {
+      destroyed = true;
+      stopPolling();
+      clearInterval(state.tickTimer);
+      state.tickTimer = null;
+      window.removeEventListener('openai:set_globals', handleGlobalsReady);
+    }
+
     // ── Boot ─────────────────────────────────────────────
+    var inGlobalsReady = false;
+    function handleGlobalsReady() {
+      if (destroyed || inGlobalsReady) return;
+      inGlobalsReady = true;
+      try {
+        oai = window.openai || {};
+        if (reconcileFromOutput(oai.toolOutput)) return;
+        maybeReconnect();
+      } finally {
+        inGlobalsReady = false;
+      }
+    }
+
+    versionEl.textContent = 'v' + WIDGET_VERSION;
     state.tickTimer = setInterval(tick, 1000);
+    window.addEventListener('openai:set_globals', handleGlobalsReady);
+    window.addEventListener('beforeunload', destroy);
 
     if (!rehydrate()) {
-      // No prior state — wait for tool output
-      if (oai.toolOutput) {
-        startFromOutput(oai.toolOutput);
-      }
-      window.addEventListener('openai:set_globals', function() {
-        oai = window.openai || {};
-        try { startFromOutput(oai.toolOutput); } catch(e) {}
-      });
+      startFromOutput(oai.toolOutput);
+    } else {
+      reconcileFromOutput(oai.toolOutput);
     }
   </script>
 </body>

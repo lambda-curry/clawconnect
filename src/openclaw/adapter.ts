@@ -233,7 +233,7 @@ export class OpenClawAdapter {
       logs.push({ ts: now, type: 'lifecycle', text: `Migrated legacy ChatGPT session to new Clawdy thread: ${sessionKey}` })
     }
 
-    const job: Job = { jobId, sessionKey, status: 'running', startedAt: now, lastEventAt: now, logs, artifacts }
+    const job: Job = { jobId, sessionKey, status: 'running', startedAt: now, lastEventAt: logs.length > 0 ? now : 0, logs, artifacts }
     jobs.set(jobId, job)
     latestJobBySession.set(sessionKey, jobId)
     sessions.set(sessionKey, {
@@ -248,6 +248,7 @@ export class OpenClawAdapter {
       if (job.logs.length < MAX_LOG_ENTRIES) {
         job.logs.push({ ts: Date.now(), type: event.type, text: event.text })
       }
+      console.log(`[job ${jobId.slice(0, 8)}] event #${job.logs.length}: ${event.type} - ${event.text.slice(0, 80)}`)
       processEvent(artifacts, event)
     }).then(
       (reply) => {
@@ -331,12 +332,18 @@ export class OpenClawAdapter {
 
   async waitForJob(jobId: string | undefined, knownLogCount = 0, sessionKey?: string): Promise<Job | undefined> {
     const job = this.resolveJob(jobId, sessionKey)
-    if (!job || job.status !== 'running') return job
+    if (!job) { console.log(`[waitForJob] no job found (jobId=${jobId?.slice(0, 8)}, session=${sessionKey?.slice(-8)})`); return undefined }
+    if (job.status !== 'running') { console.log(`[waitForJob] job ${job.jobId.slice(0, 8)} already ${job.status}, logs=${job.logs.length}`); return job }
+    console.log(`[waitForJob] job ${job.jobId.slice(0, 8)} waiting (known=${knownLogCount}, current=${job.logs.length})`)
     const deadline = Date.now() + POLL_WAIT_MS
     while (Date.now() < deadline && job.status === 'running') {
       await new Promise(r => setTimeout(r, 500))
-      if (job.logs.length > knownLogCount) return job
+      if (job.logs.length > knownLogCount) {
+        console.log(`[waitForJob] job ${job.jobId.slice(0, 8)} has new logs (${job.logs.length} > ${knownLogCount})`)
+        return job
+      }
     }
+    console.log(`[waitForJob] job ${job.jobId.slice(0, 8)} poll timeout (logs=${job.logs.length}, status=${job.status})`)
     return job
   }
 }
