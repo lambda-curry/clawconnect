@@ -107,6 +107,12 @@ export class OpenClawGateway {
   private subscribers = new Map<string, (frame: Frame) => void>()
   private pendingRpcs = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>()
   private connectPromise: Promise<void> | null = null
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  private reconnectAttempt = 0
+  private intentionallyClosed = false
+
+  private static readonly RECONNECT_BASE_MS = 1_000
+  private static readonly RECONNECT_MAX_MS = 30_000
 
   constructor(
     private readonly gatewayUrl: string,
@@ -119,7 +125,13 @@ export class OpenClawGateway {
 
   connect(): Promise<void> {
     if (this.connectPromise) return this.connectPromise
-    this.connectPromise = this._connect()
+    this.intentionallyClosed = false
+    this.connectPromise = this._connect().then(() => {
+      this.reconnectAttempt = 0
+    }, (err) => {
+      this.connectPromise = null
+      throw err
+    })
     return this.connectPromise
   }
 
@@ -221,10 +233,44 @@ export class OpenClawGateway {
         rpc.reject(new Error('Gateway disconnected'))
         this.pendingRpcs.delete(id)
       }
+      this.scheduleReconnect()
     })
   }
 
-  private sendRpc(method: string, params: Record<string, unknown>, timeoutMs: number): Promise<unknown> {
+  private scheduleReconnect() {
+    if (this.intentionallyClosed || this.reconnectTimer) return
+    this.reconnectAttempt++
+    const delay = Math.min(
+      OpenClawGateway.RECONNECT_BASE_MS * Math.pow(2, this.reconnectAttempt - 1),
+      OpenClawGateway.RECONNECT_MAX_MS,
+    )
+    console.log(`[openclaw-gateway] reconnecting in ${delay}ms (attempt ${this.reconnectAttempt})`)
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null
+      this.connect().then(
+        () => console.log(`[openclaw-gateway] reconnected after ${this.reconnectAttempt} attempt(s)`),
+        (err) => console.error(`[openclaw-gateway] reconnect failed:`, err.message),
+      )
+    }, delay)
+  }
+
+  close() {
+    this.intentionallyClosed = true
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer)
+      this.reconnectTimer = null
+    }
+    if (this.ws) {
+      this.ws.close()
+      this.ws = null
+    }
+    this.connectPromise = null
+  }
+
+  private async sendRpc(method: string, params: Record<string, unknown>, timeoutMs: number): Promise<unknown> {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      await this.connect()
+    }
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       throw new Error('Gateway not connected')
     }
