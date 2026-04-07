@@ -146,6 +146,7 @@ export function createMcpServer(config: GatewayConfig & { agentId: string; provi
       context: z.string().optional().describe("Additional context for the task"),
       sessionKey: z.string().optional().describe("Session key from a previous task to continue the same thread"),
     },
+    { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     async ({ task, context, sessionKey }) => {
       const result = runTask(sessions, { task, context, sessionKey });
       return fmtRun(result);
@@ -161,6 +162,7 @@ export function createMcpServer(config: GatewayConfig & { agentId: string; provi
       knownLogCount: z.number().optional().describe("Number of log entries already seen — in poll mode, server returns early on new activity"),
       mode: z.enum(["poll", "wait"]).optional().describe('Polling mode: "wait" blocks until completion or timeout (recommended for agentic use), "poll" returns on any new log activity'),
     },
+    { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
     async ({ jobId, sessionKey, knownLogCount, mode }) => {
       const result = await checkTask(sessions, {
         jobId,
@@ -176,6 +178,7 @@ export function createMcpServer(config: GatewayConfig & { agentId: string; provi
     "list_sessions",
     "List all active OpenClaw sessions. Shows session keys, last job status, and recommended next steps.",
     {},
+    { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
     async () => {
       const result = listSessions(sessions);
       return fmtList(result);

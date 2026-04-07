@@ -127,17 +127,76 @@ Add to `~/.codeium/windsurf/mcp_config.json`:
 }
 ```
 
-### ChatGPT
+### ChatGPT (Advanced)
 
-The ChatGPT integration runs as an HTTP server with a live progress widget:
+The ChatGPT integration runs as an HTTP MCP server with an optional live progress widget. It requires ChatGPT's **Developer Mode** and a publicly reachable URL.
+
+#### Prerequisites
+
+- ChatGPT Plus/Pro/Team account with **Developer Mode** enabled
+- A way to expose the server publicly (e.g., [Tailscale Funnel](https://tailscale.com/kb/1223/funnel), ngrok, Cloudflare Tunnel, or a VPS)
+
+#### 1. Enable Developer Mode in ChatGPT
+
+1. Open ChatGPT → **Settings** → **Developer** (or **Beta features**)
+2. Toggle **Developer Mode** on
+3. You should now see an **MCP Servers** section under Settings → Developer
+
+#### 2. Configure and run the server
 
 ```bash
 cd apps/chatgpt
-cp .env.example .env  # edit with your OPENCLAW_URL, OPENCLAW_PASSWORD, OPENCLAW_AGENT_ID
-pnpm run dev
+cp .env.example .env
 ```
 
-Then add the MCP server URL (`http://localhost:7331/mcp`) in ChatGPT's MCP settings.
+Edit `.env` with your values:
+
+```env
+PORT=7331
+OPENCLAW_URL=ws://YOUR_OPENCLAW_HOST:18789
+OPENCLAW_PASSWORD=your-openclaw-password
+OPENCLAW_AGENT_ID=main
+ENABLE_CHATGPT_UI_WIDGET=true   # optional: enables a live progress widget in ChatGPT
+```
+
+Then start the server:
+
+```bash
+pnpm run dev    # development with hot reload
+# or
+pnpm run build && pnpm run start   # production
+```
+
+#### 3. Expose the server
+
+ChatGPT needs a publicly reachable HTTPS URL. Example with Tailscale Funnel:
+
+```bash
+tailscale funnel 7331
+```
+
+This gives you a URL like `https://your-machine.tail1234.ts.net:443`.
+
+#### 4. Add the MCP server in ChatGPT
+
+1. Go to **Settings** → **Developer** → **MCP Servers**
+2. Click **Add MCP Server**
+3. Enter your public URL with the `/mcp` path: `https://your-machine.tail1234.ts.net/mcp`
+4. Save and start a new chat
+
+#### 5. Test it
+
+In a new ChatGPT conversation, ask:
+
+> "Use the run_task tool to ask Clawdy to say hello"
+
+ChatGPT will call `run_task`, then poll with `check_task` until the task completes. If the widget is enabled, you'll see live progress inline.
+
+#### Notes
+
+- `check_task` is annotated as read-only/idempotent, which may reduce approval prompts during polling
+- The widget polls the server directly via `oai.callTool()` — it does not require `check_task` to have widget metadata
+- If the widget causes issues, set `ENABLE_CHATGPT_UI_WIDGET=false` and restart
 
 ## Usage
 

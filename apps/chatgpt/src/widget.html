@@ -775,7 +775,7 @@
       if (uiStatus === 'stalled' || uiStatus === 'quiet' || uiStatus === 'service_unavailable') {
         buttons.push({
           label: 'Check in',
-          msg: 'The Clawdy widget has not received events for a while. Use the check_openclaw_task tool with sessionKey "' + sk + '" to get the latest status, then report what you find.',
+          msg: 'The Clawdy widget has not received events for a while. Use the check_task tool with sessionKey "' + sk + '" to get the latest status, then report what you find.',
           primary: true,
         });
       } else if (!isTerminal(uiStatus)) {
@@ -852,7 +852,7 @@
       pollInFlight = true;
       try {
         var prevJobId = state.jobId;
-        var result = await callToolWithTimeout('check_openclaw_task', {
+        var result = await callToolWithTimeout('check_task', {
           jobId: state.jobId,
           sessionKey: state.sessionKey,
           knownLogCount: state.seenLogCount,

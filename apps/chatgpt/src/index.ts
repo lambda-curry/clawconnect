@@ -31,6 +31,11 @@ const CORS_HEADERS = {
 };
 
 const WIDGET_URI = "ui://widget/openclaw-status.html";
+const WIDGET_ENABLED = process.env.ENABLE_CHATGPT_UI_WIDGET === "true";
+
+const WIDGET_META = WIDGET_ENABLED
+  ? { ui: { resourceUri: WIDGET_URI }, "ui/resourceUri": WIDGET_URI }
+  : {};
 
 const TOOLS = [
   {
@@ -49,9 +54,14 @@ const TOOLS = [
       },
       required: ["task"],
     },
+    annotations: {
+      title: "Run Task",
+      readOnlyHint: false,
+      destructiveHint: false,
+      openWorldHint: true,
+    },
     _meta: {
-      ui: { resourceUri: WIDGET_URI },
-      "ui/resourceUri": WIDGET_URI,
+      ...WIDGET_META,
       "openai/toolInvocation/invoking": "Sending task to Clawdy...",
     },
   },
@@ -79,9 +89,11 @@ const TOOLS = [
       },
       anyOf: [{ required: ["jobId"] }, { required: ["sessionKey"] }],
     },
-    _meta: {
-      ui: { resourceUri: WIDGET_URI },
-      "ui/resourceUri": WIDGET_URI,
+    annotations: {
+      title: "Check Task Status",
+      readOnlyHint: true,
+      idempotentHint: true,
+      openWorldHint: false,
     },
   },
 ];
@@ -139,13 +151,9 @@ const server = createServer(async (req, res) => {
       respond({ tools: TOOLS });
     } else if (msg.method === "resources/list") {
       respond({
-        resources: [
-          {
-            uri: WIDGET_URI,
-            name: "OpenClaw Status Widget",
-            mimeType: "text/html;profile=mcp-app",
-          },
-        ],
+        resources: WIDGET_ENABLED
+          ? [{ uri: WIDGET_URI, name: "OpenClaw Status Widget", mimeType: "text/html;profile=mcp-app" }]
+          : [],
       });
     } else if (msg.method === "resources/read") {
       const uri = (msg.params as { uri?: string })?.uri;
