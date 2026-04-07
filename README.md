@@ -2,6 +2,8 @@
 
 MCP server and CLI for connecting AI coding agents to [OpenClaw](https://github.com/lambda-curry/openclaw) instances. Submit tasks, poll for progress, and continue conversations — all through the MCP protocol.
 
+> **Use at your own risk.** This software is provided as-is under the [MIT License](LICENSE). ClawConnect connects to your OpenClaw instance using credentials you provide — **you are responsible for securing your `OPENCLAW_PASSWORD` and `OPENCLAW_URL`**. Treat these like any other secret: never commit them to version control, restrict network access to your OpenClaw instance, and rotate credentials regularly. The authors are not liable for any damages, data loss, or security incidents arising from the use of this software.
+
 ## Packages
 
 | Package | Description |

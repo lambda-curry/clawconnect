@@ -28,6 +28,7 @@ lerna-debug.log*
 # misc
 .DS_Store
 *.zip
+*.tgz
 
 # AI agent worktrees
 .claude/worktrees/
