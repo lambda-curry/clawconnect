@@ -1,88 +1,200 @@
-# chatgpt-openclaw
+# ClawConnect
 
-A small MCP app that lets ChatGPT hand work off to OpenClaw, then watch the run through a polling widget.
+MCP server and CLI for connecting AI coding agents to [OpenClaw](https://github.com/lambda-curry/openclaw) instances. Submit tasks, poll for progress, and continue conversations — all through the MCP protocol.
 
-## Development
+## Packages
+
+| Package | Description |
+|---------|-------------|
+| `packages/core` | Shared gateway, session management, and tool handlers |
+| `packages/mcp` | MCP server (stdio transport) |
+| `packages/cli` | CLI (`clawconnect`) |
+| `apps/chatgpt` | ChatGPT MCP app (HTTP transport + widget) |
+
+## Quick Start
 
 ```bash
-npm install
-npm run dev
+git clone git@github.com:lambda-curry/clawconnect.git
+cd clawconnect
+pnpm install
+pnpm run ready
 ```
 
-Then open <http://localhost:7331>.
+## MCP Tools
 
-## Tool lifecycle
+The server exposes three tools:
 
-The app intentionally keeps the server-side flow simple:
+- **`run_task`** — Submit a task to your OpenClaw agent. Returns a `jobId` and `sessionKey` immediately.
+- **`check_task`** — Poll for progress. Blocks up to 50s per call. Use `mode: "wait"` for agentic use (returns only on completion/timeout) or `mode: "poll"` for live progress (returns on any new activity).
+- **`list_sessions`** — List active sessions for reconnecting to previous threads.
 
-1. `run_openclaw_task` submits work to OpenClaw and returns quickly.
-2. The tool response includes a `jobId` plus the `sessionKey` that owns the OpenClaw conversation.
-3. ChatGPT mounts the widget from the same tool response.
-4. The widget polls `check_openclaw_task` until the run finishes, errors, or reaches a user-waiting state.
+### Polling Modes
 
-This keeps `run_openclaw_task` cheap and retry-friendly while preserving live progress in the widget.
+| Mode | Behavior | Best for |
+|------|----------|----------|
+| `wait` (default) | Returns only when the task completes or 50s elapses | AI agents (Claude Code, Codex) — minimizes round-trips |
+| `poll` | Returns as soon as any new log activity occurs | Live UIs (ChatGPT widget) — real-time progress |
 
-## Widget lifecycle
+A typical 3-minute task with `mode: "wait"` requires ~5 tool calls (1 `run_task` + 4 `check_task`).
 
-The widget is responsible for presentation only:
+## Configuration
 
-- It starts from the `run_openclaw_task` tool output.
-- It calls `check_openclaw_task` with `knownLogCount` so the server can return early when new log lines arrive.
-- It renders three layers of state:
-  - live activity log
-  - compact outcome/details panel
-  - context-aware follow-up actions
-- On terminal states it asks ChatGPT for a targeted reply so the conversation gets a natural summary.
+The MCP server reads three environment variables:
 
-The server now also returns a small `widgetStatus` object and normalized `details` payload so the widget does not need to reverse-engineer state from raw artifacts alone.
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `OPENCLAW_URL` | Yes | WebSocket URL for your OpenClaw instance (e.g., `ws://127.0.0.1:18789`) |
+| `OPENCLAW_PASSWORD` | Yes | OpenClaw gateway password |
+| `OPENCLAW_AGENT_ID` | No | Agent name to connect to (default: `main`) |
 
-The widget also persists the active run snapshot locally (`jobId`, `sessionKey`, `startedAt`, current widget status, details, logs, and final summary/error payload) so a refresh can recover cleanly. On reload it prefers the latest tool output when present, otherwise it restores the last saved run, reattaches polling for in-flight jobs, and restores terminal views without unnecessary re-polling. Status checks now include both `jobId` and `sessionKey`, which lets the server reattach more reliably when a refreshed client has stale local job state.
+## Setup
 
-## `sessionKey` continuation
+### Claude Code
 
-`sessionKey` is the continuity handle for the underlying OpenClaw conversation.
+Add to `~/.claude/settings.json`:
 
-- Omit it to start a fresh conversation.
-- Pass a previous `sessionKey` back into `run_openclaw_task` to continue the same thread.
-- The adapter stores the most recent continuation state per session so the widget and follow-up prompts can surface recommended next steps.
+```json
+{
+  "mcpServers": {
+    "clawconnect": {
+      "command": "node",
+      "args": ["/path/to/clawconnect/packages/mcp/dist/bin.mjs"],
+      "env": {
+        "OPENCLAW_URL": "ws://YOUR_OPENCLAW_HOST:18789",
+        "OPENCLAW_PASSWORD": "your-openclaw-password",
+        "OPENCLAW_AGENT_ID": "your-agent-name"
+      }
+    }
+  }
+}
+```
 
-This means you can do multi-step work like:
+Restart Claude Code to pick up the new MCP server.
 
-1. ask OpenClaw to make changes
-2. review the outcome
-3. continue with the same `sessionKey` to create a PR, answer a question, or refine the result
+### Cursor
 
-The widget keeps that resume path explicit in its follow-up actions: resuming the previous session is presented separately from starting a fresh task so users do not accidentally fork the wrong thread of work.
+Add to `.cursor/mcp.json` in your project root (or `~/.cursor/mcp.json` for global):
 
-## How `run_openclaw_task` and `check_openclaw_task` are expected to work
+```json
+{
+  "mcpServers": {
+    "clawconnect": {
+      "command": "node",
+      "args": ["/path/to/clawconnect/packages/mcp/dist/bin.mjs"],
+      "env": {
+        "OPENCLAW_URL": "ws://YOUR_OPENCLAW_HOST:18789",
+        "OPENCLAW_PASSWORD": "your-openclaw-password",
+        "OPENCLAW_AGENT_ID": "your-agent-name"
+      }
+    }
+  }
+}
+```
 
-### `run_openclaw_task`
+Restart Cursor after adding the config.
 
-Expected behavior:
+### Codex
 
-- accept a task plus optional context/workspace/sessionKey
-- enqueue/send the task to OpenClaw
-- return immediately with identifying state (`jobId`, `sessionKey`)
-- include lightweight UI metadata needed by the widget to start cleanly
+Add to `~/.codex/config.toml`:
 
-It should **not** block waiting for the full run to finish.
+```toml
+[mcp_servers.clawconnect]
+command = "node"
+args = ["/path/to/clawconnect/packages/mcp/dist/bin.mjs"]
+env = { OPENCLAW_URL = "ws://YOUR_OPENCLAW_HOST:18789", OPENCLAW_PASSWORD = "your-openclaw-password", OPENCLAW_AGENT_ID = "your-agent-name" }
+tool_timeout_sec = 60.0
+```
 
-### `check_openclaw_task`
+### Windsurf
 
-Expected behavior:
+Add to `~/.codeium/windsurf/mcp_config.json`:
 
-- accept a `jobId` (and optionally a `sessionKey` for refresh recovery / stale-client reattachment)
-- wait briefly for progress or completion (long-poll style)
-- return normalized state for the widget:
-  - raw run status (`running`, `completed`, `error`)
-  - widget-facing status (`running`, `waiting`, `completed`, `error`)
-  - normalized details (files changed, branch, commit, PR URL, human-decision flag, recommended next step)
-  - logs and final summary/error text when available
+```json
+{
+  "mcpServers": {
+    "clawconnect": {
+      "command": "node",
+      "args": ["/path/to/clawconnect/packages/mcp/dist/bin.mjs"],
+      "env": {
+        "OPENCLAW_URL": "ws://YOUR_OPENCLAW_HOST:18789",
+        "OPENCLAW_PASSWORD": "your-openclaw-password",
+        "OPENCLAW_AGENT_ID": "your-agent-name"
+      }
+    }
+  }
+}
+```
 
-This endpoint is the single polling surface for the widget.
+### ChatGPT
 
-## Notes
+The ChatGPT integration runs as an HTTP server with a live progress widget:
 
-- No GitHub Actions or extra infrastructure required.
-- The adapter keeps artifact extraction intentionally lightweight and heuristic-based.
-- The UI favors clear state semantics over elaborate visuals.
+```bash
+cd apps/chatgpt
+cp .env.example .env  # edit with your OPENCLAW_URL, OPENCLAW_PASSWORD, OPENCLAW_AGENT_ID
+pnpm run dev
+```
+
+Then add the MCP server URL (`http://localhost:7331/mcp`) in ChatGPT's MCP settings.
+
+## Usage
+
+Once configured, your AI agent has access to the MCP tools. Example flow:
+
+1. Ask your agent to delegate work: *"Ask clawdy to fix the login bug"*
+2. The agent calls `run_task` with the task description
+3. It polls `check_task(mode: "wait")` until the task completes
+4. It presents the results: summary, files changed, PRs created, etc.
+5. Follow up: *"Tell clawdy to add tests for that fix"* — continues the same session
+
+### Session Continuation
+
+Every task returns a `sessionKey`. Passing it back to `run_task` continues the same conversation thread in OpenClaw, preserving context from previous tasks.
+
+## `/claw` Slash Command (Claude Code)
+
+For a streamlined experience, copy the slash command:
+
+```bash
+mkdir -p ~/.claude/commands
+cp .claude/commands/claw.md ~/.claude/commands/claw.md
+```
+
+Then use `/claw fix the auth bug` from any project.
+
+## CLI
+
+The CLI is also available for shell-based workflows:
+
+```bash
+# Install globally
+pnpm -w run ready
+npm install -g ./packages/cli/clawconnect-cli-0.0.0.tgz
+
+# Submit and wait
+clawconnect run "fix the login bug" --wait --json
+
+# Submit and poll separately
+clawconnect run "fix the login bug" --json
+clawconnect status <job-id> --json
+
+# Continue a session
+clawconnect run "add tests" --session <session-key> --wait --json
+```
+
+## Architecture
+
+```
+AI Agent (Claude Code / Cursor / Codex)
+    |
+    |-- MCP (stdio) --> packages/mcp --> packages/core --> OpenClaw Gateway (WebSocket)
+    |                                                            |
+    |                                                      OpenClaw Agent
+    |                                                      (clawdy, molty, etc.)
+    |
+ChatGPT
+    |
+    |-- MCP (HTTP) --> apps/chatgpt --> packages/core --> OpenClaw Gateway (WebSocket)
+```
+
+`packages/core` handles all communication with OpenClaw — the MCP server and ChatGPT app are thin layers that adapt the transport and response format.
