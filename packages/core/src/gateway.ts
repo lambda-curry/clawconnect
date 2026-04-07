@@ -166,7 +166,7 @@ export class OpenClawGateway {
                 caps: ["tool-events"],
                 commands: [],
                 permissions: {},
-                auth: { token: this.config.token },
+                auth: { password: this.config.token, token: this.config.token },
                 device: {
                   id: device.deviceId,
                   publicKey: device.publicKey,

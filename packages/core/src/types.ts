@@ -87,3 +87,29 @@ export type GatewayConfig = {
   token: string;
   agentId?: string;
 };
+
+// ── Tool handler types ────────────────────────────────────────────────────
+
+export type CheckMode = "poll" | "wait";
+
+export type RunTaskResult = {
+  jobId: string;
+  sessionKey: string;
+  status: "running";
+};
+
+export type CheckTaskOpts = {
+  jobId?: string;
+  sessionKey?: string;
+  knownLogCount?: number;
+  mode?: CheckMode;
+};
+
+export type CheckTaskResult =
+  | { found: false }
+  | {
+      found: true;
+      snapshot: JobSnapshot;
+      isTerminal: boolean;
+      isError: boolean;
+    };

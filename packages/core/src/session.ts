@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { emptyArtifacts, processEvent, extractPatternsFromSummary, deriveNextStep } from "./artifacts.ts";
 import { classifyError } from "./errors.ts";
 import { OpenClawGateway } from "./gateway.ts";
-import type { ContinuationState, Job, JobSnapshot, TaskInput } from "./types.ts";
+import type { CheckMode, ContinuationState, Job, JobSnapshot, TaskInput } from "./types.ts";
 
 const TIMEOUT_MS = 600_000; // 10 minutes
 const POLL_WAIT_MS = 50_000; // max time check waits before returning
@@ -162,7 +162,12 @@ export class SessionManager {
     return undefined;
   }
 
-  async waitForJob(jobId: string | undefined, knownLogCount = 0, sessionKey?: string): Promise<Job | undefined> {
+  async waitForJob(
+    jobId: string | undefined,
+    knownLogCount = 0,
+    sessionKey?: string,
+    mode: CheckMode = "poll",
+  ): Promise<Job | undefined> {
     const job = this.resolveJob(jobId, sessionKey);
     if (!job) {
       console.log(`[waitForJob] no job found (jobId=${jobId?.slice(0, 8)}, session=${sessionKey?.slice(-8)})`);
@@ -172,16 +177,18 @@ export class SessionManager {
       console.log(`[waitForJob] job ${job.jobId.slice(0, 8)} already ${job.status}, logs=${job.logs.length}`);
       return job;
     }
-    console.log(`[waitForJob] job ${job.jobId.slice(0, 8)} waiting (known=${knownLogCount}, current=${job.logs.length})`);
+    console.log(`[waitForJob] job ${job.jobId.slice(0, 8)} waiting mode=${mode} (known=${knownLogCount}, current=${job.logs.length})`);
     const deadline = Date.now() + POLL_WAIT_MS;
     while (Date.now() < deadline && job.status === "running") {
       await new Promise((r) => setTimeout(r, 500));
-      if (job.logs.length > knownLogCount) {
+      // In "poll" mode: return early on new logs (live progress for widgets)
+      // In "wait" mode: only return on terminal state or timeout (fewer round-trips for agentic use)
+      if (mode === "poll" && job.logs.length > knownLogCount) {
         console.log(`[waitForJob] job ${job.jobId.slice(0, 8)} has new logs (${job.logs.length} > ${knownLogCount})`);
         return job;
       }
     }
-    console.log(`[waitForJob] job ${job.jobId.slice(0, 8)} poll timeout (logs=${job.logs.length}, status=${job.status})`);
+    console.log(`[waitForJob] job ${job.jobId.slice(0, 8)} ${mode} timeout (logs=${job.logs.length}, status=${job.status})`);
     return job;
   }
 }

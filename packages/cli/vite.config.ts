@@ -10,6 +10,7 @@ export default defineConfig({
       index: "src/index.ts",
       bin: "src/bin.ts",
     },
+    deps: { alwaysBundle: ["@clawconnect/core"] },
   },
   lint: {
     options: {
