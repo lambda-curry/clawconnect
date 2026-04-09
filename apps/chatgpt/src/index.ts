@@ -87,7 +87,6 @@ const TOOLS = [
           description: 'Polling mode: "poll" returns on new logs (default for ChatGPT widget), "wait" blocks until completion.',
         },
       },
-      anyOf: [{ required: ["jobId"] }, { required: ["sessionKey"] }],
     },
     annotations: {
       title: "Check Task Status",
