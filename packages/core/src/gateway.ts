@@ -6,6 +6,10 @@ import { join } from "node:path";
 import WebSocket from "ws";
 import type { GatewayConfig, GatewayEvent } from "./types.ts";
 
+function logDebug(message: string, ...args: unknown[]): void {
+  console.error(message, ...args);
+}
+
 // ── Device identity ──────────���───────────────────────────────────────────────
 
 const DEVICE_FILE = join(homedir(), ".openclaw", "clawd-ui-device.json");
@@ -43,7 +47,7 @@ function loadOrCreateDevice(): DeviceIdentity {
   const d = generateDevice();
   mkdirSync(join(homedir(), ".openclaw"), { recursive: true });
   writeFileSync(DEVICE_FILE, JSON.stringify(d, null, 2), { mode: 0o600 });
-  console.log("[openclaw-gateway] generated new device identity");
+  logDebug("[openclaw-gateway] generated new device identity");
   return d;
 }
 
@@ -196,7 +200,7 @@ export class OpenClawGateway {
           }
           this.ws = ws;
           this.attachHandlers(ws);
-          console.log("[openclaw-gateway] connected");
+          logDebug("[openclaw-gateway] connected");
           resolve();
         }
       };
@@ -247,7 +251,7 @@ export class OpenClawGateway {
     });
 
     ws.on("close", () => {
-      console.log("[openclaw-gateway] disconnected");
+      logDebug("[openclaw-gateway] disconnected");
       this.ws = null;
       this.connectPromise = null;
       for (const [id, rpc] of this.pendingRpcs) {
@@ -265,11 +269,11 @@ export class OpenClawGateway {
       OpenClawGateway.RECONNECT_BASE_MS * Math.pow(2, this.reconnectAttempt - 1),
       OpenClawGateway.RECONNECT_MAX_MS,
     );
-    console.log(`[openclaw-gateway] reconnecting in ${delay}ms (attempt ${this.reconnectAttempt})`);
+    logDebug(`[openclaw-gateway] reconnecting in ${delay}ms (attempt ${this.reconnectAttempt})`);
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       this.connect().then(
-        () => console.log(`[openclaw-gateway] reconnected after ${this.reconnectAttempt} attempt(s)`),
+        () => logDebug(`[openclaw-gateway] reconnected after ${this.reconnectAttempt} attempt(s)`),
         (err) => console.error(`[openclaw-gateway] reconnect failed:`, (err as Error).message),
       );
     }, delay);
@@ -394,7 +398,7 @@ export class OpenClawGateway {
           this.subscribers.delete(subId);
           this.subscribers.delete(agentSubId);
           const blocks = payload.message?.content ?? [];
-          console.log(
+          logDebug(
             "[openclaw-gateway] final blocks:",
             JSON.stringify(blocks.map((b) => ({ type: b.type, len: (b.text ?? b.thinking ?? "").length }))),
           );

@@ -10,6 +10,10 @@ const MAX_LOG_ENTRIES = 200;
 
 const LEGACY_CHATGPT_SESSION_PREFIX = "agent:chatgpt:";
 
+function logDebug(message: string): void {
+  console.error(message);
+}
+
 function createThreadSessionKey(agentId: string): string {
   return `agent:${agentId}:main:thread:mcp-${Date.now()}-${randomUUID().slice(0, 8)}`;
 }
@@ -78,7 +82,7 @@ export class SessionManager {
         if (job.logs.length < MAX_LOG_ENTRIES) {
           job.logs.push({ ts: Date.now(), type: event.type, text: event.text });
         }
-        console.log(`[job ${jobId.slice(0, 8)}] event #${job.logs.length}: ${event.type} - ${event.text.slice(0, 80)}`);
+        logDebug(`[job ${jobId.slice(0, 8)}] event #${job.logs.length}: ${event.type} - ${event.text.slice(0, 80)}`);
         processEvent(artifacts, event);
       })
       .then(
@@ -95,7 +99,7 @@ export class SessionManager {
             artifacts,
             recommendedNextStep: deriveNextStep(artifacts, job.status),
           });
-          console.log(`[job ${jobId}] ${job.status}, ${reply.length} chars, ${artifacts.filesChanged.length} files`);
+          logDebug(`[job ${jobId}] ${job.status}, ${reply.length} chars, ${artifacts.filesChanged.length} files`);
         },
         (err) => {
           job.lastEventAt = Date.now();
@@ -109,7 +113,7 @@ export class SessionManager {
             artifacts,
             recommendedNextStep: deriveNextStep(artifacts, "error"),
           });
-          console.log(`[job ${jobId}] error (${job.errorInfo.category}): ${job.error}`);
+          logDebug(`[job ${jobId}] error (${job.errorInfo.category}): ${job.error}`);
         },
       );
 
@@ -170,25 +174,25 @@ export class SessionManager {
   ): Promise<Job | undefined> {
     const job = this.resolveJob(jobId, sessionKey);
     if (!job) {
-      console.log(`[waitForJob] no job found (jobId=${jobId?.slice(0, 8)}, session=${sessionKey?.slice(-8)})`);
+      logDebug(`[waitForJob] no job found (jobId=${jobId?.slice(0, 8)}, session=${sessionKey?.slice(-8)})`);
       return undefined;
     }
     if (job.status !== "running") {
-      console.log(`[waitForJob] job ${job.jobId.slice(0, 8)} already ${job.status}, logs=${job.logs.length}`);
+      logDebug(`[waitForJob] job ${job.jobId.slice(0, 8)} already ${job.status}, logs=${job.logs.length}`);
       return job;
     }
-    console.log(`[waitForJob] job ${job.jobId.slice(0, 8)} waiting mode=${mode} (known=${knownLogCount}, current=${job.logs.length})`);
+    logDebug(`[waitForJob] job ${job.jobId.slice(0, 8)} waiting mode=${mode} (known=${knownLogCount}, current=${job.logs.length})`);
     const deadline = Date.now() + POLL_WAIT_MS;
     while (Date.now() < deadline && job.status === "running") {
       await new Promise((r) => setTimeout(r, 500));
       // In "poll" mode: return early on new logs (live progress for widgets)
       // In "wait" mode: only return on terminal state or timeout (fewer round-trips for agentic use)
       if (mode === "poll" && job.logs.length > knownLogCount) {
-        console.log(`[waitForJob] job ${job.jobId.slice(0, 8)} has new logs (${job.logs.length} > ${knownLogCount})`);
+        logDebug(`[waitForJob] job ${job.jobId.slice(0, 8)} has new logs (${job.logs.length} > ${knownLogCount})`);
         return job;
       }
     }
-    console.log(`[waitForJob] job ${job.jobId.slice(0, 8)} ${mode} timeout (logs=${job.logs.length}, status=${job.status})`);
+    logDebug(`[waitForJob] job ${job.jobId.slice(0, 8)} ${mode} timeout (logs=${job.logs.length}, status=${job.status})`);
     return job;
   }
 }
