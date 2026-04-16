@@ -4,9 +4,16 @@ import { classifyError } from "./errors.ts";
 import { OpenClawGateway } from "./gateway.ts";
 import type { CheckMode, ContinuationState, Job, JobSnapshot, TaskInput } from "./types.ts";
 
-const TIMEOUT_MS = 600_000; // 10 minutes
+function readPositiveIntEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+const TIMEOUT_MS = readPositiveIntEnv("CLAWCONNECT_TIMEOUT_MS", 600_000); // 10 minutes default
 const POLL_WAIT_MS = 50_000; // max time check waits before returning
-const MAX_LOG_ENTRIES = 200;
+const MAX_LOG_ENTRIES = readPositiveIntEnv("CLAWCONNECT_MAX_LOG_ENTRIES", 200);
 
 const LEGACY_CHATGPT_SESSION_PREFIX = "agent:chatgpt:";
 
