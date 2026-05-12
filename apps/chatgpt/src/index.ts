@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Hono } from "hono";
-import { GatewayPool, runTask, checkTask } from "@clawconnect/core";
+import { GatewayPool, loadAgentRegistry, runTask, checkTask, listSessions } from "@clawconnect/core";
 import type { AgentRegistry, CheckMode } from "@clawconnect/core";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -12,24 +12,33 @@ const WIDGET_HTML = readFileSync(join(__dirname, "widget.html"), "utf-8");
 
 const hono = new Hono();
 
-// ChatGPT app always speaks to a single OpenClaw target configured via env.
-// Build a single-agent registry so we share the same code path as the MCP/CLI
-// surfaces.
-const singleAgentId = process.env.CLAWCONNECT_AGENT_ALIAS?.trim() || "default";
-const openclawAgentId = process.env.OPENCLAW_AGENT_ID?.trim() || "main";
-const registry: AgentRegistry = {
-  default: singleAgentId,
-  source: "env",
-  agents: [
-    {
-      id: singleAgentId,
-      url: process.env.OPENCLAW_URL!,
-      password: process.env.OPENCLAW_PASSWORD!,
-      openclawAgentId,
-    },
-  ],
-};
+// Try the shared multi-agent registry (~/.clawconnect/agents.json) first.
+// Fall back to env-only single-agent so existing deployments keep working.
+let registry: AgentRegistry;
+try {
+  registry = loadAgentRegistry();
+  console.log(
+    `[chatgpt-app] loaded ${registry.agents.length} agent(s) from ${registry.source} (default=${registry.default}, agents=${registry.agents.map((a) => a.id).join(",")})`,
+  );
+} catch (err) {
+  const url = process.env.OPENCLAW_URL;
+  const password = process.env.OPENCLAW_PASSWORD;
+  if (!url || !password) {
+    console.error(`[chatgpt-app] no registry: ${(err as Error).message}`);
+    process.exit(1);
+  }
+  const singleAgentId = process.env.CLAWCONNECT_AGENT_ALIAS?.trim() || "default";
+  const openclawAgentId = process.env.OPENCLAW_AGENT_ID?.trim() || "main";
+  registry = {
+    default: singleAgentId,
+    source: "env",
+    agents: [{ id: singleAgentId, url, password, openclawAgentId }],
+  };
+  console.log(`[chatgpt-app] env fallback registry: single agent "${singleAgentId}"`);
+}
 const pool = new GatewayPool(registry);
+const AGENT_IDS = registry.agents.map((a) => a.id);
+const AGENT_LIST = AGENT_IDS.join(", ");
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
@@ -45,15 +54,21 @@ const WIDGET_META = WIDGET_ENABLED
   ? { ui: { resourceUri: WIDGET_URI }, "ui/resourceUri": WIDGET_URI }
   : {};
 
+const AGENT_PROP = {
+  type: "string" as const,
+  enum: AGENT_IDS,
+  description: `OpenClaw agent to dispatch to. Configured agents: ${AGENT_LIST}. Default: ${registry.default}.`,
+};
+
 const TOOLS = [
   {
     name: "run_task",
-    description:
-      "Submit a task to OpenClaw. Returns quickly with a jobId and sessionKey. Use check_task to poll for progress. Pass sessionKey from a previous result to continue the same thread.",
+    description: `Submit a task to an OpenClaw agent. Returns quickly with a jobId and sessionKey. Use check_task to poll for progress. Pass sessionKey from a previous result to continue the same thread. Available agents: ${AGENT_LIST}.`,
     inputSchema: {
       type: "object",
       properties: {
         task: { type: "string", description: "The task to perform" },
+        agent: AGENT_PROP,
         context: { type: "string", description: "Optional context for the task" },
         sessionKey: {
           type: "string",
@@ -70,13 +85,12 @@ const TOOLS = [
     },
     _meta: {
       ...WIDGET_META,
-      "openai/toolInvocation/invoking": "Sending task to Clawdy...",
+      "openai/toolInvocation/invoking": "Sending task to OpenClaw agent...",
     },
   },
   {
     name: "check_task",
-    description:
-      "Check the status of a previously submitted task. Waits up to 50 seconds for completion before returning. Poll with jobId and sessionKey when possible.",
+    description: `Check the status of a previously submitted task. Waits up to 50 seconds for completion before returning. Poll with jobId. Available agents: ${AGENT_LIST}.`,
     inputSchema: {
       type: "object",
       properties: {
@@ -84,6 +98,10 @@ const TOOLS = [
         sessionKey: {
           type: "string",
           description: "Optional session key for reattaching status checks after refresh.",
+        },
+        agent: {
+          ...AGENT_PROP,
+          description: `${AGENT_PROP.description} Usually inferred from jobId; set explicitly if you started run_task elsewhere.`,
         },
         knownLogCount: {
           type: "number",
@@ -98,6 +116,17 @@ const TOOLS = [
     },
     annotations: {
       title: "Check Task Status",
+      readOnlyHint: true,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  },
+  {
+    name: "list_sessions",
+    description: `List active OpenClaw sessions across configured agents. Available agents: ${AGENT_LIST}.`,
+    inputSchema: { type: "object", properties: {} },
+    annotations: {
+      title: "List Sessions",
       readOnlyHint: true,
       idempotentHint: true,
       openWorldHint: false,
@@ -187,23 +216,32 @@ const server = createServer(async (req, res) => {
       const { name, arguments: args } = msg.params as { name: string; arguments: Record<string, string> };
 
       if (name === "run_task") {
-        const result = runTask(pool, {
-          task: args.task,
-          context: args.context,
-          sessionKey: args.sessionKey,
-        });
-        console.log(`[mcp] submitted job ${result.jobId} on session ${result.sessionKey}`);
-        const entry = pool.forJob(result.jobId)!;
-        const snapshot = entry.sessions.buildSnapshot(entry.sessions.getJob(result.jobId)!);
-        respond({
-          content: [{ type: "text", text: `Task submitted. Job ID: ${result.jobId}` }],
-          structuredContent: snapshot,
-        });
+        try {
+          const result = runTask(pool, {
+            task: args.task,
+            agent: typeof args.agent === "string" ? args.agent : undefined,
+            context: args.context,
+            sessionKey: args.sessionKey,
+          });
+          console.log(`[mcp] submitted job ${result.jobId} on agent ${result.agent} session ${result.sessionKey}`);
+          const entry = pool.forJob(result.jobId)!;
+          const snapshot = entry.sessions.buildSnapshot(entry.sessions.getJob(result.jobId)!);
+          respond({
+            content: [{ type: "text", text: `Task submitted to ${result.agent}. Job ID: ${result.jobId}` }],
+            structuredContent: { ...snapshot, agent: result.agent },
+          });
+        } catch (err) {
+          respond({
+            content: [{ type: "text", text: `Failed to submit: ${(err as Error).message}` }],
+            isError: true,
+          });
+        }
       } else if (name === "check_task") {
         const mode = (args.mode as CheckMode) ?? "poll";
         const result = await checkTask(pool, {
           jobId: typeof args.jobId === "string" ? args.jobId : undefined,
           sessionKey: typeof args.sessionKey === "string" ? args.sessionKey : undefined,
+          agent: typeof args.agent === "string" ? args.agent : undefined,
           knownLogCount: Number(args.knownLogCount) || 0,
           mode,
         });
@@ -235,6 +273,15 @@ const server = createServer(async (req, res) => {
             ...(isError ? { isError: true } : {}),
           });
         }
+      } else if (name === "list_sessions") {
+        const sessions = listSessions(pool);
+        const summary = sessions.length === 0
+          ? "No active sessions."
+          : sessions.map((s) => `${s.agent ?? "?"}: ${s.sessionKey.slice(-12)} (${s.lastJobId.slice(0, 8)})`).join("\n");
+        respond({
+          content: [{ type: "text", text: summary }],
+          structuredContent: { sessions, configuredAgents: AGENT_IDS },
+        });
       } else {
         respondError(-32601, `Unknown tool: ${name}`);
       }
