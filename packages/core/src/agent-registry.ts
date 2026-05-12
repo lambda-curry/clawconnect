@@ -9,6 +9,14 @@ export interface AgentEntry {
   url: string;
   password: string;
   openclawAgentId: string;
+  /** Display emoji (e.g. "🦀"). Optional. */
+  emoji?: string;
+  /** Short role label (e.g. "personal assistant", "design engineer"). Optional. */
+  role?: string;
+  /** 1-2 sentence description shown by list_agents. Optional. */
+  description?: string;
+  /** Guidance for when a caller AI should pick this agent over others. Optional. */
+  whenToUse?: string;
 }
 
 interface AgentEntryInput {
@@ -16,6 +24,10 @@ interface AgentEntryInput {
   url?: unknown;
   password?: unknown;
   openclawAgentId?: unknown;
+  emoji?: unknown;
+  role?: unknown;
+  description?: unknown;
+  whenToUse?: unknown;
 }
 
 interface RegistryFile {
@@ -53,7 +65,21 @@ function parseEntry(raw: AgentEntryInput, index: number): AgentEntry {
   if (!id) throw new Error(`agents.json: entry #${index} missing "id"`);
   if (!url) throw new Error(`agents.json: entry "${id}" missing "url"`);
   if (!password) throw new Error(`agents.json: entry "${id}" missing "password"`);
-  return { id, url, password, openclawAgentId };
+  const optString = (v: unknown): string | undefined => {
+    if (typeof v !== "string") return undefined;
+    const trimmed = v.trim();
+    return trimmed.length > 0 ? trimmed : undefined;
+  };
+  return {
+    id,
+    url,
+    password,
+    openclawAgentId,
+    emoji: optString(raw.emoji),
+    role: optString(raw.role),
+    description: optString(raw.description),
+    whenToUse: optString(raw.whenToUse),
+  };
 }
 
 export function loadAgentRegistry(): AgentRegistry {
@@ -102,3 +128,26 @@ export function resolveAgent(registry: AgentRegistry, idOrUndefined?: string): A
 }
 
 export const REGISTRY_PATH = REGISTRY_FILE;
+
+/**
+ * Compact one-line label for an agent — `id (emoji role)` if role/emoji are
+ * known, else just `id`. Used in tool-schema enum descriptions so a calling
+ * AI sees who's who at the same surface where it picks an agent.
+ */
+export function agentBlurb(entry: AgentEntry): string {
+  const parts: string[] = [];
+  if (entry.emoji) parts.push(entry.emoji);
+  if (entry.role) parts.push(entry.role);
+  return parts.length === 0 ? entry.id : `${entry.id} (${parts.join(" ")})`;
+}
+
+/** Plain object describing an agent for the list_agents MCP tool. */
+export function agentDescriptor(entry: AgentEntry) {
+  return {
+    id: entry.id,
+    emoji: entry.emoji,
+    role: entry.role,
+    description: entry.description,
+    whenToUse: entry.whenToUse,
+  };
+}

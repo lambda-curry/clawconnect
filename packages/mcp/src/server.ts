@@ -5,6 +5,8 @@ import {
   runTask,
   checkTask,
   listSessions,
+  agentBlurb,
+  agentDescriptor,
 } from "@clawconnect/core";
 import type {
   AgentRegistry,
@@ -141,10 +143,11 @@ export function createMcpServer(config: { registry: AgentRegistry; provider?: Pr
   const fmtList = provider.formatListSessions ?? defaultFormatListSessions;
 
   const agentIds = config.registry.agents.map((a) => a.id);
+  const agentBlurbs = config.registry.agents.map(agentBlurb).join("; ");
   const agentList = agentIds.join(", ");
   const agentEnum = z.enum(agentIds as [string, ...string[]]);
   const defaultAgent = config.registry.default;
-  const agentDescription = `OpenClaw agent to dispatch to. Configured agents: ${agentList}. Default: ${defaultAgent}.`;
+  const agentDescription = `OpenClaw agent to dispatch to. Available: ${agentBlurbs}. Default: ${defaultAgent}. Use list_agents for full descriptions and routing guidance.`;
 
   server.tool(
     "run_task",
@@ -193,6 +196,24 @@ export function createMcpServer(config: { registry: AgentRegistry; provider?: Pr
     async () => {
       const result = listSessions(pool);
       return fmtList(result);
+    },
+  );
+
+  server.tool(
+    "list_agents",
+    `List the OpenClaw agents reachable from this connection, with role, emoji, description, and "when to use" guidance. Call this first to decide which agent (samwise/scout/meg/etc.) to dispatch a task to.`,
+    {},
+    { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+    async () => {
+      const agents = config.registry.agents.map(agentDescriptor);
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({ default: config.registry.default, agents }),
+          },
+        ],
+      };
     },
   );
 
