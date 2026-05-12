@@ -1,5 +1,7 @@
-import type { SessionManager } from "./session.ts";
+import { GatewayPool } from "./gateway-pool.ts";
+import { SessionManager } from "./session.ts";
 import type {
+  CheckMode,
   CheckTaskOpts,
   CheckTaskResult,
   ContinuationState,
@@ -7,39 +9,82 @@ import type {
   TaskInput,
 } from "./types.ts";
 
-export function runTask(sessions: SessionManager, input: TaskInput): RunTaskResult {
-  const job = sessions.submitTask(input);
+export function runTask(pool: GatewayPool, input: TaskInput): RunTaskResult {
+  const entry = pool.forAgent(input.agent);
+  const job = entry.sessions.submitTask({
+    task: input.task,
+    context: input.context,
+    sessionKey: input.sessionKey,
+  });
+  pool.rememberJob(job.jobId, entry.agent.id);
   return {
     jobId: job.jobId,
     sessionKey: job.sessionKey,
     status: "running",
+    agent: entry.agent.id,
   };
 }
 
-export async function checkTask(
-  sessions: SessionManager,
-  opts: CheckTaskOpts,
-): Promise<CheckTaskResult> {
-  const job = await sessions.waitForJob(
+/** Back-compat overload for callers that still hold a single SessionManager. */
+export function runTaskOnSession(sessions: SessionManager, input: TaskInput): RunTaskResult {
+  const job = sessions.submitTask({
+    task: input.task,
+    context: input.context,
+    sessionKey: input.sessionKey,
+  });
+  return {
+    jobId: job.jobId,
+    sessionKey: job.sessionKey,
+    status: "running",
+    agent: input.agent,
+  };
+}
+
+function notFound(): CheckTaskResult {
+  return { found: false };
+}
+
+export async function checkTask(pool: GatewayPool, opts: CheckTaskOpts): Promise<CheckTaskResult> {
+  let entry = opts.agent ? pool.forAgent(opts.agent) : undefined;
+  if (!entry && opts.jobId) entry = pool.forJob(opts.jobId);
+  if (!entry && opts.sessionKey) entry = pool.forSession(opts.sessionKey);
+  if (!entry) {
+    // Fall back to scanning every initialized agent. Useful if the pool was
+    // re-created between run_task and check_task (process restart).
+    for (const candidate of pool.allEntries()) {
+      const job = candidate.sessions.resolveJob(opts.jobId, opts.sessionKey);
+      if (job) {
+        entry = candidate;
+        break;
+      }
+    }
+  }
+  if (!entry) return notFound();
+
+  const job = await entry.sessions.waitForJob(
     opts.jobId,
     opts.knownLogCount ?? 0,
     opts.sessionKey,
     opts.mode ?? "poll",
   );
+  if (!job) return notFound();
 
-  if (!job) {
-    return { found: false };
-  }
-
-  const snapshot = sessions.buildSnapshot(job);
+  const snapshot = entry.sessions.buildSnapshot(job);
   return {
     found: true,
-    snapshot,
+    snapshot: { ...snapshot, agent: entry.agent.id },
     isTerminal: job.status !== "running",
     isError: job.status === "error",
   };
 }
 
-export function listSessions(sessions: SessionManager): ContinuationState[] {
-  return sessions.listSessions();
+export function listSessions(pool: GatewayPool): ContinuationState[] {
+  const all: ContinuationState[] = [];
+  for (const entry of pool.allEntries()) {
+    for (const session of entry.sessions.listSessions()) {
+      all.push({ ...session, agent: entry.agent.id });
+    }
+  }
+  return all;
 }
+

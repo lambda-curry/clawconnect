@@ -49,12 +49,12 @@ export class SessionManager {
     const logs: Array<{ ts: number; type: string; text: string }> = [];
 
     if (!input.sessionKey) {
-      logs.push({ ts: now, type: "lifecycle", text: `Started new Clawdy thread session: ${sessionKey}` });
+      logs.push({ ts: now, type: "lifecycle", text: `Started new thread session: ${sessionKey}` });
     } else if (migratedFromLegacy) {
       logs.push({
         ts: now,
         type: "lifecycle",
-        text: `Migrated legacy ChatGPT session to new Clawdy thread: ${sessionKey}`,
+        text: `Migrated legacy ChatGPT session to new thread: ${sessionKey}`,
       });
     }
 

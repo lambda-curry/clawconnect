@@ -64,6 +64,8 @@ export type JobSnapshot = {
   logs: LogEntry[];
   artifacts: Artifacts;
   continuationState?: ContinuationState;
+  /** ClawConnect agent alias this job ran against. Present from multi-agent gateway onward. */
+  agent?: string;
 };
 
 export type ContinuationState = {
@@ -72,12 +74,16 @@ export type ContinuationState = {
   lastSummary: string;
   artifacts: Artifacts;
   recommendedNextStep?: string;
+  /** ClawConnect agent alias this session belongs to. */
+  agent?: string;
 };
 
 export type TaskInput = {
   task: string;
   context?: string;
   sessionKey?: string;
+  /** ClawConnect agent alias. Falls back to the registry default. */
+  agent?: string;
 };
 
 // ── Gateway config ─────────────���────────────────────────────────────────────
@@ -96,6 +102,8 @@ export type RunTaskResult = {
   jobId: string;
   sessionKey: string;
   status: "running";
+  /** ClawConnect agent alias the task was dispatched to. */
+  agent?: string;
 };
 
 export type CheckTaskOpts = {
@@ -103,6 +111,8 @@ export type CheckTaskOpts = {
   sessionKey?: string;
   knownLogCount?: number;
   mode?: CheckMode;
+  /** Optional explicit agent. If omitted, resolved from jobId/sessionKey. */
+  agent?: string;
 };
 
 export type CheckTaskResult =

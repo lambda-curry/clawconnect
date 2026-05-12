@@ -1,17 +1,16 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import {
-  OpenClawGateway,
-  SessionManager,
+  GatewayPool,
   runTask,
   checkTask,
   listSessions,
 } from "@clawconnect/core";
 import type {
+  AgentRegistry,
   CheckMode,
   CheckTaskResult,
   ContinuationState,
-  GatewayConfig,
   RunTaskResult,
 } from "@clawconnect/core";
 
@@ -45,6 +44,7 @@ function defaultFormatRunTask(result: RunTaskResult): McpToolResponse {
           jobId: result.jobId,
           sessionKey: result.sessionKey,
           status: result.status,
+          agent: result.agent,
           message: "Task submitted. Use check_task to poll for progress.",
         }),
       },
@@ -72,6 +72,7 @@ function defaultFormatCheckTask(result: CheckTaskResult): McpToolResponse {
             status: "running",
             jobId: snapshot.jobId,
             sessionKey: snapshot.sessionKey,
+            agent: snapshot.agent,
             elapsedSeconds: Math.round((Date.now() - snapshot.startedAt) / 1000),
             logCount: snapshot.logs.length,
             hint: "Task is actively running. Call check_task again to continue waiting.",
@@ -89,6 +90,7 @@ function defaultFormatCheckTask(result: CheckTaskResult): McpToolResponse {
         text: JSON.stringify({
           jobId: snapshot.jobId,
           sessionKey: snapshot.sessionKey,
+          agent: snapshot.agent,
           status: snapshot.status,
           summary: snapshot.summary,
           error: snapshot.error,
@@ -109,6 +111,7 @@ function defaultFormatListSessions(result: ContinuationState[]): McpToolResponse
         type: "text" as const,
         text: JSON.stringify(
           result.map((s) => ({
+            agent: s.agent,
             sessionKey: s.sessionKey,
             lastJobId: s.lastJobId,
             lastSummary: s.lastSummary?.slice(0, 200),
@@ -123,14 +126,13 @@ function defaultFormatListSessions(result: ContinuationState[]): McpToolResponse
 
 // ── Server factory ──────────────────────────────────────────────────────────
 
-export function createMcpServer(config: GatewayConfig & { agentId: string; provider?: ProviderConfig }) {
+export function createMcpServer(config: { registry: AgentRegistry; provider?: ProviderConfig }) {
   const server = new McpServer({
     name: "clawconnect",
-    version: "0.0.1",
+    version: "0.1.0",
   });
 
-  const gateway = new OpenClawGateway({ url: config.url, token: config.token });
-  const sessions = new SessionManager(gateway, config.agentId);
+  const pool = new GatewayPool(config.registry);
 
   const provider = config.provider ?? {};
   const defaultMode = provider.defaultCheckMode ?? "wait";
@@ -138,35 +140,44 @@ export function createMcpServer(config: GatewayConfig & { agentId: string; provi
   const fmtCheck = provider.formatCheckTask ?? defaultFormatCheckTask;
   const fmtList = provider.formatListSessions ?? defaultFormatListSessions;
 
+  const agentIds = config.registry.agents.map((a) => a.id);
+  const agentList = agentIds.join(", ");
+  const agentEnum = z.enum(agentIds as [string, ...string[]]);
+  const defaultAgent = config.registry.default;
+  const agentDescription = `OpenClaw agent to dispatch to. Configured agents: ${agentList}. Default: ${defaultAgent}.`;
+
   server.tool(
     "run_task",
-    "Submit a task to OpenClaw. Returns a jobId and sessionKey immediately. Use check_task to poll for progress. Pass a sessionKey from a previous task to continue the same conversation thread.",
+    `Submit a task to an OpenClaw agent. Returns a jobId and sessionKey immediately. Use check_task to poll for progress. Pass a sessionKey from a previous task to continue the same conversation thread. Available agents: ${agentList}.`,
     {
       task: z.string().describe("The task to perform"),
+      agent: agentEnum.optional().describe(agentDescription),
       context: z.string().optional().describe("Additional context for the task"),
       sessionKey: z.string().optional().describe("Session key from a previous task to continue the same thread"),
     },
     { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
-    async ({ task, context, sessionKey }) => {
-      const result = runTask(sessions, { task, context, sessionKey });
+    async ({ task, agent, context, sessionKey }) => {
+      const result = runTask(pool, { task, agent, context, sessionKey });
       return fmtRun(result);
     },
   );
 
   server.tool(
     "check_task",
-    `Check the status of a running OpenClaw task. Blocks for up to 50 seconds before returning. Call in a loop until status is not "running". Pass the jobId from run_task.`,
+    `Check the status of a running OpenClaw task. Blocks for up to 50 seconds before returning. Call in a loop until status is not "running". Pass the jobId from run_task. Available agents: ${agentList}.`,
     {
       jobId: z.string().optional().describe("The jobId from run_task"),
       sessionKey: z.string().optional().describe("The sessionKey from run_task (alternative to jobId)"),
+      agent: agentEnum.optional().describe(`${agentDescription} Usually inferred from jobId; only set if you started run_task in a different process.`),
       knownLogCount: z.number().optional().describe("Number of log entries already seen — in poll mode, server returns early on new activity"),
       mode: z.enum(["poll", "wait"]).optional().describe('Polling mode: "wait" blocks until completion or timeout (recommended for agentic use), "poll" returns on any new log activity'),
     },
     { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
-    async ({ jobId, sessionKey, knownLogCount, mode }) => {
-      const result = await checkTask(sessions, {
+    async ({ jobId, sessionKey, agent, knownLogCount, mode }) => {
+      const result = await checkTask(pool, {
         jobId,
         sessionKey,
+        agent,
         knownLogCount,
         mode: (mode as CheckMode) ?? defaultMode,
       });
@@ -176,14 +187,14 @@ export function createMcpServer(config: GatewayConfig & { agentId: string; provi
 
   server.tool(
     "list_sessions",
-    "List all active OpenClaw sessions. Shows session keys, last job status, and recommended next steps.",
+    `List active OpenClaw sessions across configured agents. Shows agent, session keys, last job status, and recommended next steps. Available agents: ${agentList}.`,
     {},
     { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
     async () => {
-      const result = listSessions(sessions);
+      const result = listSessions(pool);
       return fmtList(result);
     },
   );
 
-  return { server, gateway, sessions };
+  return { server, pool };
 }

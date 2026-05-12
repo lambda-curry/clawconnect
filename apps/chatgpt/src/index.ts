@@ -4,24 +4,32 @@ import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Hono } from "hono";
-import {
-  OpenClawGateway,
-  SessionManager,
-  runTask,
-  checkTask,
-  listSessions,
-} from "@clawconnect/core";
-import type { CheckMode } from "@clawconnect/core";
+import { GatewayPool, runTask, checkTask } from "@clawconnect/core";
+import type { AgentRegistry, CheckMode } from "@clawconnect/core";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const WIDGET_HTML = readFileSync(join(__dirname, "widget.html"), "utf-8");
 
 const hono = new Hono();
-const gateway = new OpenClawGateway({
-  url: process.env.OPENCLAW_URL!,
-  token: process.env.OPENCLAW_PASSWORD!,
-});
-const sessions = new SessionManager(gateway, process.env.OPENCLAW_AGENT_ID?.trim() || "main");
+
+// ChatGPT app always speaks to a single OpenClaw target configured via env.
+// Build a single-agent registry so we share the same code path as the MCP/CLI
+// surfaces.
+const singleAgentId = process.env.CLAWCONNECT_AGENT_ALIAS?.trim() || "default";
+const openclawAgentId = process.env.OPENCLAW_AGENT_ID?.trim() || "main";
+const registry: AgentRegistry = {
+  default: singleAgentId,
+  source: "env",
+  agents: [
+    {
+      id: singleAgentId,
+      url: process.env.OPENCLAW_URL!,
+      password: process.env.OPENCLAW_PASSWORD!,
+      openclawAgentId,
+    },
+  ],
+};
+const pool = new GatewayPool(registry);
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
@@ -179,20 +187,21 @@ const server = createServer(async (req, res) => {
       const { name, arguments: args } = msg.params as { name: string; arguments: Record<string, string> };
 
       if (name === "run_task") {
-        const result = runTask(sessions, {
+        const result = runTask(pool, {
           task: args.task,
           context: args.context,
           sessionKey: args.sessionKey,
         });
         console.log(`[mcp] submitted job ${result.jobId} on session ${result.sessionKey}`);
-        const snapshot = sessions.buildSnapshot(sessions.getJob(result.jobId)!);
+        const entry = pool.forJob(result.jobId)!;
+        const snapshot = entry.sessions.buildSnapshot(entry.sessions.getJob(result.jobId)!);
         respond({
           content: [{ type: "text", text: `Task submitted. Job ID: ${result.jobId}` }],
           structuredContent: snapshot,
         });
       } else if (name === "check_task") {
         const mode = (args.mode as CheckMode) ?? "poll";
-        const result = await checkTask(sessions, {
+        const result = await checkTask(pool, {
           jobId: typeof args.jobId === "string" ? args.jobId : undefined,
           sessionKey: typeof args.sessionKey === "string" ? args.sessionKey : undefined,
           knownLogCount: Number(args.knownLogCount) || 0,
