@@ -4,8 +4,16 @@ import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Hono } from "hono";
-import { GatewayPool, loadAgentRegistry, runTask, checkTask, listSessions } from "@clawconnect/core";
-import type { AgentRegistry, CheckMode } from "@clawconnect/core";
+import {
+  GatewayPool,
+  loadAgentRegistry,
+  runTask,
+  checkTask,
+  listSessions,
+  agentBlurb,
+  agentDescriptor,
+} from "@clawconnect/core";
+import type { AgentEntry, AgentRegistry, CheckMode } from "@clawconnect/core";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const WIDGET_HTML = readFileSync(join(__dirname, "widget.html"), "utf-8");
@@ -82,12 +90,19 @@ function resolveScope(url: URL): { allowedIds: string[]; defaultId: string } {
   return { allowedIds: allowed, defaultId };
 }
 
+const AGENTS_BY_ID = new Map<string, AgentEntry>(registry.agents.map((a) => [a.id, a]));
+
+function blurbsFor(ids: string[]): string {
+  return ids.map((id) => agentBlurb(AGENTS_BY_ID.get(id) ?? { id, url: "", password: "", openclawAgentId: "" })).join("; ");
+}
+
 function buildTools(allowedIds: string[], defaultId: string) {
   const list = allowedIds.join(", ");
+  const blurbs = blurbsFor(allowedIds);
   const agentProp = {
     type: "string" as const,
     enum: allowedIds,
-    description: `OpenClaw agent to dispatch to. Available: ${list}. Default: ${defaultId}.`,
+    description: `OpenClaw agent to dispatch to. Available: ${blurbs}. Default: ${defaultId}. Use list_agents for full descriptions and routing guidance.`,
   };
   return [
     {
@@ -156,6 +171,17 @@ function buildTools(allowedIds: string[], defaultId: string) {
       inputSchema: { type: "object", properties: {} },
       annotations: {
         title: "List Sessions",
+        readOnlyHint: true,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    {
+      name: "list_agents",
+      description: `List the OpenClaw agents reachable from this connection, with role, emoji, description, and "when to use" guidance. Call this first to decide which agent to dispatch a task to.`,
+      inputSchema: { type: "object", properties: {} },
+      annotations: {
+        title: "List Agents",
         readOnlyHint: true,
         idempotentHint: true,
         openWorldHint: false,
@@ -340,6 +366,15 @@ const server = createServer(async (req, res) => {
         respond({
           content: [{ type: "text", text: summary }],
           structuredContent: { sessions, configuredAgents: scope.allowedIds },
+        });
+      } else if (name === "list_agents") {
+        const agents = scope.allowedIds
+          .map((id) => AGENTS_BY_ID.get(id))
+          .filter((a): a is AgentEntry => Boolean(a))
+          .map(agentDescriptor);
+        respond({
+          content: [{ type: "text", text: JSON.stringify({ default: scope.defaultId, agents }) }],
+          structuredContent: { default: scope.defaultId, agents },
         });
       } else {
         respondError(-32601, `Unknown tool: ${name}`);

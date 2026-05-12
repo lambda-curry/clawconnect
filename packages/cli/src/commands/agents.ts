@@ -1,5 +1,5 @@
 import { parseArgs } from "node:util";
-import { REGISTRY_PATH } from "@clawconnect/core";
+import { REGISTRY_PATH, agentDescriptor } from "@clawconnect/core";
 import { loadRegistry } from "../config.ts";
 
 export async function agentsCommand(args: string[]) {
@@ -27,7 +27,7 @@ export async function agentsCommand(args: string[]) {
         source: registry.source,
         registryPath: REGISTRY_PATH,
         agents: registry.agents.map((a) => ({
-          id: a.id,
+          ...agentDescriptor(a),
           url: a.url,
           openclawAgentId: a.openclawAgentId,
         })),
@@ -41,8 +41,13 @@ export async function agentsCommand(args: string[]) {
   console.log("");
   for (const a of registry.agents) {
     const tag = a.id === registry.default ? " [default]" : "";
-    console.log(`  ${a.id}${tag}`);
-    console.log(`    url:    ${a.url}`);
-    console.log(`    agent:  ${a.openclawAgentId}`);
+    const heading = [a.emoji, a.id].filter(Boolean).join(" ");
+    console.log(`  ${heading}${tag}`);
+    if (a.role) console.log(`    role:        ${a.role}`);
+    if (a.description) console.log(`    description: ${a.description}`);
+    if (a.whenToUse) console.log(`    when to use: ${a.whenToUse}`);
+    console.log(`    url:         ${a.url}`);
+    console.log(`    openclaw:    ${a.openclawAgentId}`);
+    console.log("");
   }
 }

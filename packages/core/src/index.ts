@@ -1,7 +1,7 @@
 export { OpenClawGateway } from "./gateway.ts";
 export { SessionManager } from "./session.ts";
 export { GatewayPool } from "./gateway-pool.ts";
-export { loadAgentRegistry, resolveAgent, REGISTRY_PATH } from "./agent-registry.ts";
+export { loadAgentRegistry, resolveAgent, REGISTRY_PATH, agentBlurb, agentDescriptor } from "./agent-registry.ts";
 export type { AgentEntry, AgentRegistry } from "./agent-registry.ts";
 export { classifyError } from "./errors.ts";
 export { emptyArtifacts, processEvent, extractPatternsFromSummary, deriveNextStep } from "./artifacts.ts";
