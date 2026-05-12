@@ -1,12 +1,13 @@
 import { parseArgs } from "node:util";
 import { OpenClawGateway, SessionManager } from "@clawconnect/core";
-import { loadConfig } from "../config.ts";
+import { loadAgent } from "../config.ts";
 
 export async function logsCommand(args: string[]) {
   const { values, positionals } = parseArgs({
     args,
     allowPositionals: true,
     options: {
+      agent: { type: "string" },
       follow: { type: "boolean", short: "f", default: false },
       tail: { type: "string", default: "20" },
       json: { type: "boolean", default: false },
@@ -15,7 +16,7 @@ export async function logsCommand(args: string[]) {
   });
 
   if (values.help) {
-    console.log("Usage: clawconnect logs <job-id> [--follow] [--tail <n>] [--json]");
+    console.log("Usage: clawconnect logs <job-id> [--agent <id>] [--follow] [--tail <n>] [--json]");
     process.exit(0);
   }
 
@@ -25,16 +26,16 @@ export async function logsCommand(args: string[]) {
     process.exit(1);
   }
 
-  const config = loadConfig();
-  const gateway = new OpenClawGateway({ url: config.url, token: config.token });
-  const sessions = new SessionManager(gateway, config.agentId);
+  const { agent } = loadAgent(values.agent);
+  const gateway = new OpenClawGateway({ url: agent.url, token: agent.password });
+  const sessions = new SessionManager(gateway, agent.openclawAgentId);
 
   const job = sessions.getJob(jobId);
   if (!job) {
     if (values.json) {
-      console.log(JSON.stringify({ error: "Job not found", jobId }));
+      console.log(JSON.stringify({ error: "Job not found", jobId, agent: agent.id }));
     } else {
-      console.error(`Job not found: ${jobId}`);
+      console.error(`Job not found on agent "${agent.id}": ${jobId}`);
     }
     gateway.close();
     process.exit(1);

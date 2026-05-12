@@ -1,28 +1,36 @@
 #!/usr/bin/env node
-import { parseArgs } from "node:util";
 import { runCommand } from "./commands/run.ts";
 import { statusCommand } from "./commands/status.ts";
 import { logsCommand } from "./commands/logs.ts";
 import { sessionsCommand } from "./commands/sessions.ts";
+import { agentsCommand } from "./commands/agents.ts";
 
 const HELP = `
 clawconnect — Connect AI coding assistants to OpenClaw
 
 Usage:
-  clawconnect run <task> [options]    Submit a task to OpenClaw
-  clawconnect status <job-id>         Check job status
-  clawconnect logs <job-id>           Show job logs
-  clawconnect sessions                List active sessions
+  clawconnect run <task> [options]            Submit a task to an OpenClaw agent
+  clawconnect status <job-id> [options]       Check job status
+  clawconnect logs <job-id> [options]         Show job logs
+  clawconnect sessions [options]              List active sessions
+  clawconnect agents                          List configured agents
 
-Options:
+Common options:
+  --agent <id>   Target agent alias (default: registry default)
   --json         Output machine-readable JSON
   --help, -h     Show this help
 
 Run 'clawconnect <command> --help' for command-specific options.
 
 Config:
-  Set OPENCLAW_URL and OPENCLAW_PASSWORD as environment variables,
-  or create ~/.clawconnect/config.json with { "url": "...", "token": "..." }
+  Preferred: ~/.clawconnect/agents.json
+    {
+      "default": "clawdy",
+      "agents": [
+        { "id": "clawdy", "url": "...", "password": "...", "openclawAgentId": "main" }
+      ]
+    }
+  Fallback: OPENCLAW_URL + OPENCLAW_PASSWORD (+ optional OPENCLAW_AGENT_ID, CLAWCONNECT_AGENT_ALIAS).
 `.trim();
 
 const args = process.argv.slice(2);
@@ -45,6 +53,9 @@ switch (command) {
     break;
   case "sessions":
     await sessionsCommand(args.slice(1));
+    break;
+  case "agents":
+    await agentsCommand(args.slice(1));
     break;
   default:
     console.error(`Unknown command: ${command}`);
