@@ -1,7 +1,5 @@
 import { GatewayPool } from "./gateway-pool.ts";
-import { SessionManager } from "./session.ts";
 import type {
-  CheckMode,
   CheckTaskOpts,
   CheckTaskResult,
   ContinuationState,
@@ -25,21 +23,6 @@ export function runTask(pool: GatewayPool, input: TaskInput): RunTaskResult {
   };
 }
 
-/** Back-compat overload for callers that still hold a single SessionManager. */
-export function runTaskOnSession(sessions: SessionManager, input: TaskInput): RunTaskResult {
-  const job = sessions.submitTask({
-    task: input.task,
-    context: input.context,
-    sessionKey: input.sessionKey,
-  });
-  return {
-    jobId: job.jobId,
-    sessionKey: job.sessionKey,
-    status: "running",
-    agent: input.agent,
-  };
-}
-
 function notFound(): CheckTaskResult {
   return { found: false };
 }
@@ -49,8 +32,7 @@ export async function checkTask(pool: GatewayPool, opts: CheckTaskOpts): Promise
   if (!entry && opts.jobId) entry = pool.forJob(opts.jobId);
   if (!entry && opts.sessionKey) entry = pool.forSession(opts.sessionKey);
   if (!entry) {
-    // Fall back to scanning every initialized agent. Useful if the pool was
-    // re-created between run_task and check_task (process restart).
+    // Defensive scan in case the jobId index was cleared but sessions remain.
     for (const candidate of pool.allEntries()) {
       const job = candidate.sessions.resolveJob(opts.jobId, opts.sessionKey);
       if (job) {

@@ -58,7 +58,12 @@ function parseEntry(raw: AgentEntryInput, index: number): AgentEntry {
 
 export function loadAgentRegistry(): AgentRegistry {
   if (existsSync(REGISTRY_FILE)) {
-    const raw = JSON.parse(readFileSync(REGISTRY_FILE, "utf8")) as RegistryFile;
+    let raw: RegistryFile;
+    try {
+      raw = JSON.parse(readFileSync(REGISTRY_FILE, "utf8")) as RegistryFile;
+    } catch (err) {
+      throw new Error(`Failed to parse ${REGISTRY_FILE}: ${(err as Error).message}`);
+    }
     if (!Array.isArray(raw.agents) || raw.agents.length === 0) {
       throw new Error(`agents.json: "agents" must be a non-empty array`);
     }

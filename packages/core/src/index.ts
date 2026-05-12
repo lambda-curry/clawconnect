@@ -5,7 +5,7 @@ export { loadAgentRegistry, resolveAgent, REGISTRY_PATH } from "./agent-registry
 export type { AgentEntry, AgentRegistry } from "./agent-registry.ts";
 export { classifyError } from "./errors.ts";
 export { emptyArtifacts, processEvent, extractPatternsFromSummary, deriveNextStep } from "./artifacts.ts";
-export { runTask, runTaskOnSession, checkTask, listSessions } from "./tools.ts";
+export { runTask, checkTask, listSessions } from "./tools.ts";
 export type {
   Artifacts,
   CheckMode,
