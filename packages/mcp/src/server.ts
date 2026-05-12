@@ -128,7 +128,7 @@ function defaultFormatListSessions(result: ContinuationState[]): McpToolResponse
 
 export function createMcpServer(config: { registry: AgentRegistry; provider?: ProviderConfig }) {
   const server = new McpServer({
-    name: "clawconnect",
+    name: "ClawConnect",
     version: "0.1.0",
   });
 

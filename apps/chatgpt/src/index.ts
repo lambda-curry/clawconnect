@@ -178,7 +178,7 @@ const server = createServer(async (req, res) => {
       respond({
         protocolVersion: "2024-11-05",
         capabilities: { tools: {}, resources: {} },
-        serverInfo: { name: "openclaw-app", version: "0.0.1" },
+        serverInfo: { name: "ClawConnect", version: "0.1.0" },
       });
     } else if (isNotification) {
       res.writeHead(202);
