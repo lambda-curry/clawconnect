@@ -54,85 +54,115 @@ const WIDGET_META = WIDGET_ENABLED
   ? { ui: { resourceUri: WIDGET_URI }, "ui/resourceUri": WIDGET_URI }
   : {};
 
-const AGENT_PROP = {
-  type: "string" as const,
-  enum: AGENT_IDS,
-  description: `OpenClaw agent to dispatch to. Configured agents: ${AGENT_LIST}. Default: ${registry.default}.`,
-};
+/**
+ * Per-request agent scope. Clients can pin a subset of the configured agents
+ * by setting `?agents=clawdy,hank` (or `?agent=clawdy` shorthand) on the
+ * /mcp URL. Unknown ids are ignored; if the filter would produce zero
+ * matches, we fall back to all configured agents and log a warning so the
+ * caller doesn't end up with an unusable empty enum.
+ */
+function resolveScope(url: URL): { allowedIds: string[]; defaultId: string } {
+  const raw = url.searchParams.getAll("agents").concat(url.searchParams.getAll("agent"));
+  if (raw.length === 0) {
+    return { allowedIds: AGENT_IDS, defaultId: registry.default };
+  }
+  const wanted = raw
+    .flatMap((v) => v.split(","))
+    .map((v) => v.trim())
+    .filter(Boolean);
+  if (wanted.length === 0) {
+    return { allowedIds: AGENT_IDS, defaultId: registry.default };
+  }
+  const allowed = wanted.filter((id) => AGENT_IDS.includes(id));
+  if (allowed.length === 0) {
+    console.warn(`[mcp] requested agents ${JSON.stringify(wanted)} matched none of ${JSON.stringify(AGENT_IDS)} — falling back to all agents`);
+    return { allowedIds: AGENT_IDS, defaultId: registry.default };
+  }
+  const defaultId = allowed.includes(registry.default) ? registry.default : allowed[0];
+  return { allowedIds: allowed, defaultId };
+}
 
-const TOOLS = [
-  {
-    name: "run_task",
-    description: `Submit a task to an OpenClaw agent. Returns quickly with a jobId and sessionKey. Use check_task to poll for progress. Pass sessionKey from a previous result to continue the same thread. Available agents: ${AGENT_LIST}.`,
-    inputSchema: {
-      type: "object",
-      properties: {
-        task: { type: "string", description: "The task to perform" },
-        agent: AGENT_PROP,
-        context: { type: "string", description: "Optional context for the task" },
-        sessionKey: {
-          type: "string",
-          description: "Session key from a previous call to continue the same thread. Omit to start a new thread.",
+function buildTools(allowedIds: string[], defaultId: string) {
+  const list = allowedIds.join(", ");
+  const agentProp = {
+    type: "string" as const,
+    enum: allowedIds,
+    description: `OpenClaw agent to dispatch to. Available: ${list}. Default: ${defaultId}.`,
+  };
+  return [
+    {
+      name: "run_task",
+      description: `Submit a task to an OpenClaw agent. Returns quickly with a jobId and sessionKey. Use check_task to poll for progress. Pass sessionKey from a previous result to continue the same thread. Available agents: ${list}.`,
+      inputSchema: {
+        type: "object",
+        properties: {
+          task: { type: "string", description: "The task to perform" },
+          agent: agentProp,
+          context: { type: "string", description: "Optional context for the task" },
+          sessionKey: {
+            type: "string",
+            description: "Session key from a previous call to continue the same thread. Omit to start a new thread.",
+          },
         },
+        required: ["task"],
       },
-      required: ["task"],
-    },
-    annotations: {
-      title: "Run Task",
-      readOnlyHint: false,
-      destructiveHint: false,
-      openWorldHint: true,
-    },
-    _meta: {
-      ...WIDGET_META,
-      "openai/toolInvocation/invoking": "Sending task to OpenClaw agent...",
-    },
-  },
-  {
-    name: "check_task",
-    description: `Check the status of a previously submitted task. Waits up to 50 seconds for completion before returning. Poll with jobId. Available agents: ${AGENT_LIST}.`,
-    inputSchema: {
-      type: "object",
-      properties: {
-        jobId: { type: "string", description: "The jobId returned by run_task" },
-        sessionKey: {
-          type: "string",
-          description: "Optional session key for reattaching status checks after refresh.",
-        },
-        agent: {
-          ...AGENT_PROP,
-          description: `${AGENT_PROP.description} Usually inferred from jobId; set explicitly if you started run_task elsewhere.`,
-        },
-        knownLogCount: {
-          type: "number",
-          description: "Number of log entries already seen. Server returns as soon as new entries appear.",
-        },
-        mode: {
-          type: "string",
-          enum: ["poll", "wait"],
-          description: 'Polling mode: "poll" returns on new logs (default for ChatGPT widget), "wait" blocks until completion.',
-        },
+      annotations: {
+        title: "Run Task",
+        readOnlyHint: false,
+        destructiveHint: false,
+        openWorldHint: true,
+      },
+      _meta: {
+        ...WIDGET_META,
+        "openai/toolInvocation/invoking": "Sending task to OpenClaw agent...",
       },
     },
-    annotations: {
-      title: "Check Task Status",
-      readOnlyHint: true,
-      idempotentHint: true,
-      openWorldHint: false,
+    {
+      name: "check_task",
+      description: `Check the status of a previously submitted task. Waits up to 50 seconds for completion before returning. Poll with jobId. Available agents: ${list}.`,
+      inputSchema: {
+        type: "object",
+        properties: {
+          jobId: { type: "string", description: "The jobId returned by run_task" },
+          sessionKey: {
+            type: "string",
+            description: "Optional session key for reattaching status checks after refresh.",
+          },
+          agent: {
+            ...agentProp,
+            description: `${agentProp.description} Usually inferred from jobId; set explicitly if you started run_task elsewhere.`,
+          },
+          knownLogCount: {
+            type: "number",
+            description: "Number of log entries already seen. Server returns as soon as new entries appear.",
+          },
+          mode: {
+            type: "string",
+            enum: ["poll", "wait"],
+            description: 'Polling mode: "poll" returns on new logs (default for ChatGPT widget), "wait" blocks until completion.',
+          },
+        },
+      },
+      annotations: {
+        title: "Check Task Status",
+        readOnlyHint: true,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
     },
-  },
-  {
-    name: "list_sessions",
-    description: `List active OpenClaw sessions across configured agents. Available agents: ${AGENT_LIST}.`,
-    inputSchema: { type: "object", properties: {} },
-    annotations: {
-      title: "List Sessions",
-      readOnlyHint: true,
-      idempotentHint: true,
-      openWorldHint: false,
+    {
+      name: "list_sessions",
+      description: `List active OpenClaw sessions across configured agents. Available agents: ${list}.`,
+      inputSchema: { type: "object", properties: {} },
+      annotations: {
+        title: "List Sessions",
+        readOnlyHint: true,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
     },
-  },
-];
+  ];
+}
 
 hono.get("/", (c) => c.text("OK"));
 hono.get("/health", (c) => c.json({ ok: true }));
@@ -146,6 +176,9 @@ const server = createServer(async (req, res) => {
     }
 
     Object.entries(CORS_HEADERS).forEach(([k, v]) => res.setHeader(k, v));
+
+    const reqUrl = new URL(req.url, `http://${req.headers.host ?? "localhost"}`);
+    const scope = resolveScope(reqUrl);
 
     const chunks: Buffer[] = [];
     for await (const chunk of req) chunks.push(chunk as Buffer);
@@ -184,7 +217,7 @@ const server = createServer(async (req, res) => {
       res.writeHead(202);
       res.end();
     } else if (msg.method === "tools/list") {
-      respond({ tools: TOOLS });
+      respond({ tools: buildTools(scope.allowedIds, scope.defaultId) });
     } else if (msg.method === "resources/list") {
       respond({
         resources: WIDGET_ENABLED
@@ -216,10 +249,19 @@ const server = createServer(async (req, res) => {
       const { name, arguments: args } = msg.params as { name: string; arguments: Record<string, string> };
 
       if (name === "run_task") {
+        const requestedAgent = typeof args.agent === "string" && args.agent ? args.agent : scope.defaultId;
+        if (!scope.allowedIds.includes(requestedAgent)) {
+          respond({
+            content: [{ type: "text", text: `Agent "${requestedAgent}" is not available on this connection. Allowed: ${scope.allowedIds.join(", ")}.` }],
+            isError: true,
+          });
+          console.log(`[mcp] -> ${res.statusCode}`);
+          return;
+        }
         try {
           const result = runTask(pool, {
             task: args.task,
-            agent: typeof args.agent === "string" ? args.agent : undefined,
+            agent: requestedAgent,
             context: args.context,
             sessionKey: args.sessionKey,
           });
@@ -237,11 +279,20 @@ const server = createServer(async (req, res) => {
           });
         }
       } else if (name === "check_task") {
+        const requestedAgent = typeof args.agent === "string" && args.agent ? args.agent : undefined;
+        if (requestedAgent && !scope.allowedIds.includes(requestedAgent)) {
+          respond({
+            content: [{ type: "text", text: `Agent "${requestedAgent}" is not available on this connection. Allowed: ${scope.allowedIds.join(", ")}.` }],
+            isError: true,
+          });
+          console.log(`[mcp] -> ${res.statusCode}`);
+          return;
+        }
         const mode = (args.mode as CheckMode) ?? "poll";
         const result = await checkTask(pool, {
           jobId: typeof args.jobId === "string" ? args.jobId : undefined,
           sessionKey: typeof args.sessionKey === "string" ? args.sessionKey : undefined,
-          agent: typeof args.agent === "string" ? args.agent : undefined,
+          agent: requestedAgent,
           knownLogCount: Number(args.knownLogCount) || 0,
           mode,
         });
@@ -260,6 +311,13 @@ const server = createServer(async (req, res) => {
             },
             isError: true,
           });
+        } else if (result.snapshot.agent && !scope.allowedIds.includes(result.snapshot.agent)) {
+          // Don't leak results from agents outside this connection's scope.
+          respond({
+            content: [{ type: "text", text: "Job not found." }],
+            structuredContent: { jobId: args.jobId, sessionKey: args.sessionKey, status: "error", error: "Job not found." },
+            isError: true,
+          });
         } else {
           const { snapshot, isTerminal, isError } = result;
           respond({
@@ -274,13 +332,14 @@ const server = createServer(async (req, res) => {
           });
         }
       } else if (name === "list_sessions") {
-        const sessions = listSessions(pool);
+        const all = listSessions(pool);
+        const sessions = all.filter((s) => !s.agent || scope.allowedIds.includes(s.agent));
         const summary = sessions.length === 0
           ? "No active sessions."
           : sessions.map((s) => `${s.agent ?? "?"}: ${s.sessionKey.slice(-12)} (${s.lastJobId.slice(0, 8)})`).join("\n");
         respond({
           content: [{ type: "text", text: summary }],
-          structuredContent: { sessions, configuredAgents: AGENT_IDS },
+          structuredContent: { sessions, configuredAgents: scope.allowedIds },
         });
       } else {
         respondError(-32601, `Unknown tool: ${name}`);
