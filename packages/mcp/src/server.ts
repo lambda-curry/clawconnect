@@ -7,6 +7,9 @@ import {
   listSessions,
   agentBlurb,
   agentDescriptor,
+  searchMemory,
+  getMemory,
+  listCollections,
 } from "@clawconnect/core";
 import type {
   AgentRegistry,
@@ -213,6 +216,53 @@ export function createMcpServer(config: { registry: AgentRegistry; provider?: Pr
             text: JSON.stringify({ default: config.registry.default, agents }),
           },
         ],
+      };
+    },
+  );
+
+  server.tool(
+    "search_memory",
+    `Search the shared QMD memory store before dispatching a task — find what's already known. Returns top-matching snippets across the collections this connection can reach. Use this first for any question that might already be answered in notes, decisions, or past cycle records. Call list_collections to see which collections are available.`,
+    {
+      query: z.string().describe("Search query (keyword + semantic combined)"),
+      limit: z.number().int().positive().max(50).optional().describe("Max results to return (default 8)"),
+      collections: z.array(z.string()).optional().describe("Restrict to these collection names. Omit to search all collections the connection can reach."),
+      intent: z.string().optional().describe("One-line description of why you're searching — for telemetry only, not sent to QMD."),
+    },
+    { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+    async ({ query, limit, collections, intent }) => {
+      const result = await searchMemory(config.registry.agents, { query, limit, collections, intent });
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify(result) }],
+      };
+    },
+  );
+
+  server.tool(
+    "get_memory",
+    `Fetch the full body of a memory document by its qmd:// path (returned in search_memory hits as 'file').`,
+    {
+      file: z.string().describe("qmd://collection/<id>.md path from a search_memory hit"),
+    },
+    { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+    async ({ file }) => {
+      const result = await getMemory(config.registry.agents, file);
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify(result) }],
+        ...(result.found ? {} : { isError: true }),
+      };
+    },
+  );
+
+  server.tool(
+    "list_collections",
+    `List the QMD memory collections searchable from this connection. Each entry shows which agents grant access. Call before search_memory to see what's available.`,
+    {},
+    { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+    async () => {
+      const collections = listCollections(config.registry.agents);
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify({ collections }) }],
       };
     },
   );

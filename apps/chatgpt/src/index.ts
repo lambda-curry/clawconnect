@@ -12,6 +12,9 @@ import {
   listSessions,
   agentBlurb,
   agentDescriptor,
+  searchMemory,
+  getMemory,
+  listCollections,
 } from "@clawconnect/core";
 import type { AgentEntry, AgentRegistry, CheckMode } from "@clawconnect/core";
 
@@ -186,6 +189,43 @@ function buildTools(allowedIds: string[], defaultId: string) {
         idempotentHint: true,
         openWorldHint: false,
       },
+    },
+    {
+      name: "search_memory",
+      description: `Search shared QMD memory before dispatching a task — find what's already known. Returns top-matching snippets across collections this connection can reach. Use this first for any question that might already be answered in notes, decisions, or past cycle records.`,
+      inputSchema: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "Search query (keyword + semantic combined)" },
+          limit: { type: "number", description: "Max results to return (default 8, max 50)" },
+          collections: {
+            type: "array",
+            items: { type: "string" },
+            description: "Restrict to these collection names. Omit to search all collections the connection can reach. Use list_collections to discover them.",
+          },
+          intent: { type: "string", description: "One-line description of why you're searching — telemetry only." },
+        },
+        required: ["query"],
+      },
+      annotations: { title: "Search Memory", readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+    },
+    {
+      name: "get_memory",
+      description: `Fetch the full body of a memory document by its qmd:// path (returned in search_memory hits as 'file').`,
+      inputSchema: {
+        type: "object",
+        properties: {
+          file: { type: "string", description: "qmd://collection/<id>.md path from a search_memory hit" },
+        },
+        required: ["file"],
+      },
+      annotations: { title: "Get Memory", readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+    },
+    {
+      name: "list_collections",
+      description: `List the QMD memory collections searchable from this connection. Each entry shows which agents grant access. Call before search_memory to see what's available.`,
+      inputSchema: { type: "object", properties: {} },
+      annotations: { title: "List Collections", readOnlyHint: true, idempotentHint: true, openWorldHint: false },
     },
   ];
 }
@@ -375,6 +415,41 @@ const server = createServer(async (req, res) => {
         respond({
           content: [{ type: "text", text: JSON.stringify({ default: scope.defaultId, agents }) }],
           structuredContent: { default: scope.defaultId, agents },
+        });
+      } else if (name === "search_memory") {
+        const scopedAgents = scope.allowedIds
+          .map((id) => AGENTS_BY_ID.get(id))
+          .filter((a): a is AgentEntry => Boolean(a));
+        const query = typeof args.query === "string" ? args.query : "";
+        const result = await searchMemory(scopedAgents, {
+          query,
+          limit: args.limit !== undefined ? Number(args.limit) : undefined,
+          collections: Array.isArray(args.collections) ? (args.collections as unknown as string[]) : undefined,
+          intent: typeof args.intent === "string" ? args.intent : undefined,
+        });
+        respond({
+          content: [{ type: "text", text: JSON.stringify(result) }],
+          structuredContent: result,
+        });
+      } else if (name === "get_memory") {
+        const scopedAgents = scope.allowedIds
+          .map((id) => AGENTS_BY_ID.get(id))
+          .filter((a): a is AgentEntry => Boolean(a));
+        const file = typeof args.file === "string" ? args.file : "";
+        const result = await getMemory(scopedAgents, file);
+        respond({
+          content: [{ type: "text", text: JSON.stringify(result) }],
+          structuredContent: result,
+          ...(result.found ? {} : { isError: true }),
+        });
+      } else if (name === "list_collections") {
+        const scopedAgents = scope.allowedIds
+          .map((id) => AGENTS_BY_ID.get(id))
+          .filter((a): a is AgentEntry => Boolean(a));
+        const collections = listCollections(scopedAgents);
+        respond({
+          content: [{ type: "text", text: JSON.stringify({ collections }) }],
+          structuredContent: { collections },
         });
       } else {
         respondError(-32601, `Unknown tool: ${name}`);
