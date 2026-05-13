@@ -112,7 +112,15 @@ function buildTools(allowedIds: string[], defaultId: string) {
   return [
     {
       name: "run_task",
-      description: `Delegate work to an OpenClaw agent for deeper investigation, implementation, or judgment that benefits from that agent's own context, tools, and identity. Returns a jobId and sessionKey immediately; use check_task to poll. Pass a sessionKey from a previous result to continue the same thread. Available agents: ${list}.`,
+      description: `Delegate work to an OpenClaw agent for deeper investigation, implementation, or judgment that benefits from that agent's own context, tools, and identity. Returns a jobId and sessionKey immediately while the task runs in the background.
+
+The actual result is what the user wants — not the jobId. After calling run_task, immediately call check_task with mode="wait" in a loop, passing the same jobId, until status is no longer "running". Then report the real outcome (summary, files changed, errors, etc.) to the user. A typical short task takes 30s–3min and needs 1–5 check_task calls.
+
+Skip the polling loop only when:
+- The user explicitly asked for fire-and-forget ("just dispatch it, I'll check later").
+- You are parallel-dispatching multiple jobs to different agents — in that case dispatch all first, then poll each in turn.
+
+Pass sessionKey from a previous result to continue the same thread. Available agents: ${list}.`,
       inputSchema: {
         type: "object",
         properties: {
@@ -139,7 +147,13 @@ function buildTools(allowedIds: string[], defaultId: string) {
     },
     {
       name: "check_task",
-      description: `Check the status of a previously submitted task. Waits up to 50 seconds for completion before returning. Poll with jobId. Available agents: ${list}.`,
+      description: `Check whether a previously dispatched run_task job has finished, and collect the result.
+
+With mode="wait" (recommended): blocks up to 50 seconds and only returns on a terminal status (completed / completed_no_summary / error) or timeout. Call repeatedly with the same jobId until status is no longer "running" — that's how you get the actual answer.
+
+With mode="poll": returns as soon as any new log activity appears. Use this only when you need intermediate progress (live UI), not when you just want the final result.
+
+Pass the jobId returned by run_task. Available agents: ${list}.`,
       inputSchema: {
         type: "object",
         properties: {
@@ -159,7 +173,7 @@ function buildTools(allowedIds: string[], defaultId: string) {
           mode: {
             type: "string",
             enum: ["poll", "wait"],
-            description: 'Polling mode: "poll" returns on new logs (default for ChatGPT widget), "wait" blocks until completion.',
+            description: 'Polling mode: "wait" (default) blocks up to 50s and only returns on a terminal status — use this when you want the result. "poll" returns on any new log activity — use for live progress UIs.',
           },
         },
       },
@@ -350,7 +364,7 @@ const server = createServer(async (req, res) => {
           console.log(`[mcp] -> ${res.statusCode}`);
           return;
         }
-        const mode = (args.mode as CheckMode) ?? "poll";
+        const mode = (args.mode as CheckMode) ?? "wait";
         const result = await checkTask(pool, {
           jobId: typeof args.jobId === "string" ? args.jobId : undefined,
           sessionKey: typeof args.sessionKey === "string" ? args.sessionKey : undefined,
