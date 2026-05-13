@@ -154,7 +154,7 @@ export function createMcpServer(config: { registry: AgentRegistry; provider?: Pr
 
   server.tool(
     "run_task",
-    `Submit a task to an OpenClaw agent. Returns a jobId and sessionKey immediately. Use check_task to poll for progress. Pass a sessionKey from a previous task to continue the same conversation thread. Available agents: ${agentList}.`,
+    `Delegate work to an OpenClaw agent for deeper investigation, implementation, or judgment that benefits from that agent's own context, tools, and identity. Returns a jobId and sessionKey immediately; use check_task to poll. Pass a sessionKey from a previous task to continue the same thread. Available agents: ${agentList}.`,
     {
       task: z.string().describe("The task to perform"),
       agent: agentEnum.optional().describe(agentDescription),
@@ -204,7 +204,7 @@ export function createMcpServer(config: { registry: AgentRegistry; provider?: Pr
 
   server.tool(
     "list_agents",
-    `List the OpenClaw agents reachable from this connection, with role, emoji, description, and "when to use" guidance. Call this first to decide which agent (samwise/scout/meg/etc.) to dispatch a task to.`,
+    `List the OpenClaw agents reachable from this connection, with role, emoji, description, and "when to use" guidance. Useful when deciding which agent (samwise/scout/meg/etc.) to delegate to.`,
     {},
     { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
     async () => {
@@ -222,7 +222,7 @@ export function createMcpServer(config: { registry: AgentRegistry; provider?: Pr
 
   server.tool(
     "search_memory",
-    `Search the shared QMD memory store before dispatching a task — find what's already known. Returns top-matching snippets across the collections this connection can reach. Use this first for any question that might already be answered in notes, decisions, or past cycle records. Call list_collections to see which collections are available.`,
+    `Search shared QMD memory for context — notes, decisions, identity files, project docs, past cycle records. Useful any time you want to ground yourself in what's already known about a topic: to answer directly without delegating, to enrich a prompt before run_task, or just to recall something. Returns top-matching snippets across the collections this connection can reach. Independent of run_task — use whenever it helps.`,
     {
       query: z.string().describe("Search query (keyword + semantic combined)"),
       limit: z.number().int().positive().max(50).optional().describe("Max results to return (default 8)"),
@@ -256,7 +256,7 @@ export function createMcpServer(config: { registry: AgentRegistry; provider?: Pr
 
   server.tool(
     "list_collections",
-    `List the QMD memory collections searchable from this connection. Each entry shows which agents grant access. Call before search_memory to see what's available.`,
+    `List the QMD memory collections this connection can search. Each entry shows which agents grant access. Useful when you want to scope a search_memory call to a particular collection.`,
     {},
     { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
     async () => {

@@ -110,7 +110,7 @@ function buildTools(allowedIds: string[], defaultId: string) {
   return [
     {
       name: "run_task",
-      description: `Submit a task to an OpenClaw agent. Returns quickly with a jobId and sessionKey. Use check_task to poll for progress. Pass sessionKey from a previous result to continue the same thread. Available agents: ${list}.`,
+      description: `Delegate work to an OpenClaw agent for deeper investigation, implementation, or judgment that benefits from that agent's own context, tools, and identity. Returns a jobId and sessionKey immediately; use check_task to poll. Pass a sessionKey from a previous result to continue the same thread. Available agents: ${list}.`,
       inputSchema: {
         type: "object",
         properties: {
@@ -181,7 +181,7 @@ function buildTools(allowedIds: string[], defaultId: string) {
     },
     {
       name: "list_agents",
-      description: `List the OpenClaw agents reachable from this connection, with role, emoji, description, and "when to use" guidance. Call this first to decide which agent to dispatch a task to.`,
+      description: `List the OpenClaw agents reachable from this connection, with role, emoji, description, and "when to use" guidance. Useful when deciding which agent to delegate to.`,
       inputSchema: { type: "object", properties: {} },
       annotations: {
         title: "List Agents",
@@ -192,7 +192,7 @@ function buildTools(allowedIds: string[], defaultId: string) {
     },
     {
       name: "search_memory",
-      description: `Search shared QMD memory before dispatching a task — find what's already known. Returns top-matching snippets across collections this connection can reach. Use this first for any question that might already be answered in notes, decisions, or past cycle records.`,
+      description: `Search shared QMD memory for context — notes, decisions, identity files, project docs, past cycle records. Useful any time you want to ground yourself in what's already known about a topic: to answer directly without delegating, to enrich a prompt before run_task, or just to recall something. Returns top-matching snippets across collections this connection can reach. Independent of run_task — use whenever it helps.`,
       inputSchema: {
         type: "object",
         properties: {
@@ -223,7 +223,7 @@ function buildTools(allowedIds: string[], defaultId: string) {
     },
     {
       name: "list_collections",
-      description: `List the QMD memory collections searchable from this connection. Each entry shows which agents grant access. Call before search_memory to see what's available.`,
+      description: `List the QMD memory collections this connection can search. Each entry shows which agents grant access. Useful when you want to scope a search_memory call to a particular collection.`,
       inputSchema: { type: "object", properties: {} },
       annotations: { title: "List Collections", readOnlyHint: true, idempotentHint: true, openWorldHint: false },
     },
