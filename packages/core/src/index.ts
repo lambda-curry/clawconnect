@@ -3,6 +3,8 @@ export { SessionManager } from "./session.ts";
 export { GatewayPool } from "./gateway-pool.ts";
 export { loadAgentRegistry, resolveAgent, REGISTRY_PATH, agentBlurb, agentDescriptor } from "./agent-registry.ts";
 export type { AgentEntry, AgentRegistry } from "./agent-registry.ts";
+export { searchMemory, getMemory, listCollections, DEFAULT_QMD_URL } from "./memory.ts";
+export type { MemorySearchHit, MemorySearchResult, GetMemoryResult, SearchMemoryOpts, CollectionListing } from "./memory.ts";
 export { classifyError } from "./errors.ts";
 export { emptyArtifacts, processEvent, extractPatternsFromSummary, deriveNextStep } from "./artifacts.ts";
 export { runTask, checkTask, listSessions } from "./tools.ts";

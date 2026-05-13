@@ -17,6 +17,12 @@ export interface AgentEntry {
   description?: string;
   /** Guidance for when a caller AI should pick this agent over others. Optional. */
   whenToUse?: string;
+  /** QMD HTTP endpoint this agent's memory lives behind. Defaults to http://127.0.0.1:18790. */
+  qmdUrl?: string;
+  /** QMD auth token scoped to this agent (e.g. "qmd-clawdy-..."). Required for memory tools to work. */
+  qmdToken?: string;
+  /** User-visible list of QMD collections this agent can search. Hint only — QMD enforces access via qmdToken. */
+  collections?: string[];
 }
 
 interface AgentEntryInput {
@@ -28,6 +34,9 @@ interface AgentEntryInput {
   role?: unknown;
   description?: unknown;
   whenToUse?: unknown;
+  qmdUrl?: unknown;
+  qmdToken?: unknown;
+  collections?: unknown;
 }
 
 interface RegistryFile {
@@ -70,6 +79,9 @@ function parseEntry(raw: AgentEntryInput, index: number): AgentEntry {
     const trimmed = v.trim();
     return trimmed.length > 0 ? trimmed : undefined;
   };
+  const collections = Array.isArray(raw.collections)
+    ? raw.collections.filter((c): c is string => typeof c === "string" && c.trim().length > 0).map((c) => c.trim())
+    : undefined;
   return {
     id,
     url,
@@ -79,6 +91,9 @@ function parseEntry(raw: AgentEntryInput, index: number): AgentEntry {
     role: optString(raw.role),
     description: optString(raw.description),
     whenToUse: optString(raw.whenToUse),
+    qmdUrl: optString(raw.qmdUrl),
+    qmdToken: optString(raw.qmdToken),
+    collections: collections && collections.length > 0 ? collections : undefined,
   };
 }
 
@@ -149,5 +164,7 @@ export function agentDescriptor(entry: AgentEntry) {
     role: entry.role,
     description: entry.description,
     whenToUse: entry.whenToUse,
+    memorySearchable: Boolean(entry.qmdToken),
+    collections: entry.collections,
   };
 }
