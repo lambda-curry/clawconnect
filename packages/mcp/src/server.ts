@@ -154,7 +154,15 @@ export function createMcpServer(config: { registry: AgentRegistry; provider?: Pr
 
   server.tool(
     "run_task",
-    `Delegate work to an OpenClaw agent for deeper investigation, implementation, or judgment that benefits from that agent's own context, tools, and identity. Returns a jobId and sessionKey immediately; use check_task to poll. Pass a sessionKey from a previous task to continue the same thread. Available agents: ${agentList}.`,
+    `Delegate work to an OpenClaw agent for deeper investigation, implementation, or judgment that benefits from that agent's own context, tools, and identity. Returns a jobId and sessionKey immediately while the task runs in the background.
+
+The actual result is what the user wants — not the jobId. After calling run_task, immediately call check_task with mode="wait" in a loop, passing the same jobId, until status is no longer "running". Then report the real outcome (summary, files changed, errors, etc.) to the user. A typical short task takes 30s–3min and needs 1–5 check_task calls.
+
+Skip the polling loop only when:
+- The user explicitly asked for fire-and-forget ("just dispatch it, I'll check later").
+- You are parallel-dispatching multiple jobs to different agents — in that case dispatch all first, then poll each in turn.
+
+Pass a sessionKey from a previous task to continue the same thread. Available agents: ${agentList}.`,
     {
       task: z.string().describe("The task to perform"),
       agent: agentEnum.optional().describe(agentDescription),
@@ -170,7 +178,13 @@ export function createMcpServer(config: { registry: AgentRegistry; provider?: Pr
 
   server.tool(
     "check_task",
-    `Check the status of a running OpenClaw task. Blocks for up to 50 seconds before returning. Call in a loop until status is not "running". Pass the jobId from run_task. Available agents: ${agentList}.`,
+    `Check whether a previously dispatched run_task job has finished, and collect the result.
+
+With mode="wait" (recommended): blocks for up to 50 seconds and only returns on a terminal status (completed / completed_no_summary / error) or timeout. Call repeatedly with the same jobId until status is no longer "running" — that's how you get the actual answer.
+
+With mode="poll": returns as soon as any new log activity appears. Use this only when you need intermediate progress (live UI), not when you just want the final result.
+
+Pass the jobId returned by run_task. Available agents: ${agentList}.`,
     {
       jobId: z.string().optional().describe("The jobId from run_task"),
       sessionKey: z.string().optional().describe("The sessionKey from run_task (alternative to jobId)"),
