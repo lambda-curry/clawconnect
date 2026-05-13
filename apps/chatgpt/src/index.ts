@@ -1,8 +1,8 @@
 import "dotenv/config";
 import { createServer } from "node:http";
-import { readFileSync } from "node:fs";
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+// import { readFileSync } from "node:fs";  // widget temporarily disabled — see below
+// import { join, dirname } from "node:path";
+// import { fileURLToPath } from "node:url";
 import { Hono } from "hono";
 import {
   GatewayPool,
@@ -18,8 +18,11 @@ import {
 } from "@clawconnect/core";
 import type { AgentEntry, AgentRegistry, CheckMode } from "@clawconnect/core";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const WIDGET_HTML = readFileSync(join(__dirname, "widget.html"), "utf-8");
+// Widget UI is temporarily disabled to keep the surface focused on
+// run_task / check_task. Re-enable by restoring the widget imports and
+// the `resources/list` + `resources/read` handlers below.
+// const __dirname = dirname(fileURLToPath(import.meta.url));
+// const WIDGET_HTML = readFileSync(join(__dirname, "widget.html"), "utf-8");
 
 const hono = new Hono();
 
@@ -58,12 +61,11 @@ const CORS_HEADERS = {
   "Access-Control-Expose-Headers": "Mcp-Session-Id",
 };
 
-const WIDGET_URI = "ui://widget/openclaw-status.html";
-const WIDGET_ENABLED = process.env.ENABLE_CHATGPT_UI_WIDGET === "true";
-
-const WIDGET_META = WIDGET_ENABLED
-  ? { ui: { resourceUri: WIDGET_URI }, "ui/resourceUri": WIDGET_URI }
-  : {};
+// Widget temporarily disabled — re-enable by uncommenting and the
+// resources/list + resources/read handlers below.
+// const WIDGET_URI = "ui://widget/openclaw-status.html";
+// const WIDGET_ENABLED = process.env.ENABLE_CHATGPT_UI_WIDGET === "true";
+const WIDGET_META: Record<string, unknown> = {};
 
 /**
  * Per-request agent scope. Clients can pin a subset of the configured agents
@@ -285,32 +287,26 @@ const server = createServer(async (req, res) => {
     } else if (msg.method === "tools/list") {
       respond({ tools: buildTools(scope.allowedIds, scope.defaultId) });
     } else if (msg.method === "resources/list") {
-      respond({
-        resources: WIDGET_ENABLED
-          ? [{ uri: WIDGET_URI, name: "OpenClaw Status Widget", mimeType: "text/html;profile=mcp-app" }]
-          : [],
-      });
-    } else if (msg.method === "resources/read") {
-      const uri = (msg.params as { uri?: string })?.uri;
-      if (uri === WIDGET_URI) {
-        respond({
-          contents: [
-            {
-              uri: WIDGET_URI,
-              mimeType: "text/html;profile=mcp-app",
-              text: WIDGET_HTML,
-              _meta: {
-                ui: {
-                  borders: "square",
-                  domains: ["*"],
-                },
-              },
-            },
-          ],
-        });
-      } else {
-        respondError(-32602, `Unknown resource: ${uri}`);
-      }
+      // Widget disabled — return no resources.
+      respond({ resources: [] });
+    // } else if (msg.method === "resources/read") {
+    //   const uri = (msg.params as { uri?: string })?.uri;
+    //   if (uri === WIDGET_URI) {
+    //     respond({
+    //       contents: [
+    //         {
+    //           uri: WIDGET_URI,
+    //           mimeType: "text/html;profile=mcp-app",
+    //           text: WIDGET_HTML,
+    //           _meta: {
+    //             ui: { borders: "square", domains: ["*"] },
+    //           },
+    //         },
+    //       ],
+    //     });
+    //   } else {
+    //     respondError(-32602, `Unknown resource: ${uri}`);
+    //   }
     } else if (msg.method === "tools/call") {
       const { name, arguments: args } = msg.params as { name: string; arguments: Record<string, string> };
 
