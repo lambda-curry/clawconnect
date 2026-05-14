@@ -145,6 +145,10 @@ Pass sessionKey from a previous result to continue the same thread. Available ag
             type: "string",
             description: "Session key from a previous call to continue the same thread. Omit to start a new thread.",
           },
+          senderName: {
+            type: "string",
+            description: "Name of the person you're chatting with, on whose behalf this task is dispatched. This connection may be shared by multiple people — when the user has identified themselves (or you otherwise know who you're talking to), pass their name so the receiving agent knows who it's helping. The agent has no other way to tell.",
+          },
         },
         required: ["task"],
       },
@@ -354,6 +358,7 @@ const server = createServer(async (req, res) => {
             agent: requestedAgent,
             context: args.context,
             sessionKey: args.sessionKey,
+            senderName: typeof args.senderName === "string" ? args.senderName : undefined,
           });
           console.log(`[mcp] submitted job ${result.jobId} on agent ${result.agent} session ${result.sessionKey}`);
           const entry = pool.forJob(result.jobId)!;

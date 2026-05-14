@@ -84,6 +84,13 @@ export type TaskInput = {
   sessionKey?: string;
   /** ClawConnect agent alias. Falls back to the registry default. */
   agent?: string;
+  /**
+   * Name of the human on whose behalf this task is dispatched. On a shared
+   * connection (one ChatGPT account, one connector, many people) this is the
+   * only way the receiving agent knows who it's helping. When set, it's
+   * prepended to the message the agent receives.
+   */
+  senderName?: string;
 };
 
 // ── Gateway config ─────────────���────────────────────────────────────────────
