@@ -47,6 +47,7 @@ try {
     default: singleAgentId,
     source: "env",
     agents: [{ id: singleAgentId, url, password, openclawAgentId }],
+    groups: {},
   };
   console.log(`[chatgpt-app] env fallback registry: single agent "${singleAgentId}"`);
 }
@@ -68,27 +69,40 @@ const CORS_HEADERS = {
 const WIDGET_META: Record<string, unknown> = {};
 
 /**
- * Per-request agent scope. Clients can pin a subset of the configured agents
- * by setting `?agents=clawdy,hank` (or `?agent=clawdy` shorthand) on the
- * /mcp URL. Unknown ids are ignored; if the filter would produce zero
- * matches, we fall back to all configured agents and log a warning so the
- * caller doesn't end up with an unusable empty enum.
+ * Per-request agent scope. A connection can narrow which agents it sees with:
+ *   ?group=lc-labs            — a named group from agents.json (stable URL;
+ *                               membership edited server-side, no re-paste)
+ *   ?agents=clawdy,hank       — an explicit list (ad-hoc scoping)
+ *   ?agent=clawdy             — single-agent shorthand
+ * `group` and `agents` can be combined and/or repeated — the result is the
+ * union. Unknown agent ids and unknown group names are dropped with a
+ * warning. If the filter resolves to zero agents, we fall back to all
+ * configured agents (so a typo doesn't hand the caller an empty enum).
  */
 function resolveScope(url: URL): { allowedIds: string[]; defaultId: string } {
-  const raw = url.searchParams.getAll("agents").concat(url.searchParams.getAll("agent"));
-  if (raw.length === 0) {
+  const csv = (vals: string[]) => vals.flatMap((v) => v.split(",")).map((v) => v.trim()).filter(Boolean);
+
+  const groupNames = csv(url.searchParams.getAll("group"));
+  const explicitAgents = csv(url.searchParams.getAll("agents").concat(url.searchParams.getAll("agent")));
+
+  if (groupNames.length === 0 && explicitAgents.length === 0) {
     return { allowedIds: AGENT_IDS, defaultId: registry.default };
   }
-  const wanted = raw
-    .flatMap((v) => v.split(","))
-    .map((v) => v.trim())
-    .filter(Boolean);
-  if (wanted.length === 0) {
-    return { allowedIds: AGENT_IDS, defaultId: registry.default };
+
+  const wanted: string[] = [];
+  for (const g of groupNames) {
+    const members = registry.groups[g];
+    if (!members) {
+      console.warn(`[mcp] unknown group "${g}" — ignored (known groups: ${Object.keys(registry.groups).join(", ") || "none"})`);
+      continue;
+    }
+    for (const id of members) if (!wanted.includes(id)) wanted.push(id);
   }
+  for (const id of explicitAgents) if (!wanted.includes(id)) wanted.push(id);
+
   const allowed = wanted.filter((id) => AGENT_IDS.includes(id));
   if (allowed.length === 0) {
-    console.warn(`[mcp] requested agents ${JSON.stringify(wanted)} matched none of ${JSON.stringify(AGENT_IDS)} — falling back to all agents`);
+    console.warn(`[mcp] scope (groups=${JSON.stringify(groupNames)}, agents=${JSON.stringify(explicitAgents)}) resolved to no known agents — falling back to all`);
     return { allowedIds: AGENT_IDS, defaultId: registry.default };
   }
   const defaultId = allowed.includes(registry.default) ? registry.default : allowed[0];
