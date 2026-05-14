@@ -168,10 +168,11 @@ Pass a sessionKey from a previous task to continue the same thread. Available ag
       agent: agentEnum.optional().describe(agentDescription),
       context: z.string().optional().describe("Additional context for the task"),
       sessionKey: z.string().optional().describe("Session key from a previous task to continue the same thread"),
+      senderName: z.string().optional().describe("Name of the person you're chatting with, on whose behalf this task is dispatched. This connection may be shared by multiple people — when the user has identified themselves (or you otherwise know who you're talking to), pass their name so the receiving agent knows who it's helping. The agent has no other way to tell."),
     },
     { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
-    async ({ task, agent, context, sessionKey }) => {
-      const result = runTask(pool, { task, agent, context, sessionKey });
+    async ({ task, agent, context, sessionKey, senderName }) => {
+      const result = runTask(pool, { task, agent, context, sessionKey, senderName });
       return fmtRun(result);
     },
   );

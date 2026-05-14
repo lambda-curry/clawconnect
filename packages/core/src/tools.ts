@@ -13,6 +13,7 @@ export function runTask(pool: GatewayPool, input: TaskInput): RunTaskResult {
     task: input.task,
     context: input.context,
     sessionKey: input.sessionKey,
+    senderName: input.senderName,
   });
   pool.rememberJob(job.jobId, entry.agent.id);
   return {

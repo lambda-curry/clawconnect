@@ -40,7 +40,11 @@ export class SessionManager {
   ) {}
 
   submitTask(input: TaskInput): Job {
-    const message = input.context ? `${input.context}\n\n${input.task}` : input.task;
+    const body = input.context ? `${input.context}\n\n${input.task}` : input.task;
+    // Prepend the sender identity so the receiving agent knows who it's
+    // helping on a shared connection.
+    const senderName = input.senderName?.trim();
+    const message = senderName ? `[Message from: ${senderName}]\n\n${body}` : body;
 
     const { sessionKey, migratedFromLegacy } = resolveSessionKey(input.sessionKey, this.agentId);
     const jobId = randomUUID();
