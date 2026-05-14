@@ -42,11 +42,18 @@ interface AgentEntryInput {
 interface RegistryFile {
   default?: unknown;
   agents?: unknown;
+  groups?: unknown;
 }
 
 export interface AgentRegistry {
   default: string;
   agents: AgentEntry[];
+  /**
+   * Named agent groups. A connection can pin a group with `?group=lc-labs`
+   * instead of spelling out `?agents=dexter,meg,samwise,buzz` — so group
+   * membership is edited server-side without anyone re-pasting their URL.
+   */
+  groups: Record<string, string[]>;
   source: "file" | "env";
 }
 
@@ -59,8 +66,44 @@ function readEnvFallback(): AgentRegistry | undefined {
   return {
     default: id,
     agents: [{ id, url, password, openclawAgentId }],
+    groups: {},
     source: "env",
   };
+}
+
+/**
+ * Parse the optional `groups` map. Members that aren't known agent ids are
+ * dropped with a warning (so a typo doesn't silently widen access — the
+ * group just gets smaller). Empty/invalid groups are dropped entirely.
+ */
+function parseGroups(raw: unknown, agentIds: Set<string>): Record<string, string[]> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const out: Record<string, string[]> = {};
+  for (const [name, members] of Object.entries(raw as Record<string, unknown>)) {
+    const key = name.trim();
+    if (!key) continue;
+    if (!Array.isArray(members)) {
+      console.warn(`agents.json: group "${key}" is not an array — skipped`);
+      continue;
+    }
+    const resolved: string[] = [];
+    for (const m of members) {
+      if (typeof m !== "string") continue;
+      const id = m.trim();
+      if (!id) continue;
+      if (!agentIds.has(id)) {
+        console.warn(`agents.json: group "${key}" references unknown agent "${id}" — dropped`);
+        continue;
+      }
+      if (!resolved.includes(id)) resolved.push(id);
+    }
+    if (resolved.length === 0) {
+      console.warn(`agents.json: group "${key}" has no valid members — skipped`);
+      continue;
+    }
+    out[key] = resolved;
+  }
+  return out;
 }
 
 function parseEntry(raw: AgentEntryInput, index: number): AgentEntry {
@@ -118,7 +161,8 @@ export function loadAgentRegistry(): AgentRegistry {
     if (!agents.find((a) => a.id === defaultId)) {
       throw new Error(`agents.json: "default" = "${defaultId}" does not match any agent id`);
     }
-    return { default: defaultId, agents, source: "file" };
+    const groups = parseGroups(raw.groups, new Set(agents.map((a) => a.id)));
+    return { default: defaultId, agents, groups, source: "file" };
   }
   const env = readEnvFallback();
   if (env) return env;
