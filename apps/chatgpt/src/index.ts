@@ -48,6 +48,7 @@ try {
     source: "env",
     agents: [{ id: singleAgentId, url, password, openclawAgentId }],
     groups: {},
+    groupLabels: {},
   };
   console.log(`[chatgpt-app] env fallback registry: single agent "${singleAgentId}"`);
 }
@@ -78,15 +79,35 @@ const WIDGET_META: Record<string, unknown> = {};
  * union. Unknown agent ids and unknown group names are dropped with a
  * warning. If the filter resolves to zero agents, we fall back to all
  * configured agents (so a typo doesn't hand the caller an empty enum).
+ *
+ * `serverName` is the MCP serverInfo.name to report: when the connection is
+ * scoped to exactly one labelled group, it's that group's label (e.g.
+ * "Bakery ClawConnect") so multiple connectors on the same client are
+ * distinguishable. Otherwise it's the generic "ClawConnect".
  */
-function resolveScope(url: URL): { allowedIds: string[]; defaultId: string } {
+const DEFAULT_SERVER_NAME = "ClawConnect";
+
+interface Scope {
+  allowedIds: string[];
+  defaultId: string;
+  serverName: string;
+}
+
+function resolveScope(url: URL): Scope {
   const csv = (vals: string[]) => vals.flatMap((v) => v.split(",")).map((v) => v.trim()).filter(Boolean);
 
   const groupNames = csv(url.searchParams.getAll("group"));
   const explicitAgents = csv(url.searchParams.getAll("agents").concat(url.searchParams.getAll("agent")));
 
+  // Server name: a single matched, labelled group names the connector.
+  const matchedGroups = groupNames.filter((g) => registry.groups[g]);
+  const serverName =
+    matchedGroups.length === 1 && registry.groupLabels[matchedGroups[0]]
+      ? registry.groupLabels[matchedGroups[0]]
+      : DEFAULT_SERVER_NAME;
+
   if (groupNames.length === 0 && explicitAgents.length === 0) {
-    return { allowedIds: AGENT_IDS, defaultId: registry.default };
+    return { allowedIds: AGENT_IDS, defaultId: registry.default, serverName };
   }
 
   const wanted: string[] = [];
@@ -103,10 +124,10 @@ function resolveScope(url: URL): { allowedIds: string[]; defaultId: string } {
   const allowed = wanted.filter((id) => AGENT_IDS.includes(id));
   if (allowed.length === 0) {
     console.warn(`[mcp] scope (groups=${JSON.stringify(groupNames)}, agents=${JSON.stringify(explicitAgents)}) resolved to no known agents — falling back to all`);
-    return { allowedIds: AGENT_IDS, defaultId: registry.default };
+    return { allowedIds: AGENT_IDS, defaultId: registry.default, serverName };
   }
   const defaultId = allowed.includes(registry.default) ? registry.default : allowed[0];
-  return { allowedIds: allowed, defaultId };
+  return { allowedIds: allowed, defaultId, serverName };
 }
 
 const AGENTS_BY_ID = new Map<string, AgentEntry>(registry.agents.map((a) => [a.id, a]));
@@ -311,7 +332,7 @@ const server = createServer(async (req, res) => {
       respond({
         protocolVersion: "2024-11-05",
         capabilities: { tools: {}, resources: {} },
-        serverInfo: { name: "ClawConnect", version: "0.1.0" },
+        serverInfo: { name: scope.serverName, version: "0.1.0" },
       });
     } else if (isNotification) {
       res.writeHead(202);
