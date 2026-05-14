@@ -47,6 +47,40 @@ export class SessionManager {
     const message = senderName ? `[Message from: ${senderName}]\n\n${body}` : body;
 
     const { sessionKey, migratedFromLegacy } = resolveSessionKey(input.sessionKey, this.agentId);
+
+    // Concurrency guard: a second chat.send to an OpenClaw session that
+    // already has a run in progress aborts the in-flight run, and the new
+    // run resolves with an empty `chat.final` — so BOTH jobs break (the
+    // running one gets truncated, the new one returns completed_no_summary).
+    // Refuse the colliding submit with an actionable error instead.
+    const priorJobId = this.latestJobBySession.get(sessionKey);
+    const priorJob = priorJobId ? this.jobs.get(priorJobId) : undefined;
+    if (priorJob && priorJob.status === "running") {
+      const busyJobId = randomUUID();
+      const busyJob: Job = {
+        jobId: busyJobId,
+        sessionKey,
+        status: "error",
+        error:
+          `A task is already running on this session (jobId ${priorJobId}). ` +
+          `Poll check_task until it finishes before sending another message to this ` +
+          `session, or omit sessionKey to start a fresh thread.`,
+        errorInfo: {
+          category: "unknown",
+          message: "session busy",
+          suggestedRecovery:
+            "Wait for the in-flight job on this session to reach a terminal status, then retry — or start a new thread by omitting sessionKey.",
+        },
+        startedAt: Date.now(),
+        lastEventAt: Date.now(),
+        logs: [],
+        artifacts: emptyArtifacts(),
+      };
+      this.jobs.set(busyJobId, busyJob);
+      logDebug(`[job ${busyJobId.slice(0, 8)}] rejected: session ${sessionKey} busy with job ${priorJobId?.slice(0, 8)}`);
+      return busyJob;
+    }
+
     const jobId = randomUUID();
     const artifacts = emptyArtifacts();
     const now = Date.now();
