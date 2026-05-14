@@ -43,6 +43,7 @@ interface RegistryFile {
   default?: unknown;
   agents?: unknown;
   groups?: unknown;
+  groupLabels?: unknown;
 }
 
 export interface AgentRegistry {
@@ -54,6 +55,13 @@ export interface AgentRegistry {
    * membership is edited server-side without anyone re-pasting their URL.
    */
   groups: Record<string, string[]>;
+  /**
+   * Optional display name per group, surfaced as the MCP server name when a
+   * connection is scoped to that group — so multiple connectors added to the
+   * same client are distinguishable (e.g. "Bakery ClawConnect"). Groups with
+   * no label fall back to the generic "ClawConnect".
+   */
+  groupLabels: Record<string, string>;
   source: "file" | "env";
 }
 
@@ -67,8 +75,26 @@ function readEnvFallback(): AgentRegistry | undefined {
     default: id,
     agents: [{ id, url, password, openclawAgentId }],
     groups: {},
+    groupLabels: {},
     source: "env",
   };
+}
+
+/** Parse the optional `groupLabels` map: group name → display string. */
+function parseGroupLabels(raw: unknown, groupNames: Set<string>): Record<string, string> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const out: Record<string, string> = {};
+  for (const [name, label] of Object.entries(raw as Record<string, unknown>)) {
+    const key = name.trim();
+    if (!key) continue;
+    if (typeof label !== "string" || !label.trim()) continue;
+    if (!groupNames.has(key)) {
+      console.warn(`agents.json: groupLabels references unknown group "${key}" — ignored`);
+      continue;
+    }
+    out[key] = label.trim();
+  }
+  return out;
 }
 
 /**
@@ -162,7 +188,8 @@ export function loadAgentRegistry(): AgentRegistry {
       throw new Error(`agents.json: "default" = "${defaultId}" does not match any agent id`);
     }
     const groups = parseGroups(raw.groups, new Set(agents.map((a) => a.id)));
-    return { default: defaultId, agents, groups, source: "file" };
+    const groupLabels = parseGroupLabels(raw.groupLabels, new Set(Object.keys(groups)));
+    return { default: defaultId, agents, groups, groupLabels, source: "file" };
   }
   const env = readEnvFallback();
   if (env) return env;
