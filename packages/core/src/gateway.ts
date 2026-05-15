@@ -414,6 +414,14 @@ export class OpenClawGateway {
     const hardCapMs = options.hardCapMs ?? (options.attempts ? options.attempts * options.intervalMs : Infinity);
     const idleTimeoutMs = options.idleTimeoutMs ?? Infinity;
     const maxAttempts = options.attempts ?? Number.POSITIVE_INFINITY;
+    // SFR-247 diag — remove after the immediate-exit bug is understood.
+    const diagId = `${sessionKey.slice(-12)}/${Date.now().toString(36).slice(-5)}`;
+    logDebug(
+      `[poll ${diagId}] enter attempts=${options.attempts ?? "∞"} interval=${options.intervalMs}ms ` +
+        `stable=${stableThreshold} idle=${idleTimeoutMs === Infinity ? "∞" : `${idleTimeoutMs / 1000}s`} ` +
+        `hardCap=${hardCapMs === Infinity ? "∞" : `${hardCapMs / 1000}s`} ` +
+        `hasShouldAbort=${typeof options.shouldAbort === "function"}`,
+    );
     // Trailing-assistant text only counts if observed against a transcript
     // whose last entry stayed identical for `stableThreshold` consecutive
     // polls. Returning on the FIRST non-empty trailing-assistant text is
@@ -431,11 +439,23 @@ export class OpenClawGateway {
     // the job in `running` forever.
     let lastChangeAt = Date.now();
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      if (options.shouldAbort?.()) return stableTrailingText;
-      if (Date.now() - startedAt >= hardCapMs) return stableTrailingText;
-      if (Date.now() - lastChangeAt >= idleTimeoutMs) return stableTrailingText;
+      if (options.shouldAbort?.()) {
+        logDebug(`[poll ${diagId}] exit: shouldAbort=true at attempt=${attempt} elapsed=${Date.now() - startedAt}ms`);
+        return stableTrailingText;
+      }
+      if (Date.now() - startedAt >= hardCapMs) {
+        logDebug(`[poll ${diagId}] exit: hardCap at attempt=${attempt} elapsed=${Date.now() - startedAt}ms`);
+        return stableTrailingText;
+      }
+      if (Date.now() - lastChangeAt >= idleTimeoutMs) {
+        logDebug(`[poll ${diagId}] exit: idle at attempt=${attempt} elapsedSinceChange=${Date.now() - lastChangeAt}ms`);
+        return stableTrailingText;
+      }
       if (attempt > 0) await new Promise((r) => setTimeout(r, options.intervalMs));
-      if (options.shouldAbort?.()) return stableTrailingText;
+      if (options.shouldAbort?.()) {
+        logDebug(`[poll ${diagId}] exit: shouldAbort=true after sleep at attempt=${attempt}`);
+        return stableTrailingText;
+      }
       try {
         // maxChars is passed explicitly: the gateway otherwise truncates each
         // history message to 8k chars, which would clip the long reports this
@@ -471,14 +491,28 @@ export class OpenClawGateway {
                 extractAssistantMessageText(lastMsg as Record<string, unknown>).length
               }:${messages.length}`
             : `empty:${messages.length}`;
+        logDebug(
+          `[poll ${diagId}] attempt=${attempt} snapshotKey=${snapshotKey} ` +
+            `trailingLen=${currentTrailingText.length} stableCount=${stableCount} ` +
+            `prevKey=${lastSnapshotKey || "(empty)"}`,
+        );
         if (snapshotKey === lastSnapshotKey) {
           stableCount += 1;
-          // Only commit a candidate text to `stableTrailingText` when the
-          // transcript actually appears stable — never on a one-shot
-          // observation. A snapshot that has held for `stableThreshold`
-          // polls is our signal that the run isn't still writing.
-          if (stableCount >= stableThreshold) {
+          // Stability is only a valid "run is done" signal when the trailing
+          // entry actually has visible assistant text. A stable toolResult /
+          // thinking-only trailing entry just means the agent is between
+          // tool rounds, doing a model_call — which can take 30+ seconds
+          // even on healthy runs. Returning empty here would mark a still-
+          // active run as completed_no_summary.
+          //
+          // Keep polling on stable-but-empty; the idle-timeout (`idleTimeoutMs`,
+          // typically minutes) is the right signal that the agent has gone
+          // silent without ever writing a visible answer.
+          if (stableCount >= stableThreshold && currentTrailingText.length > 0) {
             stableTrailingText = currentTrailingText;
+            logDebug(
+              `[poll ${diagId}] exit: stable+text after ${stableCount} polls, text=${stableTrailingText.length} chars`,
+            );
             return stableTrailingText;
           }
         } else {
