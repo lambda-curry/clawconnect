@@ -359,10 +359,63 @@ export class OpenClawGateway {
    * `chat.history` a few times with backoff rather than reading once.
    */
   private async fetchTranscriptFinalText(sessionKey: string): Promise<string> {
-    const attempts = 6;
-    const delayMs = 700;
-    for (let attempt = 0; attempt < attempts; attempt++) {
-      if (attempt > 0) await new Promise((r) => setTimeout(r, delayMs));
+    return this.pollTranscriptForFinalText(sessionKey, {
+      attempts: 8,
+      intervalMs: 700,
+      // Require 2 consecutive polls with the same transcript tail before
+      // accepting a text. Catches the immediate post-emit write-race (where
+      // the transcript settles within ~1s of chat:final) without returning
+      // a transient line from a still-growing transcript.
+      stableThreshold: 2,
+    });
+  }
+
+  /**
+   * Public version of the transcript fallback, parameterized for use as a
+   * background long-poll. Repeatedly calls `chat.history` and scans the
+   * trailing run of assistant messages; returns the first non-empty text
+   * found, or "" if nothing lands before the attempts run out.
+   *
+   * Used by SessionManager to keep a `completed_no_summary` job in `running`
+   * state for several minutes while watching for a late-arriving final
+   * assistant message. On multi-attempt/compaction-heavy runs, the agent's
+   * real final answer can land minutes after the first lifecycle:end fires
+   * (per-attempt boundary, not run boundary) — this poll outlasts the wait.
+   */
+  async pollTranscriptForFinalText(
+    sessionKey: string,
+    options: {
+      attempts: number;
+      intervalMs: number;
+      shouldAbort?: () => boolean;
+      /**
+       * Number of consecutive polls where the transcript's last entry must be
+       * unchanged before we accept the current trailing-assistant text as
+       * final. Without this, the poll returns on the first non-empty assistant
+       * text it sees — which can be a transient progress line ("I'm tracing
+       * the live wiring now…") that the run keeps writing past. Stability
+       * detection waits for the transcript to stop growing before deciding.
+       * Defaults to 1 (no stability check) for the short-window inline use;
+       * the SessionManager long-poll caller passes a higher value.
+       */
+      stableThreshold?: number;
+    },
+  ): Promise<string> {
+    const stableThreshold = Math.max(1, options.stableThreshold ?? 1);
+    // Trailing-assistant text only counts if observed against a transcript
+    // whose last entry stayed identical for `stableThreshold` consecutive
+    // polls. Returning on the FIRST non-empty trailing-assistant text is
+    // unsafe: a run can flash a short status line ("I'm tracing the live
+    // wiring now…") early, keep working for minutes, and never come back to
+    // the trailing-assistant slot. Stability detection waits for the
+    // transcript to actually stop growing before deciding.
+    let stableTrailingText = "";
+    let lastSnapshotKey = "";
+    let stableCount = 0;
+    for (let attempt = 0; attempt < options.attempts; attempt++) {
+      if (options.shouldAbort?.()) return stableTrailingText;
+      if (attempt > 0) await new Promise((r) => setTimeout(r, options.intervalMs));
+      if (options.shouldAbort?.()) return stableTrailingText;
       try {
         // maxChars is passed explicitly: the gateway otherwise truncates each
         // history message to 8k chars, which would clip the long reports this
@@ -373,24 +426,54 @@ export class OpenClawGateway {
           20_000,
         )) as { messages?: unknown };
         const messages = Array.isArray(res?.messages) ? res.messages : [];
-        // Scan only the trailing run of assistant messages, newest-first. The
-        // final report is the last assistant message; stopping at the first
-        // non-assistant entry (a toolResult) avoids returning stale mid-run
-        // preamble when the real final message hasn't been flushed yet — in
-        // that case the trailing run has no text and we retry.
+        // Trailing-assistant scan, newest-first. Skip assistant messages with
+        // no visible text (thinking-only / tool-only turns) — they don't
+        // contain the report — but DO stop at the first non-assistant entry.
+        // The agent's final visible answer is the last assistant text after
+        // the last tool round; walking past a toolResult into older preamble
+        // would return stale content.
+        let currentTrailingText = "";
         for (let i = messages.length - 1; i >= 0; i--) {
           const m = messages[i];
           if (!m || typeof m !== "object" || (m as Record<string, unknown>).role !== "assistant") {
             break;
           }
           const text = extractAssistantMessageText(m as Record<string, unknown>);
-          if (text) return text;
+          if (text) {
+            currentTrailingText = text;
+            break;
+          }
+        }
+        const lastMsg = messages[messages.length - 1];
+        const snapshotKey =
+          lastMsg && typeof lastMsg === "object"
+            ? `${(lastMsg as Record<string, unknown>).role ?? "?"}:${
+                extractAssistantMessageText(lastMsg as Record<string, unknown>).length
+              }:${messages.length}`
+            : `empty:${messages.length}`;
+        if (snapshotKey === lastSnapshotKey) {
+          stableCount += 1;
+          // Only commit a candidate text to `stableTrailingText` when the
+          // transcript actually appears stable — never on a one-shot
+          // observation. A snapshot that has held for `stableThreshold`
+          // polls is our signal that the run isn't still writing.
+          if (stableCount >= stableThreshold) {
+            stableTrailingText = currentTrailingText;
+            return stableTrailingText;
+          }
+        } else {
+          stableCount = 1;
+          lastSnapshotKey = snapshotKey;
         }
       } catch (err) {
         logDebug("[openclaw-gateway] transcript fallback attempt failed:", (err as Error).message);
       }
     }
-    return "";
+    // Timeout exhausted without observing stability. Return whatever we last
+    // accepted under a stable snapshot (or "" if we never reached stability).
+    // Better to return empty than to return a transient mid-run status line
+    // and convince the caller the run finished when it didn't.
+    return stableTrailingText;
   }
 
   /**

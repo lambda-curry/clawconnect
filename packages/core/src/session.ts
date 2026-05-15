@@ -127,7 +127,18 @@ export class SessionManager {
         (reply) => {
           job.lastEventAt = Date.now();
           const noSummary = !reply || reply === "Stream finished with no response collected.";
-          job.status = noSummary ? "completed_no_summary" : "completed";
+          if (noSummary) {
+            // Don't mark the job terminal yet — on long / compaction-heavy
+            // runs the agent's real final answer can land minutes after the
+            // first lifecycle:end fires (per-attempt boundary, not run
+            // boundary). Keep the job in `running` so the caller's poll loop
+            // stays engaged, and watch the transcript for a late-arriving
+            // assistant message. The full SFR-247 architectural fix lives in
+            // openclaw; this is the client-side mitigation.
+            this.recoverLateFinalText(job, sessionKey, jobId, artifacts);
+            return;
+          }
+          job.status = "completed";
           job.summary = reply;
           extractPatternsFromSummary(artifacts, reply);
           this.sessions.set(sessionKey, {
@@ -156,6 +167,68 @@ export class SessionManager {
       );
 
     return job;
+  }
+
+  /**
+   * SFR-247 client-side mitigation. When the live chat:final event arrives
+   * empty (the gateway's terminal event fired on a per-attempt boundary
+   * before the runner's real final answer was written), poll the persisted
+   * transcript on a long window — up to ~5 minutes at a slow cadence — and
+   * upgrade the job's status to `completed` if a final assistant message
+   * eventually lands. If the poll exhausts, fall through to the original
+   * `completed_no_summary` terminal state. The job stays in `running`
+   * throughout, so callers polling `check_task` stay engaged.
+   */
+  private recoverLateFinalText(
+    job: Job,
+    sessionKey: string,
+    jobId: string,
+    artifacts: Job["artifacts"],
+  ): void {
+    const intervalMs = 15_000;
+    const totalMs = 5 * 60_000;
+    const attempts = Math.ceil(totalMs / intervalMs);
+    logDebug(`[job ${jobId}] no live final text — starting transcript long-poll (≤${totalMs / 1000}s)`);
+    void this.gateway
+      .pollTranscriptForFinalText(sessionKey, {
+        attempts,
+        intervalMs,
+        // Require 3 consecutive same-snapshot polls — 45s of no transcript
+        // growth — before accepting the trailing-assistant text as final.
+        // Without this the poll grabs whatever short status line happens to
+        // be in the trailing slot at first observation, even when the run
+        // keeps writing for minutes and never comes back to assistant-text.
+        stableThreshold: 3,
+        shouldAbort: () => job.status !== "running",
+      })
+      .then((recovered) => {
+        if (job.status !== "running") return;
+        job.lastEventAt = Date.now();
+        if (recovered && recovered.length > 0) {
+          job.status = "completed";
+          job.summary = recovered;
+          extractPatternsFromSummary(artifacts, recovered);
+          this.sessions.set(sessionKey, {
+            sessionKey,
+            lastJobId: jobId,
+            lastSummary: recovered.slice(0, 500),
+            artifacts,
+            recommendedNextStep: deriveNextStep(artifacts, job.status),
+          });
+          logDebug(`[job ${jobId}] late-recovery succeeded via transcript (${recovered.length} chars)`);
+          return;
+        }
+        job.status = "completed_no_summary";
+        job.summary = "Stream finished with no response collected.";
+        this.sessions.set(sessionKey, {
+          sessionKey,
+          lastJobId: jobId,
+          lastSummary: job.summary.slice(0, 500),
+          artifacts,
+          recommendedNextStep: deriveNextStep(artifacts, job.status),
+        });
+        logDebug(`[job ${jobId}] late-recovery exhausted after ${totalMs / 1000}s — completed_no_summary`);
+      });
   }
 
   buildSnapshot(job: Job): JobSnapshot {
