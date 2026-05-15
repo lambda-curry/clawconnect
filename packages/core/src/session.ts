@@ -252,6 +252,51 @@ export class SessionManager {
       });
   }
 
+  /**
+   * Lazy transcript re-check for a terminal job. Called from waitForJob when
+   * a job is already in a non-running, non-success terminal state
+   * (completed_no_summary / error). Reads chat.history for the sessionKey
+   * with a brief stability window — if a substantial trailing-assistant text
+   * now exists that wasn't there when we originally marked the job terminal,
+   * upgrade the job to completed.
+   *
+   * Rate-limited so a poll storm doesn't hammer chat.history: at most one
+   * re-check per RECHECK_COOLDOWN_MS per job. Subsequent waitForJob calls
+   * within the cooldown just return the cached terminal state.
+   *
+   * Uses pollTranscriptForFinalText with small parameters so a single
+   * check_task call isn't blocked for long; the natural polling cadence
+   * gives multiple chances over time.
+   */
+  private async maybeRecoverTerminalJob(job: Job): Promise<void> {
+    const RECHECK_COOLDOWN_MS = 20_000;
+    const last = job.lastRecheckAt ?? 0;
+    if (Date.now() - last < RECHECK_COOLDOWN_MS) return;
+    job.lastRecheckAt = Date.now();
+    const recovered = await this.gateway.pollTranscriptForFinalText(job.sessionKey, {
+      attempts: 4,
+      intervalMs: 3_000,
+      stableThreshold: 2,
+    });
+    if (!recovered) return;
+    job.lastEventAt = Date.now();
+    job.status = "completed";
+    job.summary = recovered;
+    job.error = undefined;
+    job.errorInfo = undefined;
+    extractPatternsFromSummary(job.artifacts, recovered);
+    this.sessions.set(job.sessionKey, {
+      sessionKey: job.sessionKey,
+      lastJobId: job.jobId,
+      lastSummary: recovered.slice(0, 500),
+      artifacts: job.artifacts,
+      recommendedNextStep: deriveNextStep(job.artifacts, "completed"),
+    });
+    logDebug(
+      `[job ${job.jobId}] late-recovery (lazy recheck): upgraded to completed with ${recovered.length} chars`,
+    );
+  }
+
   buildSnapshot(job: Job): JobSnapshot {
     const continuation = this.sessions.get(job.sessionKey);
     return {
@@ -310,6 +355,15 @@ export class SessionManager {
       return undefined;
     }
     if (job.status !== "running") {
+      // SFR-247 lazy recovery: the openclaw session is durable on the same
+      // sessionKey even after restart, and the agent may eventually write a
+      // final assistant text minutes/hours after we marked the job
+      // completed_no_summary or error. Re-read the transcript on each poll
+      // (rate-limited) so a later check_task can surface a late-arriving
+      // response without requiring the caller to re-submit the task.
+      if (job.status === "completed_no_summary" || job.status === "error") {
+        await this.maybeRecoverTerminalJob(job);
+      }
       logDebug(`[waitForJob] job ${job.jobId.slice(0, 8)} already ${job.status}, logs=${job.logs.length}`);
       return job;
     }

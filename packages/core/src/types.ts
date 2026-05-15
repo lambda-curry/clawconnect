@@ -49,6 +49,10 @@ export type Job = {
   lastEventAt: number;
   logs: LogEntry[];
   artifacts: Artifacts;
+  /** Timestamp of the most recent lazy-transcript-recheck for a terminal job
+   *  (completed_no_summary / error). Used to rate-limit re-reads so a poll
+   *  storm doesn't hammer chat.history. Unset until the first recheck. */
+  lastRecheckAt?: number;
 };
 
 export type JobSnapshot = {
