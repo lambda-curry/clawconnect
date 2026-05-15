@@ -185,19 +185,24 @@ export class SessionManager {
     jobId: string,
     artifacts: Job["artifacts"],
   ): void {
-    const intervalMs = 15_000;
-    const totalMs = 5 * 60_000;
+    const intervalMs = 10_000;
+    const totalMs = 10 * 60_000;
     const attempts = Math.ceil(totalMs / intervalMs);
     logDebug(`[job ${jobId}] no live final text — starting transcript long-poll (≤${totalMs / 1000}s)`);
     void this.gateway
       .pollTranscriptForFinalText(sessionKey, {
         attempts,
         intervalMs,
-        // Require 3 consecutive same-snapshot polls — 45s of no transcript
+        // Require 3 consecutive same-snapshot polls — 30s of no transcript
         // growth — before accepting the trailing-assistant text as final.
         // Without this the poll grabs whatever short status line happens to
         // be in the trailing slot at first observation, even when the run
         // keeps writing for minutes and never comes back to assistant-text.
+        //
+        // Window sized to comfortably cover runs where the runner's
+        // overflow→compaction→retry cycle eventually lands a final answer
+        // many minutes after the first lifecycle:end fires. Observed
+        // SFR-247 runs that produced the report 5–7 minutes after chat:final.
         stableThreshold: 3,
         shouldAbort: () => job.status !== "running",
       })
