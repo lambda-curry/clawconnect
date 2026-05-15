@@ -185,8 +185,8 @@ export class OpenClawGateway {
               id: connectId,
               method: "connect",
               params: {
-                minProtocol: 3,
-                maxProtocol: 3,
+                minProtocol: 4,
+                maxProtocol: 4,
                 client: { id: "gateway-client", version: "internal", platform: "node", mode: "backend" },
                 role: "operator",
                 scopes: ["operator.read", "operator.write", "operator.admin"],
