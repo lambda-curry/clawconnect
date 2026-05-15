@@ -185,6 +185,8 @@ With mode="wait" (recommended): blocks for up to 50 seconds and only returns on 
 
 With mode="poll": returns as soon as any new log activity appears. Use this only when you need intermediate progress (live UI), not when you just want the final result.
 
+If a job returns status="completed_no_summary" or status="error" on a long, tool-heavy run, calling check_task again 30–60 seconds later can upgrade it: the openclaw session may have produced the final answer after the connector marked terminal, and a lazy re-read of the transcript on subsequent polls will surface it. Worth one or two follow-up polls before reporting back that no result was produced.
+
 Pass the jobId returned by run_task. Available agents: ${agentList}.`,
     {
       jobId: z.string().optional().describe("The jobId from run_task"),

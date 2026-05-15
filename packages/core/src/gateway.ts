@@ -385,23 +385,35 @@ export class OpenClawGateway {
   async pollTranscriptForFinalText(
     sessionKey: string,
     options: {
-      attempts: number;
+      attempts?: number;
       intervalMs: number;
       shouldAbort?: () => boolean;
       /**
        * Number of consecutive polls where the transcript's last entry must be
        * unchanged before we accept the current trailing-assistant text as
-       * final. Without this, the poll returns on the first non-empty assistant
-       * text it sees — which can be a transient progress line ("I'm tracing
-       * the live wiring now…") that the run keeps writing past. Stability
-       * detection waits for the transcript to stop growing before deciding.
-       * Defaults to 1 (no stability check) for the short-window inline use;
-       * the SessionManager long-poll caller passes a higher value.
+       * final. Defaults to 1 (no stability check) for short inline use; the
+       * SessionManager long-poll caller passes a higher value.
        */
       stableThreshold?: number;
+      /**
+       * If set, the poll exits early when the transcript has been idle (no
+       * snapshot change) for this long even though stability hasn't formally
+       * settled. Catches "agent finished without writing visible text and
+       * went quiet" — there's nothing to wait for.
+       */
+      idleTimeoutMs?: number;
+      /**
+       * Absolute safety cap. The poll always exits after this much wall time
+       * regardless of activity. Defaults to Infinity when `attempts` is also
+       * unset (keep going while the run is actively writing).
+       */
+      hardCapMs?: number;
     },
   ): Promise<string> {
     const stableThreshold = Math.max(1, options.stableThreshold ?? 1);
+    const hardCapMs = options.hardCapMs ?? (options.attempts ? options.attempts * options.intervalMs : Infinity);
+    const idleTimeoutMs = options.idleTimeoutMs ?? Infinity;
+    const maxAttempts = options.attempts ?? Number.POSITIVE_INFINITY;
     // Trailing-assistant text only counts if observed against a transcript
     // whose last entry stayed identical for `stableThreshold` consecutive
     // polls. Returning on the FIRST non-empty trailing-assistant text is
@@ -412,8 +424,16 @@ export class OpenClawGateway {
     let stableTrailingText = "";
     let lastSnapshotKey = "";
     let stableCount = 0;
-    for (let attempt = 0; attempt < options.attempts; attempt++) {
+    const startedAt = Date.now();
+    // Most recent moment the transcript's last entry changed. Used to gate
+    // `idleTimeoutMs`: even if stability hasn't formally hit, give up after
+    // this long without activity so a quiet/abandoned session doesn't pin
+    // the job in `running` forever.
+    let lastChangeAt = Date.now();
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
       if (options.shouldAbort?.()) return stableTrailingText;
+      if (Date.now() - startedAt >= hardCapMs) return stableTrailingText;
+      if (Date.now() - lastChangeAt >= idleTimeoutMs) return stableTrailingText;
       if (attempt > 0) await new Promise((r) => setTimeout(r, options.intervalMs));
       if (options.shouldAbort?.()) return stableTrailingText;
       try {
@@ -464,6 +484,9 @@ export class OpenClawGateway {
         } else {
           stableCount = 1;
           lastSnapshotKey = snapshotKey;
+          // Transcript moved — the run is genuinely active. Reset the idle
+          // clock so we don't give up while it's still producing.
+          lastChangeAt = Date.now();
         }
       } catch (err) {
         logDebug("[openclaw-gateway] transcript fallback attempt failed:", (err as Error).message);

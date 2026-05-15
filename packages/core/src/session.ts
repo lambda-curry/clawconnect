@@ -17,10 +17,11 @@ function readEnvMs(name: string, fallbackMs: number): number {
 // deployment needs different bounds.
 const TIMEOUT_MS = readEnvMs("CLAWCONNECT_TIMEOUT_MS", 30 * 60_000); // 30 min
 // Recovery window after chat() resolves with the sentinel. Adaptive: stops
-// as soon as the transcript stabilizes (stability check in
-// pollTranscriptForFinalText). The cap below is the upper bound for when
-// the run is still actively writing forever.
-const RECOVERY_TIMEOUT_MS = readEnvMs("CLAWCONNECT_RECOVERY_TIMEOUT_MS", 30 * 60_000); // 30 min
+// when the transcript stabilizes (the agent's final answer landed) OR when
+// it's been quiet for `idleTimeoutMs` (the agent went silent without
+// writing visible text). The cap below is the absolute safety ceiling for
+// runs that produce activity forever without ever stabilizing.
+const RECOVERY_TIMEOUT_MS = readEnvMs("CLAWCONNECT_RECOVERY_TIMEOUT_MS", 90 * 60_000); // 90 min
 const POLL_WAIT_MS = 50_000; // max time check waits before returning
 const MAX_LOG_ENTRIES = 200;
 
@@ -202,23 +203,27 @@ export class SessionManager {
     artifacts: Job["artifacts"],
   ): void {
     const intervalMs = 10_000;
-    const totalMs = RECOVERY_TIMEOUT_MS;
-    const attempts = Math.ceil(totalMs / intervalMs);
-    logDebug(`[job ${jobId}] no live final text — starting transcript long-poll (≤${totalMs / 1000}s)`);
+    // The poll auto-extends while the transcript is being actively written —
+    // there's no fixed window. The two natural exits are stability (the run
+    // produced its final answer) and `idleTimeoutMs` (the run went quiet
+    // without writing visible text). `hardCapMs` is a safety net for runs
+    // that produce activity forever without ever stabilizing.
+    const idleTimeoutMs = 5 * 60_000;
+    const hardCapMs = RECOVERY_TIMEOUT_MS;
+    logDebug(
+      `[job ${jobId}] no live final text — starting transcript long-poll ` +
+        `(idle-timeout=${idleTimeoutMs / 1000}s, hard-cap=${hardCapMs / 1000}s)`,
+    );
     void this.gateway
       .pollTranscriptForFinalText(sessionKey, {
-        attempts,
         intervalMs,
+        idleTimeoutMs,
+        hardCapMs,
         // Require 3 consecutive same-snapshot polls — 30s of no transcript
         // growth — before accepting the trailing-assistant text as final.
         // Without this the poll grabs whatever short status line happens to
         // be in the trailing slot at first observation, even when the run
         // keeps writing for minutes and never comes back to assistant-text.
-        //
-        // Window sized to comfortably cover runs where the runner's
-        // overflow→compaction→retry cycle eventually lands a final answer
-        // many minutes after the first lifecycle:end fires. Observed
-        // SFR-247 runs that produced the report 5–7 minutes after chat:final.
         stableThreshold: 3,
         shouldAbort: () => job.status !== "running",
       })
