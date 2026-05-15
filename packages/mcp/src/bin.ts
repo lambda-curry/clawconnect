@@ -1,4 +1,16 @@
 #!/usr/bin/env node
+// Process-level safety net: a bug in a fire-and-forget Promise (e.g., the
+// background long-poll / lazy re-check in SessionManager) would otherwise
+// crash the MCP subprocess. The host (Claude Code) would have to reconnect,
+// and the in-memory jobs map is gone — active runs land at "Task state not
+// found for that session." Log loudly and keep the process up.
+process.on("unhandledRejection", (reason) => {
+  console.error("[mcp] unhandledRejection (kept alive):", reason);
+});
+process.on("uncaughtException", (err) => {
+  console.error("[mcp] uncaughtException (kept alive):", err);
+});
+
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { loadAgentRegistry } from "@clawconnect/core";
 import { createMcpServer } from "./server.ts";

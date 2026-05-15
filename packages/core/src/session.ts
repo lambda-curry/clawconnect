@@ -227,34 +227,58 @@ export class SessionManager {
         stableThreshold: 3,
         shouldAbort: () => job.status !== "running",
       })
-      .then((recovered) => {
-        if (job.status !== "running") return;
-        job.lastEventAt = Date.now();
-        if (recovered && recovered.length > 0) {
-          job.status = "completed";
-          job.summary = recovered;
-          extractPatternsFromSummary(artifacts, recovered);
+      .then(
+        (recovered) => {
+          if (job.status !== "running") return;
+          job.lastEventAt = Date.now();
+          if (recovered && recovered.length > 0) {
+            job.status = "completed";
+            job.summary = recovered;
+            extractPatternsFromSummary(artifacts, recovered);
+            this.sessions.set(sessionKey, {
+              sessionKey,
+              lastJobId: jobId,
+              lastSummary: recovered.slice(0, 500),
+              artifacts,
+              recommendedNextStep: deriveNextStep(artifacts, job.status),
+            });
+            logDebug(`[job ${jobId}] late-recovery succeeded via transcript (${recovered.length} chars)`);
+            return;
+          }
+          job.status = "completed_no_summary";
+          job.summary = "Stream finished with no response collected.";
           this.sessions.set(sessionKey, {
             sessionKey,
             lastJobId: jobId,
-            lastSummary: recovered.slice(0, 500),
+            lastSummary: job.summary.slice(0, 500),
             artifacts,
             recommendedNextStep: deriveNextStep(artifacts, job.status),
           });
-          logDebug(`[job ${jobId}] late-recovery succeeded via transcript (${recovered.length} chars)`);
-          return;
-        }
-        job.status = "completed_no_summary";
-        job.summary = "Stream finished with no response collected.";
-        this.sessions.set(sessionKey, {
-          sessionKey,
-          lastJobId: jobId,
-          lastSummary: job.summary.slice(0, 500),
-          artifacts,
-          recommendedNextStep: deriveNextStep(artifacts, job.status),
-        });
-        logDebug(`[job ${jobId}] late-recovery exhausted after ${totalMs / 1000}s — completed_no_summary`);
-      });
+          logDebug(
+            `[job ${jobId}] late-recovery exhausted (idle-timeout=${idleTimeoutMs / 1000}s, hard-cap=${hardCapMs / 1000}s) — completed_no_summary`,
+          );
+        },
+        (err) => {
+          // Belt-and-suspenders: the recovery path is fire-and-forget, so an
+          // uncaught error here would otherwise propagate as an unhandledRejection,
+          // crash the connector, and force launchd to kickstart — losing the
+          // entire in-memory jobs map. Mark the job terminal cleanly instead.
+          if (job.status !== "running") return;
+          job.lastEventAt = Date.now();
+          job.status = "completed_no_summary";
+          job.summary = "Stream finished with no response collected.";
+          this.sessions.set(sessionKey, {
+            sessionKey,
+            lastJobId: jobId,
+            lastSummary: job.summary.slice(0, 500),
+            artifacts,
+            recommendedNextStep: deriveNextStep(artifacts, job.status),
+          });
+          logDebug(
+            `[job ${jobId}] late-recovery threw: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        },
+      );
   }
 
   /**
@@ -278,11 +302,22 @@ export class SessionManager {
     const last = job.lastRecheckAt ?? 0;
     if (Date.now() - last < RECHECK_COOLDOWN_MS) return;
     job.lastRecheckAt = Date.now();
-    const recovered = await this.gateway.pollTranscriptForFinalText(job.sessionKey, {
-      attempts: 4,
-      intervalMs: 3_000,
-      stableThreshold: 2,
-    });
+    let recovered: string | undefined;
+    try {
+      recovered = await this.gateway.pollTranscriptForFinalText(job.sessionKey, {
+        attempts: 4,
+        intervalMs: 3_000,
+        stableThreshold: 2,
+      });
+    } catch (err) {
+      // Lazy recheck is best-effort. Don't let a transient gateway error or
+      // bug here propagate up into the MCP server's checkTask handler — that
+      // would crash the connector and lose the entire in-memory jobs map.
+      logDebug(
+        `[job ${job.jobId}] lazy-recheck threw: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return;
+    }
     if (!recovered) return;
     job.lastEventAt = Date.now();
     job.status = "completed";

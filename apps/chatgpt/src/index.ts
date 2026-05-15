@@ -1,5 +1,19 @@
 import "dotenv/config";
 import { createServer } from "node:http";
+
+// Process-level safety net: a bug anywhere in a fire-and-forget Promise (e.g.,
+// the background long-poll / lazy re-check in SessionManager) would otherwise
+// kill the connector via unhandledRejection / uncaughtException. launchd
+// kickstarts it back up, but the in-memory jobs map is gone — every active
+// run lands at "Task state not found for that session." Log loudly and keep
+// the process up. See the f873d89 incident (totalMs ReferenceError took the
+// connector down mid-long-poll for an active discovery run).
+process.on("unhandledRejection", (reason) => {
+  console.error("[connector] unhandledRejection (kept alive):", reason);
+});
+process.on("uncaughtException", (err) => {
+  console.error("[connector] uncaughtException (kept alive):", err);
+});
 // import { readFileSync } from "node:fs";  // widget temporarily disabled — see below
 // import { join, dirname } from "node:path";
 // import { fileURLToPath } from "node:url";
