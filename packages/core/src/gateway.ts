@@ -353,28 +353,42 @@ export class OpenClawGateway {
    * purely from its in-memory streaming buffer, which can be cleared mid-run by
    * a compaction-triggered lifecycle error (SFR-247). The transcript is the
    * durable source of truth.
+   *
+   * The terminal `chat` event can arrive before the runner has flushed the
+   * final assistant message to the persisted transcript, so we poll
+   * `chat.history` a few times with backoff rather than reading once.
    */
   private async fetchTranscriptFinalText(sessionKey: string): Promise<string> {
-    try {
-      // maxChars is passed explicitly: the gateway otherwise truncates each
-      // history message to 8k chars, which would clip the long reports this
-      // fallback exists to recover.
-      const res = (await this.sendRpc(
-        "chat.history",
-        { sessionKey, limit: 20, maxChars: 200_000 },
-        20_000,
-      )) as { messages?: unknown };
-      const messages = Array.isArray(res?.messages) ? res.messages : [];
-      for (let i = messages.length - 1; i >= 0; i--) {
-        const m = messages[i];
-        if (!m || typeof m !== "object" || (m as Record<string, unknown>).role !== "assistant") {
-          continue;
+    const attempts = 6;
+    const delayMs = 700;
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      if (attempt > 0) await new Promise((r) => setTimeout(r, delayMs));
+      try {
+        // maxChars is passed explicitly: the gateway otherwise truncates each
+        // history message to 8k chars, which would clip the long reports this
+        // fallback exists to recover.
+        const res = (await this.sendRpc(
+          "chat.history",
+          { sessionKey, limit: 20, maxChars: 200_000 },
+          20_000,
+        )) as { messages?: unknown };
+        const messages = Array.isArray(res?.messages) ? res.messages : [];
+        // Scan only the trailing run of assistant messages, newest-first. The
+        // final report is the last assistant message; stopping at the first
+        // non-assistant entry (a toolResult) avoids returning stale mid-run
+        // preamble when the real final message hasn't been flushed yet — in
+        // that case the trailing run has no text and we retry.
+        for (let i = messages.length - 1; i >= 0; i--) {
+          const m = messages[i];
+          if (!m || typeof m !== "object" || (m as Record<string, unknown>).role !== "assistant") {
+            break;
+          }
+          const text = extractAssistantMessageText(m as Record<string, unknown>);
+          if (text) return text;
         }
-        const text = extractAssistantMessageText(m as Record<string, unknown>);
-        if (text) return text;
+      } catch (err) {
+        logDebug("[openclaw-gateway] transcript fallback attempt failed:", (err as Error).message);
       }
-    } catch (err) {
-      logDebug("[openclaw-gateway] transcript fallback failed:", (err as Error).message);
     }
     return "";
   }
