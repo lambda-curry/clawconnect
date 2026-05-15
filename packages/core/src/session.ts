@@ -4,7 +4,23 @@ import { classifyError } from "./errors.ts";
 import { OpenClawGateway } from "./gateway.ts";
 import type { CheckMode, ContinuationState, Job, JobSnapshot, TaskInput } from "./types.ts";
 
-const TIMEOUT_MS = 600_000; // 10 minutes
+function readEnvMs(name: string, fallbackMs: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallbackMs;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : fallbackMs;
+}
+
+// Live chat() wait. Bumped from the original 10 min so long natural runs
+// (no overflow, no early lifecycle:end) get a chance to resolve normally
+// instead of timing out into job.status = "error". Override via env if a
+// deployment needs different bounds.
+const TIMEOUT_MS = readEnvMs("CLAWCONNECT_TIMEOUT_MS", 30 * 60_000); // 30 min
+// Recovery window after chat() resolves with the sentinel. Adaptive: stops
+// as soon as the transcript stabilizes (stability check in
+// pollTranscriptForFinalText). The cap below is the upper bound for when
+// the run is still actively writing forever.
+const RECOVERY_TIMEOUT_MS = readEnvMs("CLAWCONNECT_RECOVERY_TIMEOUT_MS", 30 * 60_000); // 30 min
 const POLL_WAIT_MS = 50_000; // max time check waits before returning
 const MAX_LOG_ENTRIES = 200;
 
@@ -186,7 +202,7 @@ export class SessionManager {
     artifacts: Job["artifacts"],
   ): void {
     const intervalMs = 10_000;
-    const totalMs = 10 * 60_000;
+    const totalMs = RECOVERY_TIMEOUT_MS;
     const attempts = Math.ceil(totalMs / intervalMs);
     logDebug(`[job ${jobId}] no live final text — starting transcript long-poll (≤${totalMs / 1000}s)`);
     void this.gateway
