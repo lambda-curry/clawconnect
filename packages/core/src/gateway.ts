@@ -99,6 +99,29 @@ interface ChatEventPayload {
   errorMessage?: string;
 }
 
+/**
+ * Extract visible assistant text from a `chat.history` message. The gateway
+ * projects history messages with `content` as either an array of typed blocks
+ * or a plain string, and some carry a top-level `text` instead.
+ */
+function extractAssistantMessageText(message: Record<string, unknown>): string {
+  const content = message.content;
+  if (Array.isArray(content)) {
+    return content
+      .filter(
+        (b): b is { type: string; text?: string } =>
+          Boolean(b) && typeof b === "object" && !Array.isArray(b),
+      )
+      .filter((b) => b.type === "text")
+      .map((b) => b.text ?? "")
+      .join("")
+      .trim();
+  }
+  if (typeof content === "string") return content.trim();
+  if (typeof message.text === "string") return message.text.trim();
+  return "";
+}
+
 // ── Gateway client ───────────────────────────────────────────────────────────
 
 export class OpenClawGateway {
@@ -321,6 +344,42 @@ export class OpenClawGateway {
   }
 
   /**
+   * Fallback for when the live chat stream produces no final text: read the
+   * persisted session transcript via `chat.history` and return the most recent
+   * assistant message's visible text. Returns "" if nothing usable is found or
+   * the RPC fails — callers treat that as "no response collected".
+   *
+   * This exists because the gateway synthesizes the terminal `chat` event
+   * purely from its in-memory streaming buffer, which can be cleared mid-run by
+   * a compaction-triggered lifecycle error (SFR-247). The transcript is the
+   * durable source of truth.
+   */
+  private async fetchTranscriptFinalText(sessionKey: string): Promise<string> {
+    try {
+      // maxChars is passed explicitly: the gateway otherwise truncates each
+      // history message to 8k chars, which would clip the long reports this
+      // fallback exists to recover.
+      const res = (await this.sendRpc(
+        "chat.history",
+        { sessionKey, limit: 20, maxChars: 200_000 },
+        20_000,
+      )) as { messages?: unknown };
+      const messages = Array.isArray(res?.messages) ? res.messages : [];
+      for (let i = messages.length - 1; i >= 0; i--) {
+        const m = messages[i];
+        if (!m || typeof m !== "object" || (m as Record<string, unknown>).role !== "assistant") {
+          continue;
+        }
+        const text = extractAssistantMessageText(m as Record<string, unknown>);
+        if (text) return text;
+      }
+    } catch (err) {
+      logDebug("[openclaw-gateway] transcript fallback failed:", (err as Error).message);
+    }
+    return "";
+  }
+
+  /**
    * Send a message to a session and wait for the final response.
    * Returns the text of the assistant reply.
    */
@@ -402,9 +461,23 @@ export class OpenClawGateway {
             "[openclaw-gateway] final blocks:",
             JSON.stringify(blocks.map((b) => ({ type: b.type, len: (b.text ?? b.thinking ?? "").length }))),
           );
-          // prefer full final message text → last chat delta → agent stream text → generic completion
-          const finalText = extractText(blocks);
-          resolve(finalText || accumulated || agentStreamText || "Stream finished with no response collected.");
+          // prefer full final message text → last chat delta → agent stream text
+          const liveText = extractText(blocks) || accumulated || agentStreamText;
+          if (liveText) {
+            resolve(liveText);
+          } else {
+            // The live stream yielded no final text. On long / compaction-heavy
+            // runs the gateway's chat buffer can be wiped mid-run by a
+            // compaction-triggered lifecycle error, so the real final response
+            // exists only in the persisted transcript (SFR-247). Read it back
+            // before falling through to the generic "no response" sentinel.
+            logDebug("[openclaw-gateway] no live final text — trying transcript fallback");
+            this.fetchTranscriptFinalText(sessionKey).then(
+              (transcriptText) =>
+                resolve(transcriptText || "Stream finished with no response collected."),
+              () => resolve("Stream finished with no response collected."),
+            );
+          }
         } else if (payload.state === "aborted") {
           clearTimeout(timer);
           this.subscribers.delete(subId);
