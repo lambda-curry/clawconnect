@@ -4,6 +4,7 @@ import {
   GatewayPool,
   runTask,
   checkTask,
+  listTasks,
   listSessions,
   agentBlurb,
   agentDescriptor,
@@ -17,6 +18,7 @@ import type {
   CheckTaskResult,
   ContinuationState,
   RunTaskResult,
+  TaskSummary,
 } from "@clawconnect/core";
 
 // ── Provider config ─────────────────────────────────────────────────────────
@@ -36,6 +38,7 @@ export type ProviderConfig = {
   formatRunTask?: (result: RunTaskResult) => McpToolResponse;
   formatCheckTask?: (result: CheckTaskResult) => McpToolResponse;
   formatListSessions?: (result: ContinuationState[]) => McpToolResponse;
+  formatListTasks?: (result: TaskSummary[]) => McpToolResponse;
 };
 
 // ── Default formatters (optimized for agentic use / Claude Code) ────────────
@@ -129,6 +132,12 @@ function defaultFormatListSessions(result: ContinuationState[]): McpToolResponse
   };
 }
 
+function defaultFormatListTasks(result: TaskSummary[]): McpToolResponse {
+  return {
+    content: [{ type: "text", text: JSON.stringify({ tasks: result }) }],
+  };
+}
+
 // ── Server factory ──────────────────────────────────────────────────────────
 
 export function createMcpServer(config: { registry: AgentRegistry; provider?: ProviderConfig }) {
@@ -144,6 +153,7 @@ export function createMcpServer(config: { registry: AgentRegistry; provider?: Pr
   const fmtRun = provider.formatRunTask ?? defaultFormatRunTask;
   const fmtCheck = provider.formatCheckTask ?? defaultFormatCheckTask;
   const fmtList = provider.formatListSessions ?? defaultFormatListSessions;
+  const fmtListTasks = provider.formatListTasks ?? defaultFormatListTasks;
 
   const agentIds = config.registry.agents.map((a) => a.id);
   const agentBlurbs = config.registry.agents.map(agentBlurb).join("; ");
@@ -205,6 +215,59 @@ Pass the jobId returned by run_task. Available agents: ${agentList}.`,
         mode: (mode as CheckMode) ?? defaultMode,
       });
       return fmtCheck(result);
+    },
+  );
+
+  server.tool(
+    "list_tasks",
+    `List manager-friendly task summaries across agents. This is task-level coordination (what needs attention), not low-level session debugging.`,
+    {
+      view: z.enum(["active", "all"]).optional().describe('Optional preset. "active" returns running tasks only.'),
+    },
+    { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+    async ({ view }) => {
+      const tasks = listTasks(pool);
+      const filtered = view === "active" ? tasks.filter((t) => t.status === "running") : tasks;
+      return fmtListTasks(filtered);
+    },
+  );
+
+  server.tool(
+    "get_task",
+    `Inspect a task by taskId/jobId and optionally include updates/logs/artifacts for richer manager status.`,
+    {
+      taskId: z.string().describe("Task identifier (same as jobId in v1)"),
+      include: z.array(z.enum(["summary", "updates", "artifacts", "diagnostics"])).optional(),
+      mode: z.enum(["poll", "wait"]).optional().describe('Uses check semantics: "wait" blocks up to timeout; "poll" returns on updates'),
+    },
+    { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+    async ({ taskId, include, mode }) => {
+      const result = await checkTask(pool, { jobId: taskId, mode: (mode as CheckMode) ?? defaultMode });
+      if (!result.found) return defaultFormatCheckTask(result);
+      const snapshot = result.snapshot;
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              taskId: snapshot.jobId,
+              jobId: snapshot.jobId,
+              sessionKey: snapshot.sessionKey,
+              agent: snapshot.agent,
+              status: snapshot.status,
+              startedAt: snapshot.startedAt,
+              lastEventAt: snapshot.lastEventAt,
+              summary: include?.length ? (include.includes("summary") ? snapshot.summary : undefined) : snapshot.summary,
+              updates: include?.includes("updates") ? snapshot.logs : undefined,
+              artifacts: include?.includes("artifacts") ? snapshot.artifacts : undefined,
+              diagnostics: include?.includes("diagnostics")
+                ? { error: snapshot.error, errorInfo: snapshot.errorInfo, continuationState: snapshot.continuationState }
+                : undefined,
+            }),
+          },
+        ],
+        ...(result.isError ? { isError: true } : {}),
+      };
     },
   );
 

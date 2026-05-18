@@ -4,6 +4,7 @@ import type {
   CheckTaskResult,
   ContinuationState,
   RunTaskResult,
+  TaskSummary,
   TaskInput,
 } from "./types.ts";
 
@@ -18,10 +19,39 @@ export function runTask(pool: GatewayPool, input: TaskInput): RunTaskResult {
   pool.rememberJob(job.jobId, entry.agent.id);
   return {
     jobId: job.jobId,
+    taskId: job.jobId,
     sessionKey: job.sessionKey,
     status: "running",
     agent: entry.agent.id,
   };
+}
+
+function mapTaskStatus(status: string): TaskSummary["status"] {
+  if (status === "running") return "running";
+  if (status === "completed" || status === "completed_no_summary") return "done";
+  return "failed";
+}
+
+export function listTasks(pool: GatewayPool): TaskSummary[] {
+  const items: TaskSummary[] = [];
+  for (const entry of pool.allEntries()) {
+    for (const session of entry.sessions.listSessions()) {
+      const job = entry.sessions.getLatestJobForSession(session.sessionKey);
+      if (!job) continue;
+      items.push({
+        taskId: job.jobId,
+        jobId: job.jobId,
+        sessionKey: job.sessionKey,
+        agent: entry.agent.id,
+        status: mapTaskStatus(job.status),
+        startedAt: job.startedAt,
+        lastEventAt: job.lastEventAt,
+        summary: job.summary ?? session.lastSummary,
+        error: job.error,
+      });
+    }
+  }
+  return items;
 }
 
 function notFound(): CheckTaskResult {
@@ -70,4 +100,3 @@ export function listSessions(pool: GatewayPool): ContinuationState[] {
   }
   return all;
 }
-

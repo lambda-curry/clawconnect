@@ -37,6 +37,7 @@ export type ErrorInfo = {
 export type LogEntry = { ts: number; type: string; text: string };
 
 export type JobStatus = "running" | "completed" | "completed_no_summary" | "error";
+export type TaskStatus = "queued" | "running" | "blocked" | "needs-human" | "done" | "failed";
 
 export type Job = {
   jobId: string;
@@ -111,10 +112,23 @@ export type CheckMode = "poll" | "wait";
 
 export type RunTaskResult = {
   jobId: string;
+  taskId?: string;
   sessionKey: string;
   status: "running";
   /** ClawConnect agent alias the task was dispatched to. */
   agent?: string;
+};
+
+export type TaskSummary = {
+  taskId: string;
+  jobId: string;
+  sessionKey: string;
+  agent?: string;
+  status: TaskStatus;
+  startedAt: number;
+  lastEventAt: number;
+  summary?: string;
+  error?: string;
 };
 
 export type CheckTaskOpts = {
