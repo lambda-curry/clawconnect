@@ -44,6 +44,9 @@ interface RegistryFile {
   agents?: unknown;
   groups?: unknown;
   groupLabels?: unknown;
+  /** Optional Linear Agent Gateway URL (e.g. http://localhost:18820). When set,
+   *  Linear-delegated runs are included in list_tasks / get_task. */
+  linearGatewayUrl?: unknown;
 }
 
 export interface AgentRegistry {
@@ -63,6 +66,9 @@ export interface AgentRegistry {
    */
   groupLabels: Record<string, string>;
   source: "file" | "env";
+  /** Optional Linear Agent Gateway URL. When set, Linear-delegated runs appear
+   *  as first-class tasks in list_tasks / get_task. */
+  linearGatewayUrl?: string;
 }
 
 function readEnvFallback(): AgentRegistry | undefined {
@@ -189,7 +195,10 @@ export function loadAgentRegistry(): AgentRegistry {
     }
     const groups = parseGroups(raw.groups, new Set(agents.map((a) => a.id)));
     const groupLabels = parseGroupLabels(raw.groupLabels, new Set(Object.keys(groups)));
-    return { default: defaultId, agents, groups, groupLabels, source: "file" };
+    const linearGatewayUrl = typeof raw.linearGatewayUrl === "string" && raw.linearGatewayUrl.trim()
+      ? raw.linearGatewayUrl.trim()
+      : undefined;
+    return { default: defaultId, agents, groups, groupLabels, source: "file", linearGatewayUrl };
   }
   const env = readEnvFallback();
   if (env) return env;

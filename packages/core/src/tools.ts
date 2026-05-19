@@ -1,4 +1,5 @@
 import { GatewayPool } from "./gateway-pool.ts";
+import { LinearGatewayClient, createLinearGatewayClient } from "./linear-gateway.ts";
 import type {
   CheckTaskOpts,
   CheckTaskResult,
@@ -9,6 +10,7 @@ import type {
   TaskSummary,
   TaskInput,
 } from "./types.ts";
+import type { AgentRegistry } from "./agent-registry.ts";
 
 export function runTask(pool: GatewayPool, input: TaskInput): RunTaskResult {
   const entry = pool.forAgent(input.agent);
@@ -61,10 +63,26 @@ export function listTasks(pool: GatewayPool): TaskSummary[] {
         lastEventAt: job.lastEventAt,
         summary: job.summary,
         error: job.error,
+        source: "openclaw",
       });
     }
   }
   return items;
+}
+
+/**
+ * Fetch Linear Gateway task summaries and merge into the OpenClaw-derived list.
+ * Non-blocking on errors — returns the OpenClaw-only list if the gateway is
+ * unreachable or not configured.
+ */
+export async function listTasksWithLinear(
+  pool: GatewayPool,
+  linearClient: LinearGatewayClient | undefined,
+): Promise<TaskSummary[]> {
+  const openclawTasks = listTasks(pool);
+  if (!linearClient) return openclawTasks;
+  const linearTasks = await linearClient.fetchTaskSummaries();
+  return [...openclawTasks, ...linearTasks];
 }
 
 function notFound(): CheckTaskResult {
@@ -85,23 +103,48 @@ export async function checkTask(pool: GatewayPool, opts: CheckTaskOpts): Promise
       }
     }
   }
-  if (!entry) return notFound();
+  if (entry) {
+    const job = await entry.sessions.waitForJob(
+      opts.jobId,
+      opts.knownLogCount ?? 0,
+      opts.sessionKey,
+      opts.mode ?? "poll",
+    );
+    if (job) {
+      const snapshot = entry.sessions.buildSnapshot(job);
+      return {
+        found: true,
+        snapshot: { ...snapshot, agent: entry.agent.id },
+        isTerminal: job.status !== "running",
+        isError: job.status === "error",
+      };
+    }
+  }
+  return notFound();
+}
 
-  const job = await entry.sessions.waitForJob(
-    opts.jobId,
-    opts.knownLogCount ?? 0,
-    opts.sessionKey,
-    opts.mode ?? "poll",
-  );
-  if (!job) return notFound();
+/**
+ * checkTask that also looks up Linear Gateway runs when the OpenClaw pool
+ * has no match. Falls back to the Linear Gateway for the given jobId/
+ * sessionKey (which for Linear tasks IS the agentSessionId).
+ */
+export async function checkTaskWithLinear(
+  pool: GatewayPool,
+  opts: CheckTaskOpts,
+  linearClient: LinearGatewayClient | undefined,
+): Promise<CheckTaskResult> {
+  // Try OpenClaw pool first
+  const result = await checkTask(pool, opts);
+  if (result.found) return result;
 
-  const snapshot = entry.sessions.buildSnapshot(job);
-  return {
-    found: true,
-    snapshot: { ...snapshot, agent: entry.agent.id },
-    isTerminal: job.status !== "running",
-    isError: job.status === "error",
-  };
+  // Fall back to Linear Gateway
+  if (!linearClient) return notFound();
+
+  // For Linear tasks, jobId is the agentSessionId
+  const lookupId = opts.jobId ?? opts.sessionKey;
+  if (!lookupId) return notFound();
+
+  return linearClient.fetchCheckTask(lookupId);
 }
 
 export function listSessions(pool: GatewayPool): ContinuationState[] {
@@ -149,4 +192,27 @@ export function getSession(
     ...(mode === "snapshot" ? {} : { events }),
     ...(mode === "tail" ? { nextAfter: after + events.length } : {}),
   };
+}
+
+/**
+ * getSession that also checks the Linear Gateway for sessions not found
+ * in the OpenClaw pool.
+ */
+export async function getSessionWithLinear(
+  pool: GatewayPool,
+  opts: { sessionId: string; mode?: SessionInspectMode; limit?: number; after?: number; agent?: string },
+  linearClient: LinearGatewayClient | undefined,
+): Promise<SessionInspectResult> {
+  // Try OpenClaw pool first
+  const result = getSession(pool, opts);
+  if (result.found) return result;
+
+  // Fall back to Linear Gateway
+  if (!linearClient) return { found: false };
+  return linearClient.fetchSession(
+    opts.sessionId,
+    opts.mode ?? "snapshot",
+    opts.limit,
+    opts.after,
+  );
 }

@@ -3,11 +3,13 @@ export { SessionManager } from "./session.ts";
 export { GatewayPool } from "./gateway-pool.ts";
 export { loadAgentRegistry, resolveAgent, REGISTRY_PATH, agentBlurb, agentDescriptor } from "./agent-registry.ts";
 export type { AgentEntry, AgentRegistry } from "./agent-registry.ts";
+export { LinearGatewayClient, createLinearGatewayClient } from "./linear-gateway.ts";
+export type { LinearSessionTraceSummary, LinearSessionTrace, LinearTraceEntry } from "./linear-gateway.ts";
 export { searchMemory, getMemory, listCollections, DEFAULT_QMD_URL } from "./memory.ts";
 export type { MemorySearchHit, MemorySearchResult, GetMemoryResult, SearchMemoryOpts, CollectionListing } from "./memory.ts";
 export { classifyError } from "./errors.ts";
 export { emptyArtifacts, processEvent, extractPatternsFromSummary, deriveNextStep } from "./artifacts.ts";
-export { runTask, checkTask, listSessions, listTasks, getSession } from "./tools.ts";
+export { runTask, checkTask, checkTaskWithLinear, listSessions, listTasks, listTasksWithLinear, getSession, getSessionWithLinear } from "./tools.ts";
 export type {
   Artifacts,
   CheckMode,

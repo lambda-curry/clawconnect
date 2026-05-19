@@ -4,14 +4,18 @@ import {
   GatewayPool,
   runTask,
   checkTask,
+  checkTaskWithLinear,
   getSession,
+  getSessionWithLinear,
   listTasks,
+  listTasksWithLinear,
   listSessions,
   agentBlurb,
   agentDescriptor,
   searchMemory,
   getMemory,
   listCollections,
+  createLinearGatewayClient,
 } from "@clawconnect/core";
 import type {
   AgentRegistry,
@@ -21,6 +25,7 @@ import type {
   RunTaskResult,
   TaskSummary,
   SessionInspectResult,
+  LinearGatewayClient,
 } from "@clawconnect/core";
 
 /** Non-terminal task statuses — tasks that still need attention. */
@@ -167,6 +172,11 @@ export function createMcpServer(config: { registry: AgentRegistry; provider?: Pr
   });
 
   const pool = new GatewayPool(config.registry);
+  const linearClient = createLinearGatewayClient(config.registry);
+
+  if (linearClient) {
+    console.error(`[ClawConnect] Linear Gateway integration enabled: ${config.registry.linearGatewayUrl}`);
+  }
 
   const provider = config.provider ?? {};
   const defaultMode = provider.defaultCheckMode ?? "wait";
@@ -228,13 +238,13 @@ Pass the jobId returned by run_task. Available agents: ${agentList}.`,
     },
     { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
     async ({ jobId, sessionKey, agent, knownLogCount, mode }) => {
-      const result = await checkTask(pool, {
+      const result = await checkTaskWithLinear(pool, {
         jobId,
         sessionKey,
         agent,
         knownLogCount,
         mode: (mode as CheckMode) ?? defaultMode,
-      });
+      }, linearClient);
       return fmtCheck(result);
     },
   );
@@ -247,7 +257,7 @@ Pass the jobId returned by run_task. Available agents: ${agentList}.`,
     },
     { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
     async ({ view }) => {
-      const tasks = listTasks(pool);
+      const tasks = await listTasksWithLinear(pool, linearClient);
       const filtered = view === "active" ? tasks.filter((t) => isActiveTaskStatus(t.status)) : tasks;
       return fmtListTasks(filtered);
     },
@@ -268,7 +278,7 @@ Pass the jobId returned by run_task. Available agents: ${agentList}.`,
     },
     { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
     async ({ taskId, detail, mode }) => {
-      const result = await checkTask(pool, { jobId: taskId, mode: (mode as CheckMode) ?? defaultMode });
+      const result = await checkTaskWithLinear(pool, { jobId: taskId, mode: (mode as CheckMode) ?? defaultMode }, linearClient);
       if (!result.found) return defaultFormatCheckTask(result);
       const snapshot = result.snapshot;
       const d = detail ?? "summary";
@@ -312,7 +322,7 @@ Pass the jobId returned by run_task. Available agents: ${agentList}.`,
     },
     { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
     async ({ sessionId, mode, limit, after, agent }) => {
-      const result = getSession(pool, { sessionId, mode, limit, after, agent });
+      const result = await getSessionWithLinear(pool, { sessionId, mode, limit, after, agent }, linearClient);
       return fmtGetSession(result);
     },
   );

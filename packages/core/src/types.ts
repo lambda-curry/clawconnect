@@ -129,6 +129,8 @@ export type TaskSummary = {
   lastEventAt: number;
   summary?: string;
   error?: string;
+  /** Task origin — "openclaw" for direct OpenClaw runs, "linear" for Linear Gateway delegated runs. */
+  source?: "openclaw" | "linear";
 };
 
 export type SessionInspectMode = "snapshot" | "events" | "tail";
