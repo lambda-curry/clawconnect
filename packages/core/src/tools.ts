@@ -31,6 +31,9 @@ export function runTask(pool: GatewayPool, input: TaskInput): RunTaskResult {
 function mapTaskStatus(status: string): TaskSummary["status"] {
   if (status === "running") return "running";
   if (status === "completed" || status === "completed_no_summary") return "done";
+  if (status === "needs-human") return "needs-human";
+  if (status === "blocked") return "blocked";
+  if (status === "queued") return "queued";
   return "failed";
 }
 

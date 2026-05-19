@@ -23,6 +23,18 @@ import type {
   SessionInspectResult,
 } from "@clawconnect/core";
 
+/** Non-terminal task statuses — tasks that still need attention. */
+const ACTIVE_STATUSES: ReadonlySet<TaskSummary["status"]> = new Set([
+  "queued",
+  "running",
+  "blocked",
+  "needs-human",
+]);
+
+function isActiveTaskStatus(status: TaskSummary["status"]): boolean {
+  return ACTIVE_STATUSES.has(status);
+}
+
 // ── Provider config ─────────────────────────────────────────────────────────
 
 type McpToolResponse = {
@@ -231,12 +243,12 @@ Pass the jobId returned by run_task. Available agents: ${agentList}.`,
     "list_tasks",
     `List manager-friendly task summaries across agents. This is task-level coordination (what needs attention), not low-level session debugging.`,
     {
-      view: z.enum(["active", "all"]).optional().describe('Optional preset. "active" returns running tasks only.'),
+      view: z.enum(["active", "all"]).optional().describe('Optional preset. "active" returns non-terminal tasks (queued, running, blocked, needs-human) that still need attention.'),
     },
     { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
     async ({ view }) => {
       const tasks = listTasks(pool);
-      const filtered = view === "active" ? tasks.filter((t) => t.status === "running") : tasks;
+      const filtered = view === "active" ? tasks.filter((t) => isActiveTaskStatus(t.status)) : tasks;
       return fmtListTasks(filtered);
     },
   );
