@@ -4,6 +4,8 @@ import {
   GatewayPool,
   runTask,
   checkTask,
+  getSession,
+  listTasks,
   listSessions,
   agentBlurb,
   agentDescriptor,
@@ -17,7 +19,21 @@ import type {
   CheckTaskResult,
   ContinuationState,
   RunTaskResult,
+  TaskSummary,
+  SessionInspectResult,
 } from "@clawconnect/core";
+
+/** Non-terminal task statuses — tasks that still need attention. */
+const ACTIVE_STATUSES: ReadonlySet<TaskSummary["status"]> = new Set([
+  "queued",
+  "running",
+  "blocked",
+  "needs-human",
+]);
+
+function isActiveTaskStatus(status: TaskSummary["status"]): boolean {
+  return ACTIVE_STATUSES.has(status);
+}
 
 // ── Provider config ─────────────────────────────────────────────────────────
 
@@ -36,6 +52,8 @@ export type ProviderConfig = {
   formatRunTask?: (result: RunTaskResult) => McpToolResponse;
   formatCheckTask?: (result: CheckTaskResult) => McpToolResponse;
   formatListSessions?: (result: ContinuationState[]) => McpToolResponse;
+  formatListTasks?: (result: TaskSummary[]) => McpToolResponse;
+  formatGetSession?: (result: SessionInspectResult) => McpToolResponse;
 };
 
 // ── Default formatters (optimized for agentic use / Claude Code) ────────────
@@ -129,6 +147,17 @@ function defaultFormatListSessions(result: ContinuationState[]): McpToolResponse
   };
 }
 
+function defaultFormatListTasks(result: TaskSummary[]): McpToolResponse {
+  return {
+    content: [{ type: "text", text: JSON.stringify({ tasks: result }) }],
+  };
+}
+
+function defaultFormatGetSession(result: SessionInspectResult): McpToolResponse {
+  if (!result.found) return { content: [{ type: "text", text: "Session not found." }], isError: true };
+  return { content: [{ type: "text", text: JSON.stringify(result) }] };
+}
+
 // ── Server factory ──────────────────────────────────────────────────────────
 
 export function createMcpServer(config: { registry: AgentRegistry; provider?: ProviderConfig }) {
@@ -144,6 +173,8 @@ export function createMcpServer(config: { registry: AgentRegistry; provider?: Pr
   const fmtRun = provider.formatRunTask ?? defaultFormatRunTask;
   const fmtCheck = provider.formatCheckTask ?? defaultFormatCheckTask;
   const fmtList = provider.formatListSessions ?? defaultFormatListSessions;
+  const fmtListTasks = provider.formatListTasks ?? defaultFormatListTasks;
+  const fmtGetSession = provider.formatGetSession ?? defaultFormatGetSession;
 
   const agentIds = config.registry.agents.map((a) => a.id);
   const agentBlurbs = config.registry.agents.map(agentBlurb).join("; ");
@@ -205,6 +236,84 @@ Pass the jobId returned by run_task. Available agents: ${agentList}.`,
         mode: (mode as CheckMode) ?? defaultMode,
       });
       return fmtCheck(result);
+    },
+  );
+
+  server.tool(
+    "list_tasks",
+    `List manager-friendly task summaries across agents. This is task-level coordination (what needs attention), not low-level session debugging.`,
+    {
+      view: z.enum(["active", "all"]).optional().describe('Optional preset. "active" returns non-terminal tasks (queued, running, blocked, needs-human) that still need attention.'),
+    },
+    { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+    async ({ view }) => {
+      const tasks = listTasks(pool);
+      const filtered = view === "active" ? tasks.filter((t) => isActiveTaskStatus(t.status)) : tasks;
+      return fmtListTasks(filtered);
+    },
+  );
+
+  server.tool(
+    "get_task",
+    `Inspect a task by taskId/jobId with a detail preset controlling which fields are returned.`,
+    {
+      taskId: z.string().describe("Task identifier (same as jobId in v1)"),
+      detail: z
+        .enum(["core", "summary", "updates", "artifacts", "diagnostics", "full", "fullWithDiagnostics"])
+        .optional()
+        .describe(
+          "Detail preset. Omit for summary. core=ids+status only; summary=+summary; updates=+logs; artifacts=+artifacts; diagnostics=+error info; full=core+summary+updates+artifacts; fullWithDiagnostics=full+diagnostics",
+        ),
+      mode: z.enum(["poll", "wait"]).optional().describe('Uses check semantics: "wait" blocks up to timeout; "poll" returns on updates'),
+    },
+    { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+    async ({ taskId, detail, mode }) => {
+      const result = await checkTask(pool, { jobId: taskId, mode: (mode as CheckMode) ?? defaultMode });
+      if (!result.found) return defaultFormatCheckTask(result);
+      const snapshot = result.snapshot;
+      const d = detail ?? "summary";
+      const has = (field: string) => d === field || d === "full" || d === "fullWithDiagnostics";
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              taskId: snapshot.jobId,
+              jobId: snapshot.jobId,
+              sessionKey: snapshot.sessionKey,
+              agent: snapshot.agent,
+              status: snapshot.status,
+              startedAt: snapshot.startedAt,
+              lastEventAt: snapshot.lastEventAt,
+              summary: d === "summary" || has("summary") ? snapshot.summary : undefined,
+              updates: has("updates") ? snapshot.logs : undefined,
+              artifacts: has("artifacts") ? snapshot.artifacts : undefined,
+              diagnostics:
+                d === "diagnostics" || d === "fullWithDiagnostics"
+                  ? { error: snapshot.error, errorInfo: snapshot.errorInfo, continuationState: snapshot.continuationState }
+                  : undefined,
+            }),
+          },
+        ],
+        ...(result.isError ? { isError: true } : {}),
+      };
+    },
+  );
+
+  server.tool(
+    "get_session",
+    `Inspect one session for debugging ("what exactly happened?"). Use mode="snapshot" for current state, "events" for bounded event retrieval, or "tail" for cursor-based tailing.`,
+    {
+      sessionId: z.string().describe("Session key to inspect"),
+      mode: z.enum(["snapshot", "events", "tail"]).optional(),
+      limit: z.number().int().positive().max(200).optional().describe("Max events to return for events/tail modes"),
+      after: z.number().int().nonnegative().optional().describe("Zero-based event cursor; for tail mode use returned nextAfter"),
+      agent: agentEnum.optional().describe(`${agentDescription} Usually inferred from sessionId.`),
+    },
+    { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+    async ({ sessionId, mode, limit, after, agent }) => {
+      const result = getSession(pool, { sessionId, mode, limit, after, agent });
+      return fmtGetSession(result);
     },
   );
 

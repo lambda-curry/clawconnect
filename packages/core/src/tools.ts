@@ -4,6 +4,9 @@ import type {
   CheckTaskResult,
   ContinuationState,
   RunTaskResult,
+  SessionInspectMode,
+  SessionInspectResult,
+  TaskSummary,
   TaskInput,
 } from "./types.ts";
 
@@ -18,10 +21,50 @@ export function runTask(pool: GatewayPool, input: TaskInput): RunTaskResult {
   pool.rememberJob(job.jobId, entry.agent.id);
   return {
     jobId: job.jobId,
+    taskId: job.jobId,
     sessionKey: job.sessionKey,
     status: "running",
     agent: entry.agent.id,
   };
+}
+
+function mapTaskStatus(status: string): TaskSummary["status"] {
+  if (status === "running") return "running";
+  if (status === "completed" || status === "completed_no_summary") return "done";
+  if (status === "needs-human") return "needs-human";
+  if (status === "blocked") return "blocked";
+  if (status === "queued") return "queued";
+  return "failed";
+}
+
+function deriveTaskStatus(job: { status: string; error?: string; artifacts: { needsHumanDecision: boolean } }): TaskSummary["status"] {
+  if (job.status === "running") return "running";
+  if (job.status === "completed" || job.status === "completed_no_summary") return "done";
+  if (job.artifacts.needsHumanDecision) return "needs-human";
+  if (job.error?.includes("session busy")) return "blocked";
+  return mapTaskStatus(job.status);
+}
+
+export function listTasks(pool: GatewayPool): TaskSummary[] {
+  const items: TaskSummary[] = [];
+  for (const entry of pool.allEntries()) {
+    for (const session of entry.sessions.listSessions()) {
+      const job = entry.sessions.getLatestJobForSession(session.sessionKey);
+      if (!job) continue;
+      items.push({
+        taskId: job.jobId,
+        jobId: job.jobId,
+        sessionKey: job.sessionKey,
+        agent: entry.agent.id,
+        status: deriveTaskStatus(job),
+        startedAt: job.startedAt,
+        lastEventAt: job.lastEventAt,
+        summary: job.summary,
+        error: job.error,
+      });
+    }
+  }
+  return items;
 }
 
 function notFound(): CheckTaskResult {
@@ -71,3 +114,39 @@ export function listSessions(pool: GatewayPool): ContinuationState[] {
   return all;
 }
 
+export function getSession(
+  pool: GatewayPool,
+  opts: { sessionId: string; mode?: SessionInspectMode; limit?: number; after?: number; agent?: string },
+): SessionInspectResult {
+  let entry = opts.agent ? pool.forAgent(opts.agent) : pool.forSession(opts.sessionId);
+  if (!entry) {
+    for (const candidate of pool.allEntries()) {
+      if (candidate.sessions.getSessionState(opts.sessionId)) {
+        entry = candidate;
+        break;
+      }
+    }
+  }
+  if (!entry) return { found: false };
+  const job = entry.sessions.getLatestJobForSession(opts.sessionId);
+  if (!job) return { found: false };
+
+  const mode = opts.mode ?? "snapshot";
+  const limit = Math.max(1, Math.min(200, opts.limit ?? 50));
+  const after = Math.max(0, opts.after ?? 0);
+  const events = job.logs.slice(after, after + limit);
+
+  return {
+    found: true,
+    sessionKey: job.sessionKey,
+    agent: entry.agent.id,
+    jobId: job.jobId,
+    status: job.status,
+    startedAt: job.startedAt,
+    lastEventAt: job.lastEventAt,
+    summary: job.summary,
+    error: job.error,
+    ...(mode === "snapshot" ? {} : { events }),
+    ...(mode === "tail" ? { nextAfter: after + events.length } : {}),
+  };
+}

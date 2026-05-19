@@ -24,13 +24,15 @@ import {
   runTask,
   checkTask,
   listSessions,
+  listTasks,
+  getSession,
   agentBlurb,
   agentDescriptor,
   searchMemory,
   getMemory,
   listCollections,
 } from "@clawconnect/core";
-import type { AgentEntry, AgentRegistry, CheckMode } from "@clawconnect/core";
+import type { AgentEntry, AgentRegistry, CheckMode, TaskSummary } from "@clawconnect/core";
 
 // Widget UI is temporarily disabled to keep the surface focused on
 // run_task / check_task. Re-enable by restoring the widget imports and
@@ -143,6 +145,14 @@ function resolveScope(url: URL): Scope {
   const defaultId = allowed.includes(registry.default) ? registry.default : allowed[0];
   return { allowedIds: allowed, defaultId, serverName };
 }
+
+/** Non-terminal task statuses — tasks that still need attention. */
+const ACTIVE_STATUSES: ReadonlySet<TaskSummary["status"]> = new Set([
+  "queued",
+  "running",
+  "blocked",
+  "needs-human",
+]);
 
 const AGENTS_BY_ID = new Map<string, AgentEntry>(registry.agents.map((a) => [a.id, a]));
 
@@ -295,6 +305,64 @@ Pass the jobId returned by run_task. Available agents: ${list}.`,
       description: `List the QMD memory collections this connection can search. Each entry shows which agents grant access. Useful when you want to scope a search_memory call to a particular collection.`,
       inputSchema: { type: "object", properties: {} },
       annotations: { title: "List Collections", readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+    },
+    {
+      name: "list_tasks",
+      description: `List manager-friendly task summaries across agents. This is task-level coordination (what needs attention), not low-level session debugging.`,
+      inputSchema: {
+        type: "object",
+        properties: {
+          view: {
+            type: "string",
+            enum: ["active", "all"],
+            description: 'Optional preset. "active" returns non-terminal tasks (queued, running, blocked, needs-human) that still need attention.',
+          },
+        },
+      },
+      annotations: { title: "List Tasks", readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+    },
+    {
+      name: "get_task",
+      description: `Inspect a task by taskId/jobId with a detail preset controlling which fields are returned.`,
+      inputSchema: {
+        type: "object",
+        properties: {
+          taskId: { type: "string", description: "Task identifier (same as jobId in v1)" },
+          detail: {
+            type: "string",
+            enum: ["core", "summary", "updates", "artifacts", "diagnostics", "full", "fullWithDiagnostics"],
+            description:
+              'Detail preset. Omit for summary. core=ids+status only; summary=+summary; updates=+logs; artifacts=+artifacts; diagnostics=+error info; full=core+summary+updates+artifacts; fullWithDiagnostics=full+diagnostics',
+          },
+          mode: {
+            type: "string",
+            enum: ["poll", "wait"],
+            description: 'Uses check semantics: "wait" blocks up to timeout; "poll" returns on updates',
+          },
+        },
+        required: ["taskId"],
+      },
+      annotations: { title: "Get Task", readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+    },
+    {
+      name: "get_session",
+      description: `Inspect one session for debugging ("what exactly happened?"). Use mode="snapshot" for current state, "events" for bounded event retrieval, or "tail" for cursor-based tailing.`,
+      inputSchema: {
+        type: "object",
+        properties: {
+          sessionId: { type: "string", description: "Session key to inspect" },
+          mode: {
+            type: "string",
+            enum: ["snapshot", "events", "tail"],
+            description: "Inspection mode: snapshot (default), events, or tail",
+          },
+          limit: { type: "number", description: "Max events to return for events/tail modes (1–200)" },
+          after: { type: "number", description: "Zero-based event cursor; for tail mode use returned nextAfter" },
+          agent: { ...agentProp, description: `${agentProp.description} Usually inferred from sessionId.` },
+        },
+        required: ["sessionId"],
+      },
+      annotations: { title: "Get Session", readOnlyHint: true, idempotentHint: true, openWorldHint: false },
     },
   ];
 }
@@ -515,6 +583,96 @@ const server = createServer(async (req, res) => {
           content: [{ type: "text", text: JSON.stringify({ collections }) }],
           structuredContent: { collections },
         });
+      } else if (name === "list_tasks") {
+        const tasks = listTasks(pool);
+        const scoped = tasks.filter((t) => !t.agent || scope.allowedIds.includes(t.agent));
+        const view = typeof args.view === "string" ? args.view : undefined;
+        const filtered = view === "active" ? scoped.filter((t) => ACTIVE_STATUSES.has(t.status)) : scoped;
+        respond({
+          content: [{ type: "text", text: JSON.stringify({ tasks: filtered }) }],
+          structuredContent: { tasks: filtered },
+        });
+      } else if (name === "get_task") {
+        const taskId = typeof args.taskId === "string" ? args.taskId : "";
+        const detail = typeof args.detail === "string" ? args.detail : undefined;
+        const mode = (typeof args.mode === "string" ? args.mode : undefined) as CheckMode | undefined;
+        const result = await checkTask(pool, { jobId: taskId, mode: mode ?? "wait" });
+
+        if (!result.found) {
+          respond({
+            content: [{ type: "text", text: "Task not found. The server may have restarted." }],
+            structuredContent: { taskId, status: "error", error: "Task not found." },
+            isError: true,
+          });
+        } else if (result.snapshot.agent && !scope.allowedIds.includes(result.snapshot.agent)) {
+          respond({
+            content: [{ type: "text", text: "Task not found." }],
+            structuredContent: { taskId, status: "error", error: "Task not found." },
+            isError: true,
+          });
+        } else {
+          const s = result.snapshot;
+          const d = detail ?? "summary";
+          const has = (field: string) => d === field || d === "full" || d === "fullWithDiagnostics";
+          const payload: Record<string, unknown> = {
+            taskId: s.jobId,
+            jobId: s.jobId,
+            sessionKey: s.sessionKey,
+            agent: s.agent,
+            status: s.status,
+            startedAt: s.startedAt,
+            lastEventAt: s.lastEventAt,
+          };
+          if (d === "summary" || has("summary")) {
+            payload.summary = s.summary;
+          }
+          if (has("updates")) {
+            payload.updates = s.logs;
+          }
+          if (has("artifacts")) {
+            payload.artifacts = s.artifacts;
+          }
+          if (d === "diagnostics" || d === "fullWithDiagnostics") {
+            payload.diagnostics = { error: s.error, errorInfo: s.errorInfo, continuationState: s.continuationState };
+          }
+          respond({
+            content: [{ type: "text", text: JSON.stringify(payload) }],
+            structuredContent: payload,
+            ...(result.isError ? { isError: true } : {}),
+          });
+        }
+      } else if (name === "get_session") {
+        const sessionId = typeof args.sessionId === "string" ? args.sessionId : "";
+        const sessionMode = typeof args.mode === "string" ? args.mode : undefined;
+        const limit = args.limit !== undefined ? Number(args.limit) : undefined;
+        const after = args.after !== undefined ? Number(args.after) : undefined;
+        const sessionAgent = typeof args.agent === "string" && args.agent ? args.agent : undefined;
+
+        if (sessionAgent && !scope.allowedIds.includes(sessionAgent)) {
+          respond({
+            content: [{ type: "text", text: `Agent "${sessionAgent}" is not available on this connection.` }],
+            isError: true,
+          });
+        } else {
+          const result = getSession(pool, { sessionId, mode: sessionMode as any, limit, after, agent: sessionAgent });
+          if (!result.found) {
+            respond({
+              content: [{ type: "text", text: "Session not found." }],
+              structuredContent: { sessionId, found: false },
+              isError: true,
+            });
+          } else if (result.agent && !scope.allowedIds.includes(result.agent)) {
+            respond({
+              content: [{ type: "text", text: "Session not found." }],
+              isError: true,
+            });
+          } else {
+            respond({
+              content: [{ type: "text", text: JSON.stringify(result) }],
+              structuredContent: result,
+            });
+          }
+        }
       } else {
         respondError(-32601, `Unknown tool: ${name}`);
       }
