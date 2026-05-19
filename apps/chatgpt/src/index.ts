@@ -323,15 +323,16 @@ Pass the jobId returned by run_task. Available agents: ${list}.`,
     },
     {
       name: "get_task",
-      description: `Inspect a task by taskId/jobId and optionally include updates/logs/artifacts for richer manager status.`,
+      description: `Inspect a task by taskId/jobId with a detail preset controlling which fields are returned.`,
       inputSchema: {
         type: "object",
         properties: {
           taskId: { type: "string", description: "Task identifier (same as jobId in v1)" },
-          include: {
-            type: "array",
-            items: { type: "string", enum: ["summary", "updates", "artifacts", "diagnostics"] },
-            description: 'Which extra fields to include beyond core fields. Omit for summary by default. Pass [] for core fields only.',
+          detail: {
+            type: "string",
+            enum: ["core", "summary", "updates", "artifacts", "diagnostics", "full", "fullWithDiagnostics"],
+            description:
+              'Detail preset. Omit for summary. core=ids+status only; summary=+summary; updates=+logs; artifacts=+artifacts; diagnostics=+error info; full=core+summary+updates+artifacts; fullWithDiagnostics=full+diagnostics',
           },
           mode: {
             type: "string",
@@ -593,7 +594,7 @@ const server = createServer(async (req, res) => {
         });
       } else if (name === "get_task") {
         const taskId = typeof args.taskId === "string" ? args.taskId : "";
-        const include = Array.isArray(args.include) ? (args.include as string[]) : undefined;
+        const detail = typeof args.detail === "string" ? args.detail : undefined;
         const mode = (typeof args.mode === "string" ? args.mode : undefined) as CheckMode | undefined;
         const result = await checkTask(pool, { jobId: taskId, mode: mode ?? "wait" });
 
@@ -611,6 +612,8 @@ const server = createServer(async (req, res) => {
           });
         } else {
           const s = result.snapshot;
+          const d = detail ?? "summary";
+          const has = (field: string) => d === field || d === "full" || d === "fullWithDiagnostics";
           const payload: Record<string, unknown> = {
             taskId: s.jobId,
             jobId: s.jobId,
@@ -620,17 +623,16 @@ const server = createServer(async (req, res) => {
             startedAt: s.startedAt,
             lastEventAt: s.lastEventAt,
           };
-          // include logic: undefined = summary by default; [] = core only; ["x"] = x only
-          if (include === undefined || include.includes("summary")) {
+          if (d === "summary" || has("summary")) {
             payload.summary = s.summary;
           }
-          if (include?.includes("updates")) {
+          if (has("updates")) {
             payload.updates = s.logs;
           }
-          if (include?.includes("artifacts")) {
+          if (has("artifacts")) {
             payload.artifacts = s.artifacts;
           }
-          if (include?.includes("diagnostics")) {
+          if (d === "diagnostics" || d === "fullWithDiagnostics") {
             payload.diagnostics = { error: s.error, errorInfo: s.errorInfo, continuationState: s.continuationState };
           }
           respond({

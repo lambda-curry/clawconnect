@@ -255,17 +255,24 @@ Pass the jobId returned by run_task. Available agents: ${agentList}.`,
 
   server.tool(
     "get_task",
-    `Inspect a task by taskId/jobId and optionally include updates/logs/artifacts for richer manager status.`,
+    `Inspect a task by taskId/jobId with a detail preset controlling which fields are returned.`,
     {
       taskId: z.string().describe("Task identifier (same as jobId in v1)"),
-      include: z.array(z.enum(["summary", "updates", "artifacts", "diagnostics"])).optional(),
+      detail: z
+        .enum(["core", "summary", "updates", "artifacts", "diagnostics", "full", "fullWithDiagnostics"])
+        .optional()
+        .describe(
+          "Detail preset. Omit for summary. core=ids+status only; summary=+summary; updates=+logs; artifacts=+artifacts; diagnostics=+error info; full=core+summary+updates+artifacts; fullWithDiagnostics=full+diagnostics",
+        ),
       mode: z.enum(["poll", "wait"]).optional().describe('Uses check semantics: "wait" blocks up to timeout; "poll" returns on updates'),
     },
     { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
-    async ({ taskId, include, mode }) => {
+    async ({ taskId, detail, mode }) => {
       const result = await checkTask(pool, { jobId: taskId, mode: (mode as CheckMode) ?? defaultMode });
       if (!result.found) return defaultFormatCheckTask(result);
       const snapshot = result.snapshot;
+      const d = detail ?? "summary";
+      const has = (field: string) => d === field || d === "full" || d === "fullWithDiagnostics";
       return {
         content: [
           {
@@ -278,12 +285,13 @@ Pass the jobId returned by run_task. Available agents: ${agentList}.`,
               status: snapshot.status,
               startedAt: snapshot.startedAt,
               lastEventAt: snapshot.lastEventAt,
-              summary: include ? (include.includes("summary") ? snapshot.summary : undefined) : snapshot.summary,
-              updates: include?.includes("updates") ? snapshot.logs : undefined,
-              artifacts: include?.includes("artifacts") ? snapshot.artifacts : undefined,
-              diagnostics: include?.includes("diagnostics")
-                ? { error: snapshot.error, errorInfo: snapshot.errorInfo, continuationState: snapshot.continuationState }
-                : undefined,
+              summary: d === "summary" || has("summary") ? snapshot.summary : undefined,
+              updates: has("updates") ? snapshot.logs : undefined,
+              artifacts: has("artifacts") ? snapshot.artifacts : undefined,
+              diagnostics:
+                d === "diagnostics" || d === "fullWithDiagnostics"
+                  ? { error: snapshot.error, errorInfo: snapshot.errorInfo, continuationState: snapshot.continuationState }
+                  : undefined,
             }),
           },
         ],
