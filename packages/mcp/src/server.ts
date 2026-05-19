@@ -4,6 +4,7 @@ import {
   GatewayPool,
   runTask,
   checkTask,
+  getSession,
   listTasks,
   listSessions,
   agentBlurb,
@@ -19,6 +20,7 @@ import type {
   ContinuationState,
   RunTaskResult,
   TaskSummary,
+  SessionInspectResult,
 } from "@clawconnect/core";
 
 // ── Provider config ─────────────────────────────────────────────────────────
@@ -39,6 +41,7 @@ export type ProviderConfig = {
   formatCheckTask?: (result: CheckTaskResult) => McpToolResponse;
   formatListSessions?: (result: ContinuationState[]) => McpToolResponse;
   formatListTasks?: (result: TaskSummary[]) => McpToolResponse;
+  formatGetSession?: (result: SessionInspectResult) => McpToolResponse;
 };
 
 // ── Default formatters (optimized for agentic use / Claude Code) ────────────
@@ -138,6 +141,11 @@ function defaultFormatListTasks(result: TaskSummary[]): McpToolResponse {
   };
 }
 
+function defaultFormatGetSession(result: SessionInspectResult): McpToolResponse {
+  if (!result.found) return { content: [{ type: "text", text: "Session not found." }], isError: true };
+  return { content: [{ type: "text", text: JSON.stringify(result) }] };
+}
+
 // ── Server factory ──────────────────────────────────────────────────────────
 
 export function createMcpServer(config: { registry: AgentRegistry; provider?: ProviderConfig }) {
@@ -154,6 +162,7 @@ export function createMcpServer(config: { registry: AgentRegistry; provider?: Pr
   const fmtCheck = provider.formatCheckTask ?? defaultFormatCheckTask;
   const fmtList = provider.formatListSessions ?? defaultFormatListSessions;
   const fmtListTasks = provider.formatListTasks ?? defaultFormatListTasks;
+  const fmtGetSession = provider.formatGetSession ?? defaultFormatGetSession;
 
   const agentIds = config.registry.agents.map((a) => a.id);
   const agentBlurbs = config.registry.agents.map(agentBlurb).join("; ");
@@ -257,7 +266,7 @@ Pass the jobId returned by run_task. Available agents: ${agentList}.`,
               status: snapshot.status,
               startedAt: snapshot.startedAt,
               lastEventAt: snapshot.lastEventAt,
-              summary: include?.length ? (include.includes("summary") ? snapshot.summary : undefined) : snapshot.summary,
+              summary: include ? (include.includes("summary") ? snapshot.summary : undefined) : snapshot.summary,
               updates: include?.includes("updates") ? snapshot.logs : undefined,
               artifacts: include?.includes("artifacts") ? snapshot.artifacts : undefined,
               diagnostics: include?.includes("diagnostics")
@@ -268,6 +277,23 @@ Pass the jobId returned by run_task. Available agents: ${agentList}.`,
         ],
         ...(result.isError ? { isError: true } : {}),
       };
+    },
+  );
+
+  server.tool(
+    "get_session",
+    `Inspect one session for debugging ("what exactly happened?"). Use mode="snapshot" for current state, "events" for bounded event retrieval, or "tail" for cursor-based tailing.`,
+    {
+      sessionId: z.string().describe("Session key to inspect"),
+      mode: z.enum(["snapshot", "events", "tail"]).optional(),
+      limit: z.number().int().positive().max(200).optional().describe("Max events to return for events/tail modes"),
+      after: z.number().int().nonnegative().optional().describe("Zero-based event cursor; for tail mode use returned nextAfter"),
+      agent: agentEnum.optional().describe(`${agentDescription} Usually inferred from sessionId.`),
+    },
+    { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+    async ({ sessionId, mode, limit, after, agent }) => {
+      const result = getSession(pool, { sessionId, mode, limit, after, agent });
+      return fmtGetSession(result);
     },
   );
 

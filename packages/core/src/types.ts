@@ -131,6 +131,24 @@ export type TaskSummary = {
   error?: string;
 };
 
+export type SessionInspectMode = "snapshot" | "events" | "tail";
+
+export type SessionInspectResult =
+  | { found: false }
+  | {
+      found: true;
+      sessionKey: string;
+      agent?: string;
+      jobId: string;
+      status: JobStatus;
+      startedAt: number;
+      lastEventAt: number;
+      summary?: string;
+      error?: string;
+      events?: LogEntry[];
+      nextAfter?: number;
+    };
+
 export type CheckTaskOpts = {
   jobId?: string;
   sessionKey?: string;

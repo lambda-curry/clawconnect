@@ -4,6 +4,8 @@ import type {
   CheckTaskResult,
   ContinuationState,
   RunTaskResult,
+  SessionInspectMode,
+  SessionInspectResult,
   TaskSummary,
   TaskInput,
 } from "./types.ts";
@@ -32,6 +34,14 @@ function mapTaskStatus(status: string): TaskSummary["status"] {
   return "failed";
 }
 
+function deriveTaskStatus(job: { status: string; error?: string; artifacts: { needsHumanDecision: boolean } }): TaskSummary["status"] {
+  if (job.status === "running") return "running";
+  if (job.status === "completed" || job.status === "completed_no_summary") return "done";
+  if (job.artifacts.needsHumanDecision) return "needs-human";
+  if (job.error?.includes("session busy")) return "blocked";
+  return mapTaskStatus(job.status);
+}
+
 export function listTasks(pool: GatewayPool): TaskSummary[] {
   const items: TaskSummary[] = [];
   for (const entry of pool.allEntries()) {
@@ -43,10 +53,10 @@ export function listTasks(pool: GatewayPool): TaskSummary[] {
         jobId: job.jobId,
         sessionKey: job.sessionKey,
         agent: entry.agent.id,
-        status: mapTaskStatus(job.status),
+        status: deriveTaskStatus(job),
         startedAt: job.startedAt,
         lastEventAt: job.lastEventAt,
-        summary: job.summary ?? session.lastSummary,
+        summary: job.summary,
         error: job.error,
       });
     }
@@ -99,4 +109,41 @@ export function listSessions(pool: GatewayPool): ContinuationState[] {
     }
   }
   return all;
+}
+
+export function getSession(
+  pool: GatewayPool,
+  opts: { sessionId: string; mode?: SessionInspectMode; limit?: number; after?: number; agent?: string },
+): SessionInspectResult {
+  let entry = opts.agent ? pool.forAgent(opts.agent) : pool.forSession(opts.sessionId);
+  if (!entry) {
+    for (const candidate of pool.allEntries()) {
+      if (candidate.sessions.getSessionState(opts.sessionId)) {
+        entry = candidate;
+        break;
+      }
+    }
+  }
+  if (!entry) return { found: false };
+  const job = entry.sessions.getLatestJobForSession(opts.sessionId);
+  if (!job) return { found: false };
+
+  const mode = opts.mode ?? "snapshot";
+  const limit = Math.max(1, Math.min(200, opts.limit ?? 50));
+  const after = Math.max(0, opts.after ?? 0);
+  const events = job.logs.slice(after, after + limit);
+
+  return {
+    found: true,
+    sessionKey: job.sessionKey,
+    agent: entry.agent.id,
+    jobId: job.jobId,
+    status: job.status,
+    startedAt: job.startedAt,
+    lastEventAt: job.lastEventAt,
+    summary: job.summary,
+    error: job.error,
+    ...(mode === "snapshot" ? {} : { events }),
+    ...(mode === "tail" ? { nextAfter: after + events.length } : {}),
+  };
 }
