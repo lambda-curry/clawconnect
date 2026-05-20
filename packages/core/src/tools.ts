@@ -33,13 +33,15 @@ export function runTask(pool: GatewayPool, input: TaskInput): RunTaskResult {
 function mapTaskStatus(status: string): TaskSummary["status"] {
   if (status === "running") return "running";
   if (status === "completed" || status === "completed_no_summary") return "done";
+  if (status === "stale") return "stale";
   if (status === "needs-human") return "needs-human";
   if (status === "blocked") return "blocked";
   if (status === "queued") return "queued";
   return "failed";
 }
 
-function deriveTaskStatus(job: { status: string; error?: string; artifacts: { needsHumanDecision: boolean } }): TaskSummary["status"] {
+function deriveTaskStatus(job: { status: string; error?: string; artifacts: { needsHumanDecision: boolean }; staleReason?: string }): TaskSummary["status"] {
+  if (job.status === "stale") return "stale";
   if (job.status === "running") return "running";
   if (job.status === "completed" || job.status === "completed_no_summary") return "done";
   if (job.artifacts.needsHumanDecision) return "needs-human";
@@ -48,6 +50,13 @@ function deriveTaskStatus(job: { status: string; error?: string; artifacts: { ne
 }
 
 export function listTasks(pool: GatewayPool): TaskSummary[] {
+  // Reconcile stale running jobs before listing so the active view is
+  // accurate. Without this, a job whose chat() resolved with no final text
+  // (recovering via long-poll) shows as "running" even when the agent
+  // finished minutes or hours ago.
+  for (const entry of pool.allEntries()) {
+    entry.sessions.reconcileAllStale();
+  }
   const items: TaskSummary[] = [];
   for (const entry of pool.allEntries()) {
     for (const session of entry.sessions.listSessions()) {

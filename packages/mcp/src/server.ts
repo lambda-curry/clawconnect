@@ -300,7 +300,7 @@ Pass the jobId returned by run_task. Available agents: ${agentList}.`,
               artifacts: has("artifacts") ? snapshot.artifacts : undefined,
               diagnostics:
                 d === "diagnostics" || d === "fullWithDiagnostics"
-                  ? { error: snapshot.error, errorInfo: snapshot.errorInfo, continuationState: snapshot.continuationState }
+                  ? { error: snapshot.error, errorInfo: snapshot.errorInfo, staleReason: (snapshot as any).staleReason, continuationState: snapshot.continuationState }
                   : undefined,
             }),
           },
