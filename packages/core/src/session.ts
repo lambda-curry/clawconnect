@@ -22,6 +22,14 @@ const TIMEOUT_MS = readEnvMs("CLAWCONNECT_TIMEOUT_MS", 30 * 60_000); // 30 min
 // writing visible text). The cap below is the absolute safety ceiling for
 // runs that produce activity forever without ever stabilizing.
 const RECOVERY_TIMEOUT_MS = readEnvMs("CLAWCONNECT_RECOVERY_TIMEOUT_MS", 90 * 60_000); // 90 min
+// Stale-job reconciliation thresholds. A running job is promoted to
+// completed_no_summary (with staleReason) when:
+// 1. Its logs contain a terminal lifecycle event ("Agent finished") AND
+//    lastEventAt is older than LIFECYCLE_STALE_THRESHOLD_MS.
+// 2. lastEventAt is older than QUIET_STALE_THRESHOLD_MS regardless of
+//    lifecycle events (catches silent disconnects, abandoned polls, etc.).
+const LIFECYCLE_STALE_THRESHOLD_MS = readEnvMs("CLAWCONNECT_LIFECYCLE_STALE_MS", 10 * 60_000); // 10 min
+const QUIET_STALE_THRESHOLD_MS = readEnvMs("CLAWCONNECT_QUIET_STALE_MS", 30 * 60_000); // 30 min
 const POLL_WAIT_MS = 50_000; // max time check waits before returning
 const MAX_LOG_ENTRIES = 200;
 
@@ -324,6 +332,7 @@ export class SessionManager {
     job.summary = recovered;
     job.error = undefined;
     job.errorInfo = undefined;
+    job.staleReason = undefined;
     extractPatternsFromSummary(job.artifacts, recovered);
     this.sessions.set(job.sessionKey, {
       sessionKey: job.sessionKey,
@@ -335,6 +344,70 @@ export class SessionManager {
     logDebug(
       `[job ${job.jobId}] late-recovery (lazy recheck): upgraded to completed with ${recovered.length} chars`,
     );
+  }
+
+  /**
+   * Promote a stale running job to completed_no_summary.
+   *
+   * Two triggers:
+   * 1. "Agent finished" lifecycle event present + lastEventAt older than
+   *    LIFECYCLE_STALE_THRESHOLD_MS (10 min default).
+   * 2. lastEventAt older than QUIET_STALE_THRESHOLD_MS (30 min default)
+   *    regardless of lifecycle events (catches silent disconnects).
+   *
+   * Also handles the `stale` JobStatus: if the job was previously reconciled
+   * to `stale` (see reconcile below), the recovery poll's shouldAbort
+   * callback already stopped it.
+   */
+  private reconcileStaleJob(job: Job): void {
+    if (job.status !== "running") return;
+
+    const now = Date.now();
+    const quietMs = now - job.lastEventAt;
+
+    // Check for "Agent finished" lifecycle event in logs.
+    const hasAgentFinished = job.logs.some(
+      (l) => l.type === "lifecycle" && l.text === "Agent finished",
+    );
+
+    let reason: string | undefined;
+    if (hasAgentFinished && quietMs >= LIFECYCLE_STALE_THRESHOLD_MS) {
+      reason = `Agent lifecycle showed "Agent finished" ${Math.round(quietMs / 60_000)} minutes ago with no subsequent activity.`;
+    } else if (quietMs >= QUIET_STALE_THRESHOLD_MS) {
+      reason = `No activity for ${Math.round(quietMs / 60_000)} minutes. The session may have disconnected or the recovery poll stalled.`;
+    }
+
+    if (!reason) return;
+
+    const prevStatus = job.status;
+    job.status = "stale";
+    job.staleReason = reason;
+    job.lastEventAt = now;
+    // Set a minimal summary so callers that only check `summary` get
+    // something useful instead of undefined.
+    if (!job.summary) {
+      job.summary = `Task ended without a final response. ${reason}`;
+    }
+    this.sessions.set(job.sessionKey, {
+      sessionKey: job.sessionKey,
+      lastJobId: job.jobId,
+      lastSummary: job.summary.slice(0, 500),
+      artifacts: job.artifacts,
+      recommendedNextStep: deriveNextStep(job.artifacts, "completed_no_summary"),
+    });
+    logDebug(
+      `[job ${job.jobId}] reconciled: ${prevStatus} → stale (${reason})`,
+    );
+  }
+
+  /**
+   * Reconcile all tracked jobs. Called before listTasks so the task list
+   * reflects current reality rather than stale in-memory state.
+   */
+  reconcileAllStale(): void {
+    for (const job of this.jobs.values()) {
+      this.reconcileStaleJob(job);
+    }
   }
 
   buildSnapshot(job: Job): JobSnapshot {
@@ -351,6 +424,7 @@ export class SessionManager {
       errorInfo: job.errorInfo,
       logs: job.logs,
       artifacts: job.artifacts,
+      staleReason: job.staleReason,
       ...(continuation ? { continuationState: continuation } : {}),
     };
   }
@@ -401,7 +475,7 @@ export class SessionManager {
       // completed_no_summary or error. Re-read the transcript on each poll
       // (rate-limited) so a later check_task can surface a late-arriving
       // response without requiring the caller to re-submit the task.
-      if (job.status === "completed_no_summary" || job.status === "error") {
+      if (job.status === "completed_no_summary" || job.status === "error" || job.status === "stale") {
         await this.maybeRecoverTerminalJob(job);
       }
       logDebug(`[waitForJob] job ${job.jobId.slice(0, 8)} already ${job.status}, logs=${job.logs.length}`);

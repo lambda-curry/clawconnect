@@ -36,8 +36,8 @@ export type ErrorInfo = {
 
 export type LogEntry = { ts: number; type: string; text: string };
 
-export type JobStatus = "running" | "completed" | "completed_no_summary" | "error";
-export type TaskStatus = "queued" | "running" | "blocked" | "needs-human" | "done" | "failed";
+export type JobStatus = "running" | "completed" | "completed_no_summary" | "error" | "stale";
+export type TaskStatus = "queued" | "running" | "blocked" | "needs-human" | "stale" | "done" | "failed";
 
 export type Job = {
   jobId: string;
@@ -54,6 +54,11 @@ export type Job = {
    *  (completed_no_summary / error). Used to rate-limit re-reads so a poll
    *  storm doesn't hammer chat.history. Unset until the first recheck. */
   lastRecheckAt?: number;
+  /** Set when stale reconciliation promotes a running job to terminal.
+   *  Explains *why* the job was considered stale (e.g. "Agent finished 12 min
+   *  ago with no subsequent activity"). Consumed by deriveTaskStatus to map
+   *  to the `stale` TaskStatus, and surfaced in get_task diagnostics. */
+  staleReason?: string;
 };
 
 export type JobSnapshot = {
@@ -71,6 +76,9 @@ export type JobSnapshot = {
   continuationState?: ContinuationState;
   /** ClawConnect agent alias this job ran against. Present from multi-agent gateway onward. */
   agent?: string;
+  /** Set when stale reconciliation promoted a running job to terminal.
+   *  Explains why (e.g. "Agent finished 12 min ago with no subsequent activity"). */
+  staleReason?: string;
 };
 
 export type ContinuationState = {

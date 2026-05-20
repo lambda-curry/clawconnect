@@ -633,7 +633,7 @@ const server = createServer(async (req, res) => {
             payload.artifacts = s.artifacts;
           }
           if (d === "diagnostics" || d === "fullWithDiagnostics") {
-            payload.diagnostics = { error: s.error, errorInfo: s.errorInfo, continuationState: s.continuationState };
+            payload.diagnostics = { error: s.error, errorInfo: s.errorInfo, staleReason: (s as any).staleReason, continuationState: s.continuationState };
           }
           respond({
             content: [{ type: "text", text: JSON.stringify(payload) }],
