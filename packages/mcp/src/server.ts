@@ -101,6 +101,7 @@ function defaultFormatCheckTask(result: CheckTaskResult): McpToolResponse {
             jobId: snapshot.jobId,
             sessionKey: snapshot.sessionKey,
             agent: snapshot.agent,
+            source: snapshot.source ?? "openclaw",
             elapsedSeconds: Math.round((Date.now() - snapshot.startedAt) / 1000),
             logCount: snapshot.logs.length,
             hint: "Task is actively running. Call check_task again to continue waiting.",
@@ -111,23 +112,23 @@ function defaultFormatCheckTask(result: CheckTaskResult): McpToolResponse {
   }
 
   // Terminal: deliver the full payload
+  const payload: Record<string, unknown> = {
+    jobId: snapshot.jobId,
+    sessionKey: snapshot.sessionKey,
+    agent: snapshot.agent,
+    status: snapshot.status,
+    source: snapshot.source ?? "openclaw",
+    summary: snapshot.summary,
+    error: snapshot.error,
+    errorInfo: snapshot.errorInfo,
+    artifacts: snapshot.artifacts,
+    continuationState: snapshot.continuationState,
+  };
+  if (snapshot.externalIssueId) payload.externalIssueId = snapshot.externalIssueId;
+  if (snapshot.externalUrl) payload.externalUrl = snapshot.externalUrl;
+  if (snapshot.title) payload.title = snapshot.title;
   return {
-    content: [
-      {
-        type: "text" as const,
-        text: JSON.stringify({
-          jobId: snapshot.jobId,
-          sessionKey: snapshot.sessionKey,
-          agent: snapshot.agent,
-          status: snapshot.status,
-          summary: snapshot.summary,
-          error: snapshot.error,
-          errorInfo: snapshot.errorInfo,
-          artifacts: snapshot.artifacts,
-          continuationState: snapshot.continuationState,
-        }),
-      },
-    ],
+    content: [{ type: "text" as const, text: JSON.stringify(payload) }],
     ...(isError ? { isError: true } : {}),
   };
 }
@@ -197,11 +198,9 @@ export function createMcpServer(config: { registry: AgentRegistry; provider?: Pr
     "run_task",
     `Delegate work to an OpenClaw agent for deeper investigation, implementation, or judgment that benefits from that agent's own context, tools, and identity. Returns a jobId and sessionKey immediately while the task runs in the background.
 
-The actual result is what the user wants — not the jobId. After calling run_task, immediately call check_task with mode="wait" in a loop, passing the same jobId, until status is no longer "running". Then report the real outcome (summary, files changed, errors, etc.) to the user. A typical short task takes 30s–3min and needs 1–5 check_task calls.
+IMPORTANT — you MUST poll for the result after calling this tool. The user wants the agent's answer, not a jobId. Immediately after run_task returns, call check_task with mode="wait" and the returned jobId. Repeat check_task until the status is no longer "running". Then report the actual outcome (summary, files changed, errors, artifacts) to the user. A typical short task takes 30s–3min and needs 1–5 check_task calls.
 
-Skip the polling loop only when:
-- The user explicitly asked for fire-and-forget ("just dispatch it, I'll check later").
-- You are parallel-dispatching multiple jobs to different agents — in that case dispatch all first, then poll each in turn.
+The only exception is when the user explicitly says fire-and-forget ("just dispatch it, don't wait"). In all other cases, poll until done.
 
 Pass a sessionKey from a previous task to continue the same thread. Available agents: ${agentList}.`,
     {
@@ -222,9 +221,9 @@ Pass a sessionKey from a previous task to continue the same thread. Available ag
     "check_task",
     `Check whether a previously dispatched run_task job has finished, and collect the result.
 
-With mode="wait" (recommended): blocks for up to 50 seconds and only returns on a terminal status (completed / completed_no_summary / error) or timeout. Call repeatedly with the same jobId until status is no longer "running" — that's how you get the actual answer.
+You MUST call this after every run_task (unless fire-and-forget was explicitly requested). With mode="wait" (default, recommended): blocks up to 50 seconds per call. Keep calling with the same jobId until status is no longer "running". When terminal, report the summary/error/artifacts to the user — that is the actual answer.
 
-With mode="poll": returns as soon as any new log activity appears. Use this only when you need intermediate progress (live UI), not when you just want the final result.
+With mode="poll": returns as soon as any new log activity appears. Use this only for intermediate progress, not for getting the final result.
 
 If a job returns status="completed_no_summary" or status="error" on a long, tool-heavy run, calling check_task again 30–60 seconds later can upgrade it: the openclaw session may have produced the final answer after the connector marked terminal, and a lazy re-read of the transcript on subsequent polls will surface it. Worth one or two follow-up polls before reporting back that no result was produced.
 
@@ -251,7 +250,7 @@ Pass the jobId returned by run_task. Available agents: ${agentList}.`,
 
   server.tool(
     "list_tasks",
-    `List manager-friendly task summaries across agents. This is task-level coordination (what needs attention), not low-level session debugging.`,
+    `List task summaries across agents, including both direct OpenClaw runs (source="openclaw") and Linear Gateway delegated runs (source="linear" with externalIssueId/externalUrl). Use view="active" for tasks needing attention, or omit for all. Each task includes origin metadata so you can tell at a glance where it came from.`,
     {
       view: z.enum(["active", "all"]).optional().describe('Optional preset. "active" returns non-terminal tasks (queued, running, blocked, needs-human) that still need attention.'),
     },
@@ -265,7 +264,7 @@ Pass the jobId returned by run_task. Available agents: ${agentList}.`,
 
   server.tool(
     "get_task",
-    `Inspect a task by taskId/jobId with a detail preset controlling which fields are returned.`,
+    `Inspect a task by taskId/jobId. Returns origin metadata (source, externalIssueId, externalUrl for Linear Gateway tasks), status, summary, and more depending on the detail preset. Use detail="full" for the complete picture including logs and artifacts.`,
     {
       taskId: z.string().describe("Task identifier (same as jobId in v1)"),
       detail: z
@@ -283,28 +282,27 @@ Pass the jobId returned by run_task. Available agents: ${agentList}.`,
       const snapshot = result.snapshot;
       const d = detail ?? "summary";
       const has = (field: string) => d === field || d === "full" || d === "fullWithDiagnostics";
+      const payload: Record<string, unknown> = {
+        taskId: snapshot.jobId,
+        jobId: snapshot.jobId,
+        sessionKey: snapshot.sessionKey,
+        agent: snapshot.agent,
+        status: snapshot.status,
+        startedAt: snapshot.startedAt,
+        lastEventAt: snapshot.lastEventAt,
+        source: snapshot.source ?? "openclaw",
+      };
+      if (snapshot.externalIssueId) payload.externalIssueId = snapshot.externalIssueId;
+      if (snapshot.externalUrl) payload.externalUrl = snapshot.externalUrl;
+      if (snapshot.title) payload.title = snapshot.title;
+      if (d === "summary" || has("summary")) payload.summary = snapshot.summary;
+      if (has("updates")) payload.updates = snapshot.logs;
+      if (has("artifacts")) payload.artifacts = snapshot.artifacts;
+      if (d === "diagnostics" || d === "fullWithDiagnostics") {
+        payload.diagnostics = { error: snapshot.error, errorInfo: snapshot.errorInfo, staleReason: snapshot.staleReason, continuationState: snapshot.continuationState };
+      }
       return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify({
-              taskId: snapshot.jobId,
-              jobId: snapshot.jobId,
-              sessionKey: snapshot.sessionKey,
-              agent: snapshot.agent,
-              status: snapshot.status,
-              startedAt: snapshot.startedAt,
-              lastEventAt: snapshot.lastEventAt,
-              summary: d === "summary" || has("summary") ? snapshot.summary : undefined,
-              updates: has("updates") ? snapshot.logs : undefined,
-              artifacts: has("artifacts") ? snapshot.artifacts : undefined,
-              diagnostics:
-                d === "diagnostics" || d === "fullWithDiagnostics"
-                  ? { error: snapshot.error, errorInfo: snapshot.errorInfo, staleReason: (snapshot as any).staleReason, continuationState: snapshot.continuationState }
-                  : undefined,
-            }),
-          },
-        ],
+        content: [{ type: "text", text: JSON.stringify(payload) }],
         ...(result.isError ? { isError: true } : {}),
       };
     },

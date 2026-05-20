@@ -21,11 +21,12 @@ import { Hono } from "hono";
 import {
   GatewayPool,
   loadAgentRegistry,
+  createLinearGatewayClient,
   runTask,
-  checkTask,
+  checkTaskWithLinear,
   listSessions,
-  listTasks,
-  getSession,
+  listTasksWithLinear,
+  getSessionWithLinear,
   agentBlurb,
   agentDescriptor,
   searchMemory,
@@ -69,6 +70,10 @@ try {
   console.log(`[chatgpt-app] env fallback registry: single agent "${singleAgentId}"`);
 }
 const pool = new GatewayPool(registry);
+const linearClient = createLinearGatewayClient(registry);
+if (linearClient) {
+  console.log(`[chatgpt-app] Linear Gateway client enabled (${registry.linearGatewayUrl})`);
+}
 const AGENT_IDS = registry.agents.map((a) => a.id);
 const AGENT_LIST = AGENT_IDS.join(", ");
 
@@ -173,11 +178,9 @@ function buildTools(allowedIds: string[], defaultId: string) {
       name: "run_task",
       description: `Delegate work to an OpenClaw agent for deeper investigation, implementation, or judgment that benefits from that agent's own context, tools, and identity. Returns a jobId and sessionKey immediately while the task runs in the background.
 
-The actual result is what the user wants — not the jobId. After calling run_task, immediately call check_task with mode="wait" in a loop, passing the same jobId, until status is no longer "running". Then report the real outcome (summary, files changed, errors, etc.) to the user. A typical short task takes 30s–3min and needs 1–5 check_task calls.
+IMPORTANT — you MUST poll for the result after calling this tool. The user wants the agent's answer, not a jobId. Immediately after run_task returns, call check_task with mode="wait" and the returned jobId. Repeat check_task until the status is no longer "running". Then report the actual outcome (summary, files changed, errors, artifacts) to the user. A typical short task takes 30s–3min and needs 1–5 check_task calls.
 
-Skip the polling loop only when:
-- The user explicitly asked for fire-and-forget ("just dispatch it, I'll check later").
-- You are parallel-dispatching multiple jobs to different agents — in that case dispatch all first, then poll each in turn.
+The only exception is when the user explicitly says fire-and-forget ("just dispatch it, don't wait"). In all other cases, poll until done.
 
 Pass sessionKey from a previous result to continue the same thread. Available agents: ${list}.`,
       inputSchema: {
@@ -212,9 +215,9 @@ Pass sessionKey from a previous result to continue the same thread. Available ag
       name: "check_task",
       description: `Check whether a previously dispatched run_task job has finished, and collect the result.
 
-With mode="wait" (recommended): blocks up to 50 seconds and only returns on a terminal status (completed / completed_no_summary / error) or timeout. Call repeatedly with the same jobId until status is no longer "running" — that's how you get the actual answer.
+You MUST call this after every run_task (unless fire-and-forget was explicitly requested). With mode="wait" (default, recommended): blocks up to 50 seconds per call. Keep calling with the same jobId until status is no longer "running". When terminal, report the summary/error/artifacts to the user — that is the actual answer.
 
-With mode="poll": returns as soon as any new log activity appears. Use this only when you need intermediate progress (live UI), not when you just want the final result.
+With mode="poll": returns as soon as any new log activity appears. Use this only for intermediate progress, not for getting the final result.
 
 Pass the jobId returned by run_task. Available agents: ${list}.`,
       inputSchema: {
@@ -308,7 +311,7 @@ Pass the jobId returned by run_task. Available agents: ${list}.`,
     },
     {
       name: "list_tasks",
-      description: `List manager-friendly task summaries across agents. This is task-level coordination (what needs attention), not low-level session debugging.`,
+      description: `List task summaries across agents, including both direct OpenClaw runs (source=\"openclaw\") and Linear Gateway delegated runs (source=\"linear\" with externalIssueId/externalUrl). Use view=\"active\" for tasks needing attention, or omit for all. Each task includes origin metadata so you can tell at a glance where it came from.`,
       inputSchema: {
         type: "object",
         properties: {
@@ -323,7 +326,7 @@ Pass the jobId returned by run_task. Available agents: ${list}.`,
     },
     {
       name: "get_task",
-      description: `Inspect a task by taskId/jobId with a detail preset controlling which fields are returned.`,
+      description: `Inspect a task by taskId/jobId. Returns origin metadata (source, externalIssueId, externalUrl for Linear Gateway tasks), status, summary, and more depending on the detail preset. Use detail=\"full\" for the complete picture including logs and artifacts.`,
       inputSchema: {
         type: "object",
         properties: {
@@ -487,13 +490,13 @@ const server = createServer(async (req, res) => {
           return;
         }
         const mode = (args.mode as CheckMode) ?? "wait";
-        const result = await checkTask(pool, {
+        const result = await checkTaskWithLinear(pool, {
           jobId: typeof args.jobId === "string" ? args.jobId : undefined,
           sessionKey: typeof args.sessionKey === "string" ? args.sessionKey : undefined,
           agent: requestedAgent,
           knownLogCount: Number(args.knownLogCount) || 0,
           mode,
-        });
+        }, linearClient);
 
         if (!result.found) {
           const notFoundMsg = args.sessionKey
@@ -584,7 +587,7 @@ const server = createServer(async (req, res) => {
           structuredContent: { collections },
         });
       } else if (name === "list_tasks") {
-        const tasks = listTasks(pool);
+        const tasks = await listTasksWithLinear(pool, linearClient);
         const scoped = tasks.filter((t) => !t.agent || scope.allowedIds.includes(t.agent));
         const view = typeof args.view === "string" ? args.view : undefined;
         const filtered = view === "active" ? scoped.filter((t) => ACTIVE_STATUSES.has(t.status)) : scoped;
@@ -596,7 +599,7 @@ const server = createServer(async (req, res) => {
         const taskId = typeof args.taskId === "string" ? args.taskId : "";
         const detail = typeof args.detail === "string" ? args.detail : undefined;
         const mode = (typeof args.mode === "string" ? args.mode : undefined) as CheckMode | undefined;
-        const result = await checkTask(pool, { jobId: taskId, mode: mode ?? "wait" });
+        const result = await checkTaskWithLinear(pool, { jobId: taskId, mode: mode ?? "wait" }, linearClient);
 
         if (!result.found) {
           respond({
@@ -622,7 +625,18 @@ const server = createServer(async (req, res) => {
             status: s.status,
             startedAt: s.startedAt,
             lastEventAt: s.lastEventAt,
+            source: s.source ?? "openclaw",
           };
+          // Include Linear origin metadata when present
+          if (s.externalIssueId) {
+            payload.externalIssueId = s.externalIssueId;
+          }
+          if (s.externalUrl) {
+            payload.externalUrl = s.externalUrl;
+          }
+          if (s.title) {
+            payload.title = s.title;
+          }
           if (d === "summary" || has("summary")) {
             payload.summary = s.summary;
           }
@@ -633,7 +647,7 @@ const server = createServer(async (req, res) => {
             payload.artifacts = s.artifacts;
           }
           if (d === "diagnostics" || d === "fullWithDiagnostics") {
-            payload.diagnostics = { error: s.error, errorInfo: s.errorInfo, staleReason: (s as any).staleReason, continuationState: s.continuationState };
+            payload.diagnostics = { error: s.error, errorInfo: s.errorInfo, staleReason: s.staleReason, continuationState: s.continuationState };
           }
           respond({
             content: [{ type: "text", text: JSON.stringify(payload) }],
@@ -654,7 +668,7 @@ const server = createServer(async (req, res) => {
             isError: true,
           });
         } else {
-          const result = getSession(pool, { sessionId, mode: sessionMode as any, limit, after, agent: sessionAgent });
+          const result = await getSessionWithLinear(pool, { sessionId, mode: sessionMode as any, limit, after, agent: sessionAgent }, linearClient);
           if (!result.found) {
             respond({
               content: [{ type: "text", text: "Session not found." }],

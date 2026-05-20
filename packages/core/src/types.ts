@@ -79,6 +79,14 @@ export type JobSnapshot = {
   /** Set when stale reconciliation promoted a running job to terminal.
    *  Explains why (e.g. "Agent finished 12 min ago with no subsequent activity"). */
   staleReason?: string;
+  /** Task origin — "openclaw" for direct runs, "linear" for Linear Gateway runs. */
+  source?: "openclaw" | "linear";
+  /** Linear issue identifier (e.g. "SFR-287"). Set for Linear Gateway tasks. */
+  externalIssueId?: string;
+  /** URL to the external issue. Set for Linear Gateway tasks. */
+  externalUrl?: string;
+  /** Human-readable task title. Set for Linear Gateway tasks. */
+  title?: string;
 };
 
 export type ContinuationState = {
@@ -139,6 +147,12 @@ export type TaskSummary = {
   error?: string;
   /** Task origin — "openclaw" for direct OpenClaw runs, "linear" for Linear Gateway delegated runs. */
   source?: "openclaw" | "linear";
+  /** Linear issue identifier (e.g. "SFR-287"). Set for source="linear" tasks. */
+  externalIssueId?: string;
+  /** URL to the external issue (e.g. Linear issue URL). Set for source="linear" tasks. */
+  externalUrl?: string;
+  /** Human-readable task title. Set for source="linear" tasks (the issue title). */
+  title?: string;
 };
 
 export type SessionInspectMode = "snapshot" | "events" | "tail";

@@ -425,6 +425,7 @@ export class SessionManager {
       logs: job.logs,
       artifacts: job.artifacts,
       staleReason: job.staleReason,
+      source: "openclaw",
       ...(continuation ? { continuationState: continuation } : {}),
     };
   }

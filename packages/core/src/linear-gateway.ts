@@ -76,7 +76,7 @@ const ERROR_REASONS = new Set([
 ]);
 
 function mapLinearStatus(
-  trace: LinearSessionTraceSummary,
+  trace: Pick<LinearSessionTraceSummary, "endedAt" | "endedReason">,
 ): TaskStatus {
   if (!trace.endedAt) return "running";
   const reason = trace.endedReason ?? "";
@@ -142,6 +142,9 @@ export class LinearGatewayClient {
       logs,
       artifacts: emptyLinearArtifacts(),
       agent: trace.linearAgentName,
+      source: "linear",
+      externalIssueId: trace.issueIdentifier,
+      externalUrl: `https://linear.app/lambdacurry/issue/${trace.issueIdentifier}`,
     };
 
     const isTerminal = trace.endedAt !== undefined;
@@ -230,6 +233,8 @@ export class LinearGatewayClient {
         ? `Linear gateway: ${t.endedReason}`
         : undefined,
       source: "linear",
+      externalIssueId: t.issueIdentifier,
+      externalUrl: `https://linear.app/lambdacurry/issue/${t.issueIdentifier}`,
     };
   }
 
