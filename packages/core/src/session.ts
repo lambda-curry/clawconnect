@@ -1,5 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { emptyArtifacts, processEvent, extractPatternsFromSummary, deriveNextStep } from "./artifacts.ts";
+import {
+  emptyArtifacts,
+  processEvent,
+  extractPatternsFromSummary,
+  deriveNextStep,
+} from "./artifacts.ts";
 import { classifyError } from "./errors.ts";
 import { OpenClawGateway } from "./gateway.ts";
 import type { CheckMode, ContinuationState, Job, JobSnapshot, TaskInput } from "./types.ts";
@@ -27,8 +32,48 @@ const MAX_LOG_ENTRIES = 200;
 
 const LEGACY_CHATGPT_SESSION_PREFIX = "agent:chatgpt:";
 
+/**
+ * Prepended to every run_task user message. Tells the receiving agent that
+ * the run_task channel is the ONLY surface the caller sees, so the actual
+ * reply body must go into the model's final assistant text — not into a
+ * `message` tool call whose payload routes to a delivery channel (WhatsApp,
+ * internal-ui, etc.) the caller has no access to.
+ *
+ * Two-layer mitigation:
+ *   1. This preamble vetoes the `message` tool in compliant runs.
+ *   2. `extractMessageToolReply` in gateway.ts captures the tool args body
+ *      anyway and prefers it over the model's final text, so even
+ *      non-compliant runs still surface the right content.
+ *
+ * Word-for-word adapted from services/linear-agent/src/linear-stream.ts
+ * (`buildSystemPrompt`), which solved this same pattern for Linear-delegated
+ * agents in carry-patches v2026.5.20.
+ */
+export const MESSAGE_TOOL_VETO_PREAMBLE =
+  "You are operating in a ClawConnect run_task session. The caller (another AI " +
+  "agent or coding tool) sees ONLY the text of your final assistant message — " +
+  "there is no parallel WhatsApp, WebChat, Drive, or other delivery channel " +
+  "they can read.\n\n" +
+  "**Do NOT call the `message` tool in this session.** The `message` tool is " +
+  "OpenClaw's generic cross-channel delivery primitive — its payload routes " +
+  "through your default delivery channel, which the run_task caller cannot " +
+  "see. Always reply by writing plain assistant text instead. If the answer " +
+  "is long, put the long content directly into your final assistant message.";
+
 function logDebug(message: string): void {
   console.error(message);
+}
+
+/**
+ * Build the message string sent into `gateway.chat()`. Extracted so the
+ * preamble + senderName + context composition is testable without standing
+ * up a live gateway.
+ */
+export function buildSubmitMessage(input: TaskInput): string {
+  const body = input.context ? `${input.context}\n\n${input.task}` : input.task;
+  const senderName = input.senderName?.trim();
+  const withSender = senderName ? `[Message from: ${senderName}]\n\n${body}` : body;
+  return `${MESSAGE_TOOL_VETO_PREAMBLE}\n\n---\n\n${withSender}`;
 }
 
 function createThreadSessionKey(agentId: string): string {
@@ -57,11 +102,10 @@ export class SessionManager {
   ) {}
 
   submitTask(input: TaskInput): Job {
-    const body = input.context ? `${input.context}\n\n${input.task}` : input.task;
-    // Prepend the sender identity so the receiving agent knows who it's
-    // helping on a shared connection.
-    const senderName = input.senderName?.trim();
-    const message = senderName ? `[Message from: ${senderName}]\n\n${body}` : body;
+    // buildSubmitMessage prepends the `message`-tool veto preamble, the
+    // sender identity, and optional context block in the canonical order
+    // tested in session.test.ts.
+    const message = buildSubmitMessage(input);
 
     const { sessionKey, migratedFromLegacy } = resolveSessionKey(input.sessionKey, this.agentId);
 
@@ -94,7 +138,9 @@ export class SessionManager {
         artifacts: emptyArtifacts(),
       };
       this.jobs.set(busyJobId, busyJob);
-      logDebug(`[job ${busyJobId.slice(0, 8)}] rejected: session ${sessionKey} busy with job ${priorJobId?.slice(0, 8)}`);
+      logDebug(
+        `[job ${busyJobId.slice(0, 8)}] rejected: session ${sessionKey} busy with job ${priorJobId?.slice(0, 8)}`,
+      );
       return busyJob;
     }
 
@@ -137,7 +183,9 @@ export class SessionManager {
         if (job.logs.length < MAX_LOG_ENTRIES) {
           job.logs.push({ ts: Date.now(), type: event.type, text: event.text });
         }
-        logDebug(`[job ${jobId.slice(0, 8)}] event #${job.logs.length}: ${event.type} - ${event.text.slice(0, 80)}`);
+        logDebug(
+          `[job ${jobId.slice(0, 8)}] event #${job.logs.length}: ${event.type} - ${event.text.slice(0, 80)}`,
+        );
         processEvent(artifacts, event);
       })
       .then(
@@ -165,7 +213,9 @@ export class SessionManager {
             artifacts,
             recommendedNextStep: deriveNextStep(artifacts, job.status),
           });
-          logDebug(`[job ${jobId}] ${job.status}, ${reply.length} chars, ${artifacts.filesChanged.length} files`);
+          logDebug(
+            `[job ${jobId}] ${job.status}, ${reply.length} chars, ${artifacts.filesChanged.length} files`,
+          );
         },
         (err) => {
           job.lastEventAt = Date.now();
@@ -242,7 +292,9 @@ export class SessionManager {
               artifacts,
               recommendedNextStep: deriveNextStep(artifacts, job.status),
             });
-            logDebug(`[job ${jobId}] late-recovery succeeded via transcript (${recovered.length} chars)`);
+            logDebug(
+              `[job ${jobId}] late-recovery succeeded via transcript (${recovered.length} chars)`,
+            );
             return;
           }
           job.status = "completed_no_summary";
@@ -360,7 +412,8 @@ export class SessionManager {
   }
 
   getLatestJobForSession(sessionKey: string): Job | undefined {
-    const latestJobId = this.latestJobBySession.get(sessionKey) ?? this.sessions.get(sessionKey)?.lastJobId;
+    const latestJobId =
+      this.latestJobBySession.get(sessionKey) ?? this.sessions.get(sessionKey)?.lastJobId;
     return latestJobId ? this.jobs.get(latestJobId) : undefined;
   }
 
@@ -391,7 +444,9 @@ export class SessionManager {
   ): Promise<Job | undefined> {
     const job = this.resolveJob(jobId, sessionKey);
     if (!job) {
-      logDebug(`[waitForJob] no job found (jobId=${jobId?.slice(0, 8)}, session=${sessionKey?.slice(-8)})`);
+      logDebug(
+        `[waitForJob] no job found (jobId=${jobId?.slice(0, 8)}, session=${sessionKey?.slice(-8)})`,
+      );
       return undefined;
     }
     if (job.status !== "running") {
@@ -404,21 +459,29 @@ export class SessionManager {
       if (job.status === "completed_no_summary" || job.status === "error") {
         await this.maybeRecoverTerminalJob(job);
       }
-      logDebug(`[waitForJob] job ${job.jobId.slice(0, 8)} already ${job.status}, logs=${job.logs.length}`);
+      logDebug(
+        `[waitForJob] job ${job.jobId.slice(0, 8)} already ${job.status}, logs=${job.logs.length}`,
+      );
       return job;
     }
-    logDebug(`[waitForJob] job ${job.jobId.slice(0, 8)} waiting mode=${mode} (known=${knownLogCount}, current=${job.logs.length})`);
+    logDebug(
+      `[waitForJob] job ${job.jobId.slice(0, 8)} waiting mode=${mode} (known=${knownLogCount}, current=${job.logs.length})`,
+    );
     const deadline = Date.now() + POLL_WAIT_MS;
     while (Date.now() < deadline && job.status === "running") {
       await new Promise((r) => setTimeout(r, 500));
       // In "poll" mode: return early on new logs (live progress for widgets)
       // In "wait" mode: only return on terminal state or timeout (fewer round-trips for agentic use)
       if (mode === "poll" && job.logs.length > knownLogCount) {
-        logDebug(`[waitForJob] job ${job.jobId.slice(0, 8)} has new logs (${job.logs.length} > ${knownLogCount})`);
+        logDebug(
+          `[waitForJob] job ${job.jobId.slice(0, 8)} has new logs (${job.logs.length} > ${knownLogCount})`,
+        );
         return job;
       }
     }
-    logDebug(`[waitForJob] job ${job.jobId.slice(0, 8)} ${mode} timeout (logs=${job.logs.length}, status=${job.status})`);
+    logDebug(
+      `[waitForJob] job ${job.jobId.slice(0, 8)} ${mode} timeout (logs=${job.logs.length}, status=${job.status})`,
+    );
     return job;
   }
 }

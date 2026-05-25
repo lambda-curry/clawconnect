@@ -10,6 +10,35 @@ function logDebug(message: string, ...args: unknown[]): void {
   console.error(message, ...args);
 }
 
+/**
+ * Extract the user-facing reply body when the agent calls OpenClaw's generic
+ * `message` tool. Returns the trimmed text, or `""` when the tool isn't
+ * `message` or no recognizable body field is present.
+ *
+ * Why: openclaw's `message` tool routes its payload through the agent's
+ * configured delivery channel (WhatsApp, internal-ui, etc.) rather than
+ * surfacing it back to the run_task caller via `chat:final`. The model's
+ * own final assistant text in that case is typically a short ack like
+ * "Sent the packet inline through chat." This helper recovers the intended
+ * body from the tool args so the gateway can return it as the reply.
+ *
+ * Args shape varies: codex-app-server sends `{action, message}`, other
+ * runtimes use `{content}` or `{text}`. Try each in order.
+ *
+ * Mirrors `captureInternalMessageReply` in
+ * services/linear-agent/src/linear-stream.ts.
+ */
+export function extractMessageToolReply(
+  toolName: string,
+  args: Record<string, unknown> | undefined,
+): string {
+  if (toolName !== "message" || !args) return "";
+  const candidate = args.message ?? args.content ?? args.text;
+  if (typeof candidate !== "string") return "";
+  const trimmed = candidate.trim();
+  return trimmed.length > 0 ? trimmed : "";
+}
+
 // ── Device identity ──────────���───────────────────────────────────────────────
 
 const DEVICE_FILE = join(homedir(), ".openclaw", "clawd-ui-device.json");
@@ -32,7 +61,12 @@ function generateDevice(): DeviceIdentity {
   const pubBytes = Buffer.from(pubJwk.x, "base64url");
   const privBytes = Buffer.from(privJwk.d, "base64url");
   const deviceId = createHash("sha256").update(pubBytes).digest("hex");
-  return { version: 1, deviceId, publicKey: toBase64url(pubBytes), privateKey: toBase64url(privBytes) };
+  return {
+    version: 1,
+    deviceId,
+    publicKey: toBase64url(pubBytes),
+    privateKey: toBase64url(privBytes),
+  };
 }
 
 function loadOrCreateDevice(): DeviceIdentity {
@@ -127,7 +161,10 @@ function extractAssistantMessageText(message: Record<string, unknown>): string {
 export class OpenClawGateway {
   private ws: WebSocket | null = null;
   private subscribers = new Map<string, (frame: Frame) => void>();
-  private pendingRpcs = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
+  private pendingRpcs = new Map<
+    string,
+    { resolve: (v: unknown) => void; reject: (e: Error) => void }
+  >();
   private connectPromise: Promise<void> | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectAttempt = 0;
@@ -187,7 +224,12 @@ export class OpenClawGateway {
               params: {
                 minProtocol: 4,
                 maxProtocol: 4,
-                client: { id: "gateway-client", version: "internal", platform: "node", mode: "backend" },
+                client: {
+                  id: "gateway-client",
+                  version: "internal",
+                  platform: "node",
+                  mode: "backend",
+                },
                 role: "operator",
                 scopes: ["operator.read", "operator.write", "operator.admin"],
                 caps: ["tool-events"],
@@ -315,7 +357,11 @@ export class OpenClawGateway {
     this.connectPromise = null;
   }
 
-  private async sendRpc(method: string, params: Record<string, unknown>, timeoutMs: number): Promise<unknown> {
+  private async sendRpc(
+    method: string,
+    params: Record<string, unknown>,
+    timeoutMs: number,
+  ): Promise<unknown> {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       await this.connect();
     }
@@ -411,7 +457,8 @@ export class OpenClawGateway {
     },
   ): Promise<string> {
     const stableThreshold = Math.max(1, options.stableThreshold ?? 1);
-    const hardCapMs = options.hardCapMs ?? (options.attempts ? options.attempts * options.intervalMs : Infinity);
+    const hardCapMs =
+      options.hardCapMs ?? (options.attempts ? options.attempts * options.intervalMs : Infinity);
     const idleTimeoutMs = options.idleTimeoutMs ?? Infinity;
     const maxAttempts = options.attempts ?? Number.POSITIVE_INFINITY;
     // SFR-247 diag — remove after the immediate-exit bug is understood.
@@ -440,15 +487,21 @@ export class OpenClawGateway {
     let lastChangeAt = Date.now();
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       if (options.shouldAbort?.()) {
-        logDebug(`[poll ${diagId}] exit: shouldAbort=true at attempt=${attempt} elapsed=${Date.now() - startedAt}ms`);
+        logDebug(
+          `[poll ${diagId}] exit: shouldAbort=true at attempt=${attempt} elapsed=${Date.now() - startedAt}ms`,
+        );
         return stableTrailingText;
       }
       if (Date.now() - startedAt >= hardCapMs) {
-        logDebug(`[poll ${diagId}] exit: hardCap at attempt=${attempt} elapsed=${Date.now() - startedAt}ms`);
+        logDebug(
+          `[poll ${diagId}] exit: hardCap at attempt=${attempt} elapsed=${Date.now() - startedAt}ms`,
+        );
         return stableTrailingText;
       }
       if (Date.now() - lastChangeAt >= idleTimeoutMs) {
-        logDebug(`[poll ${diagId}] exit: idle at attempt=${attempt} elapsedSinceChange=${Date.now() - lastChangeAt}ms`);
+        logDebug(
+          `[poll ${diagId}] exit: idle at attempt=${attempt} elapsedSinceChange=${Date.now() - lastChangeAt}ms`,
+        );
         return stableTrailingText;
       }
       if (attempt > 0) await new Promise((r) => setTimeout(r, options.intervalMs));
@@ -547,7 +600,11 @@ export class OpenClawGateway {
 
     const idempotencyKey = randomUUID();
 
-    const sendResult = (await this.sendRpc("chat.send", { sessionKey, message, idempotencyKey }, 30_000)) as {
+    const sendResult = (await this.sendRpc(
+      "chat.send",
+      { sessionKey, message, idempotencyKey },
+      30_000,
+    )) as {
       runId?: string;
     };
     const runId = sendResult?.runId;
@@ -556,6 +613,15 @@ export class OpenClawGateway {
     return new Promise<string>((resolve, reject) => {
       const subId = randomUUID();
       let accumulated = "";
+      // SFR-message-veto: when the agent calls OpenClaw's generic `message`
+      // tool, the body it intended for the caller lives in the tool args and
+      // gets routed by openclaw's delivery subsystem to whatever channel the
+      // sender resolves to (WhatsApp, internal-ui, etc.) — NOT back through
+      // `chat:final`. The model's final assistant text in that case is
+      // typically a short ack like "Sent the packet inline through chat."
+      // Capture the tool-args text here so we can prefer it as the run_task
+      // reply, mirroring services/linear-agent/src/linear-stream.ts.
+      let messageToolReply = "";
 
       const extractText = (blocks: Array<{ type: string; text?: string; thinking?: string }>) =>
         blocks
@@ -574,26 +640,51 @@ export class OpenClawGateway {
       const agentSubId = randomUUID();
       this.subscribers.set(agentSubId, (frame) => {
         if (frame.type !== "event" || frame.event !== "agent") return;
-        const p = frame.payload as { runId?: string; stream?: string; data?: Record<string, unknown> };
+        const p = frame.payload as {
+          runId?: string;
+          stream?: string;
+          data?: Record<string, unknown>;
+        };
         if (p.runId !== runId) return;
 
         if (p.stream === "assistant" && p.data?.text) {
           agentStreamText = p.data.text as string;
         }
 
+        if (p.stream === "tool" && p.data?.phase === "start") {
+          const toolName = (p.data?.name as string) ?? "unknown";
+          const args = (p.data?.args as Record<string, unknown>) ?? {};
+          // Capture even if no onEvent subscriber — this is for the reply path.
+          const captured = extractMessageToolReply(toolName, args);
+          if (captured) messageToolReply = captured;
+        }
+
         if (onEvent) {
           if (p.stream === "lifecycle") {
             const phase = p.data?.phase as string;
-            onEvent({ type: "lifecycle", text: phase === "start" ? "Agent started" : "Agent finished" });
+            onEvent({
+              type: "lifecycle",
+              text: phase === "start" ? "Agent started" : "Agent finished",
+            });
           } else if (p.stream === "tool" && p.data?.phase === "start") {
             const toolName = (p.data?.name as string) ?? "unknown";
             const args = (p.data?.args as Record<string, unknown>) ?? {};
             const summary = args.command ?? args.file_path ?? args.pattern ?? args.query ?? "";
-            onEvent({ type: "tool", text: `${toolName}: ${String(summary).slice(0, 80)}`, toolName, args });
+            onEvent({
+              type: "tool",
+              text: `${toolName}: ${String(summary).slice(0, 80)}`,
+              toolName,
+              args,
+            });
           } else if (p.stream === "tool" && p.data?.phase === "result") {
             const toolName = (p.data?.name as string) ?? "unknown";
             const isError = p.data?.isError as boolean;
-            onEvent({ type: "tool-result", text: `${toolName} ${isError ? "failed" : "done"}`, toolName, isError });
+            onEvent({
+              type: "tool-result",
+              text: `${toolName} ${isError ? "failed" : "done"}`,
+              toolName,
+              isError,
+            });
           }
         }
       });
@@ -613,11 +704,23 @@ export class OpenClawGateway {
           const blocks = payload.message?.content ?? [];
           logDebug(
             "[openclaw-gateway] final blocks:",
-            JSON.stringify(blocks.map((b) => ({ type: b.type, len: (b.text ?? b.thinking ?? "").length }))),
+            JSON.stringify(
+              blocks.map((b) => ({ type: b.type, len: (b.text ?? b.thinking ?? "").length })),
+            ),
           );
-          // prefer full final message text → last chat delta → agent stream text
+          // prefer `message` tool args → full final message text → last chat
+          // delta → agent stream text. The tool-args path wins because when
+          // the agent used the `message` tool, the model's own final assistant
+          // text is typically a short ack ("Sent the packet inline through
+          // chat.") and the real body lives in the tool args.
           const liveText = extractText(blocks) || accumulated || agentStreamText;
-          if (liveText) {
+          if (messageToolReply) {
+            logDebug(
+              `[openclaw-gateway] preferring captured \`message\` tool reply ` +
+                `(${messageToolReply.length} chars) over live final text (${liveText.length} chars)`,
+            );
+            resolve(messageToolReply);
+          } else if (liveText) {
             resolve(liveText);
           } else {
             // The live stream yielded no final text. On long / compaction-heavy
