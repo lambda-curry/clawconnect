@@ -1,0 +1,29 @@
+FROM node:22-slim
+RUN corepack enable && corepack prepare pnpm@10.33.0 --activate
+WORKDIR /app
+
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY apps/chatgpt/package.json apps/chatgpt/
+COPY packages/core/package.json packages/core/
+RUN pnpm install --frozen-lockfile
+
+COPY . .
+RUN pnpm run ready
+
+# Entrypoint: regenerate agents.json from env var, then start
+COPY <<'EOF' /app/entrypoint.sh
+#!/bin/sh
+set -e
+if [ -n "$CLAWCONNECT_AGENTS_JSON" ]; then
+  mkdir -p ~/.clawconnect
+  printf '%s' "$CLAWCONNECT_AGENTS_JSON" > ~/.clawconnect/agents.json
+  echo "Wrote ~/.clawconnect/agents.json from CLAWCONNECT_AGENTS_JSON"
+else
+  echo "WARNING: CLAWCONNECT_AGENTS_JSON not set, no agents.json written"
+fi
+exec node apps/chatgpt/dist/index.js
+EOF
+RUN chmod +x /app/entrypoint.sh
+
+EXPOSE 7331
+CMD ["/app/entrypoint.sh"]
