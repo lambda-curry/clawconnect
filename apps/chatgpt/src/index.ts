@@ -373,6 +373,24 @@ Pass the jobId returned by run_task. Available agents: ${list}.`,
 hono.get("/", (c) => c.text("OK"));
 hono.get("/health", (c) => c.json({ ok: true }));
 
+const PUBLIC_MCP_PASS = process.env.PUBLIC_MCP_PASS ?? "";
+
+/**
+ * Check inbound pass on /mcp routes. Returns true when PUBLIC_MCP_PASS is
+ * unset (backward-compatible — no gate unless the env is set) or when the
+ * request supplies the correct pass via ?pass=<v> or Authorization: Bearer <v>.
+ */
+function hasValidPass(url: URL, req: import("node:http").IncomingMessage): boolean {
+  if (!PUBLIC_MCP_PASS) return true; // no pass configured = open (legacy)
+  if (url.searchParams.get("pass") === PUBLIC_MCP_PASS) return true;
+  const auth = req.headers.authorization ?? req.headers["authorization"] as string | undefined;
+  if (auth) {
+    const m = auth.match(/^Bearer\s+(.+)$/i);
+    if (m && m[1].trim() === PUBLIC_MCP_PASS) return true;
+  }
+  return false;
+}
+
 const server = createServer(async (req, res) => {
   if (req.url?.startsWith("/mcp")) {
     if (req.method === "OPTIONS") {
@@ -384,6 +402,14 @@ const server = createServer(async (req, res) => {
     Object.entries(CORS_HEADERS).forEach(([k, v]) => res.setHeader(k, v));
 
     const reqUrl = new URL(req.url, `http://${req.headers.host ?? "localhost"}`);
+
+    // Pass gate — reject /mcp requests without the correct secret.
+    if (!hasValidPass(reqUrl, req)) {
+      res.writeHead(403, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32001, message: "Forbidden: pass required via ?pass= or Authorization: Bearer" } }));
+      return;
+    }
+
     const scope = resolveScope(reqUrl);
 
     const chunks: Buffer[] = [];
