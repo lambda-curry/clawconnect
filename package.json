@@ -18,6 +18,7 @@
     "dev:mcp": "vp run mcp#dev"
   },
   "devDependencies": {
+    "@typescript/native-preview": "catalog:",
     "vite-plus": "catalog:"
   },
   "engines": {

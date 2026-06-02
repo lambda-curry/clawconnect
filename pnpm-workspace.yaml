@@ -2,14 +2,15 @@ packages:
   - apps/*
   - packages/*
 
-catalogMode: prefer
-
 catalog:
   "@types/node": ^22
+  '@typescript/native-preview': 7.0.0-dev.20260601.1
   typescript: ^5
   vite: npm:@voidzero-dev/vite-plus-core@latest
-  vitest: npm:@voidzero-dev/vite-plus-test@latest
   vite-plus: latest
+  vitest: npm:@voidzero-dev/vite-plus-test@latest
+
+catalogMode: prefer
 overrides:
   vite: "catalog:"
   vitest: "catalog:"
