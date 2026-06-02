@@ -26,6 +26,14 @@ if [ -n "$CLAWCONNECT_AGENTS_JSON" ]; then
 else
   echo "WARNING: CLAWCONNECT_AGENTS_JSON not set, no agents.json written"
 fi
+if [ -n "$CLAWCONNECT_DEVICE_JSON" ]; then
+  mkdir -p ~/.openclaw
+  umask 077
+  printf '%s' "$CLAWCONNECT_DEVICE_JSON" > ~/.openclaw/clawd-ui-device.json
+  echo "Wrote ~/.openclaw/clawd-ui-device.json from CLAWCONNECT_DEVICE_JSON"
+else
+  echo "WARNING: CLAWCONNECT_DEVICE_JSON not set, gateway client will create an ephemeral device identity"
+fi
 exec node apps/chatgpt/dist/index.js
 EOF
 RUN chmod +x /app/entrypoint.sh
