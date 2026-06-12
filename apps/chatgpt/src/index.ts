@@ -465,6 +465,17 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    // Streamable HTTP clients (Cursor, MCP SDK) open a GET on /mcp for the
+    // optional server→client SSE stream, and DELETE to end a session. We
+    // don't offer either — the spec says answer 405 (clients MUST tolerate
+    // it). Anything else (the old 400 Parse error) fails the client's
+    // transport state machine and kills the whole connection.
+    if (req.method !== "POST") {
+      res.writeHead(405, { Allow: "POST, OPTIONS" });
+      res.end();
+      return;
+    }
+
     const scope = resolveScope(reqUrl);
 
     const chunks: Buffer[] = [];
