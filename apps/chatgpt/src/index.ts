@@ -160,9 +160,22 @@ function blurbsFor(ids: string[]): string {
   return ids.map((id) => agentBlurb(AGENTS_BY_ID.get(id) ?? { id, url: "", password: "", openclawAgentId: "" })).join("; ");
 }
 
-function buildTools(allowedIds: string[], defaultId: string) {
+function buildTools(allowedIds: string[], defaultId: string, identity: Identity) {
   const list = allowedIds.join(", ");
   const blurbs = blurbsFor(allowedIds);
+  // Identified connections don't need the model to guess who it's talking to —
+  // the server stamps the token's name on every task and ignores senderName.
+  const senderNameProp = identity.user
+    ? {
+        type: "string" as const,
+        description: `Ignored — this connection is authenticated as ${identity.user}, and the server stamps that identity on every task.`,
+      }
+    : {
+        type: "string" as const,
+        description: identity.legacy
+          ? `Name of the person you're chatting with, on whose behalf this task is dispatched. Pass it when known so the receiving agent knows who it's helping. Also: ${GET_TOKEN_HINT}`
+          : "Name of the person you're chatting with, on whose behalf this task is dispatched. This connection may be shared by multiple people — when the user has identified themselves (or you otherwise know who you're talking to), pass their name so the receiving agent knows who it's helping. The agent has no other way to tell.",
+      };
   const agentProp = {
     type: "string" as const,
     enum: allowedIds,
@@ -190,10 +203,7 @@ Pass sessionKey from a previous result to continue the same thread. Available ag
             type: "string",
             description: "Session key from a previous call to continue the same thread. Omit to start a new thread.",
           },
-          senderName: {
-            type: "string",
-            description: "Name of the person you're chatting with, on whose behalf this task is dispatched. This connection may be shared by multiple people — when the user has identified themselves (or you otherwise know who you're talking to), pass their name so the receiving agent knows who it's helping. The agent has no other way to tell.",
-          },
+          senderName: senderNameProp,
         },
         required: ["task"],
       },
@@ -376,19 +386,63 @@ hono.get("/health", (c) => c.json({ ok: true }));
 const PUBLIC_MCP_PASS = process.env.PUBLIC_MCP_PASS ?? "";
 
 /**
- * Check inbound pass on /mcp routes. Returns true when PUBLIC_MCP_PASS is
- * unset (backward-compatible — no gate unless the env is set) or when the
- * request supplies the correct pass via ?pass=<v> or Authorization: Bearer <v>.
+ * Personal tokens: MCP_USER_TOKENS="Jake:tok1,Mohsen:tok2,...". A personal
+ * token both authenticates the request and identifies the person — identity
+ * derives from the credential, not from a spoofable query param — so the
+ * server can stamp `[Message from: <name>]` on every dispatched task and a
+ * single person's token can be revoked without rotating everyone.
+ *
+ * PUBLIC_MCP_PASS (the legacy shared pass) keeps working but resolves to an
+ * anonymous identity; those connections get a nudge to switch to a personal
+ * token so agents know who they're working with.
  */
-function hasValidPass(url: URL, req: import("node:http").IncomingMessage): boolean {
-  if (!PUBLIC_MCP_PASS) return true; // no pass configured = open (legacy)
-  if (url.searchParams.get("pass") === PUBLIC_MCP_PASS) return true;
-  const auth = req.headers.authorization ?? req.headers["authorization"] as string | undefined;
-  if (auth) {
-    const m = auth.match(/^Bearer\s+(.+)$/i);
-    if (m && m[1].trim() === PUBLIC_MCP_PASS) return true;
+const USER_TOKENS = new Map<string, string>();
+for (const pair of (process.env.MCP_USER_TOKENS ?? "").split(",")) {
+  const trimmed = pair.trim();
+  if (!trimmed) continue;
+  const sep = trimmed.indexOf(":");
+  const name = sep > 0 ? trimmed.slice(0, sep).trim() : "";
+  const token = sep > 0 ? trimmed.slice(sep + 1).trim() : "";
+  if (!name || !token) {
+    console.warn(`[mcp] MCP_USER_TOKENS entry "${trimmed.slice(0, 16)}…" is not "Name:token" — skipped`);
+    continue;
   }
-  return false;
+  if (USER_TOKENS.has(token)) {
+    console.warn(`[mcp] MCP_USER_TOKENS: duplicate token for "${name}" collides with "${USER_TOKENS.get(token)}" — skipped`);
+    continue;
+  }
+  USER_TOKENS.set(token, name);
+}
+if (USER_TOKENS.size > 0) {
+  console.log(`[mcp] personal tokens loaded for: ${[...USER_TOKENS.values()].join(", ")}`);
+}
+
+const GET_TOKEN_HINT =
+  "this connection uses the shared legacy token, so tasks arrive unattributed. " +
+  "Tell the user to ask Jake for their personal ClawConnect token — it stamps their name on every task so agents know who they're working with.";
+
+/**
+ * Resolve the caller's identity from the supplied credential (?pass=<v> or
+ * Authorization: Bearer <v>). Returns:
+ *   { user: "<name>" }                — personal token matched
+ *   { user: null, legacy: true }      — legacy shared pass matched
+ *   { user: null }                    — no auth configured at all (open mode)
+ *   null                              — credential missing or wrong → 403
+ */
+type Identity = { user: string | null; legacy?: boolean };
+
+function resolveIdentity(url: URL, req: import("node:http").IncomingMessage): Identity | null {
+  if (!PUBLIC_MCP_PASS && USER_TOKENS.size === 0) return { user: null }; // no gate configured (legacy open mode)
+  const fromQuery = url.searchParams.get("pass");
+  const auth = req.headers.authorization ?? (req.headers["authorization"] as string | undefined);
+  const fromHeader = auth?.match(/^Bearer\s+(.+)$/i)?.[1]?.trim();
+  for (const supplied of [fromQuery, fromHeader]) {
+    if (!supplied) continue;
+    const name = USER_TOKENS.get(supplied);
+    if (name) return { user: name };
+    if (PUBLIC_MCP_PASS && supplied === PUBLIC_MCP_PASS) return { user: null, legacy: true };
+  }
+  return null;
 }
 
 const server = createServer(async (req, res) => {
@@ -403,10 +457,11 @@ const server = createServer(async (req, res) => {
 
     const reqUrl = new URL(req.url, `http://${req.headers.host ?? "localhost"}`);
 
-    // Pass gate — reject /mcp requests without the correct secret.
-    if (!hasValidPass(reqUrl, req)) {
+    // Auth gate — reject /mcp requests without a valid personal token or the legacy shared pass.
+    const identity = resolveIdentity(reqUrl, req);
+    if (!identity) {
       res.writeHead(403, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32001, message: "Forbidden: pass required via ?pass= or Authorization: Bearer" } }));
+      res.end(JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32001, message: "Forbidden: token required via ?pass= or Authorization: Bearer" } }));
       return;
     }
 
@@ -443,13 +498,16 @@ const server = createServer(async (req, res) => {
       respond({
         protocolVersion: "2024-11-05",
         capabilities: { tools: {}, resources: {} },
-        serverInfo: { name: scope.serverName, version: "0.1.0" },
+        serverInfo: {
+          name: identity.user ? `${scope.serverName} (${identity.user})` : scope.serverName,
+          version: "0.1.0",
+        },
       });
     } else if (isNotification) {
       res.writeHead(202);
       res.end();
     } else if (msg.method === "tools/list") {
-      respond({ tools: buildTools(scope.allowedIds, scope.defaultId) });
+      respond({ tools: buildTools(scope.allowedIds, scope.defaultId, identity) });
     } else if (msg.method === "resources/list") {
       // Widget disabled — return no resources.
       respond({ resources: [] });
@@ -490,13 +548,21 @@ const server = createServer(async (req, res) => {
             agent: requestedAgent,
             context: args.context,
             sessionKey: args.sessionKey,
-            senderName: typeof args.senderName === "string" ? args.senderName : undefined,
+            // The token's identity is ground truth; a model-supplied senderName
+            // only fills in when the connection is anonymous (legacy/open).
+            senderName: identity.user ?? (typeof args.senderName === "string" ? args.senderName : undefined),
           });
-          console.log(`[mcp] submitted job ${result.jobId} on agent ${result.agent} session ${result.sessionKey}`);
+          console.log(`[mcp] submitted job ${result.jobId} on agent ${result.agent} session ${result.sessionKey} sender=${identity.user ?? args.senderName ?? "unknown"}${identity.legacy ? " (legacy token)" : ""}`);
           const entry = pool.forJob(result.jobId)!;
           const snapshot = entry.sessions.buildSnapshot(entry.sessions.getJob(result.jobId)!);
+          const submittedText = `Task submitted to ${result.agent}. Job ID: ${result.jobId}`;
           respond({
-            content: [{ type: "text", text: `Task submitted to ${result.agent}. Job ID: ${result.jobId}` }],
+            content: [
+              {
+                type: "text",
+                text: identity.legacy ? `${submittedText}\n\nNote: ${GET_TOKEN_HINT}` : submittedText,
+              },
+            ],
             structuredContent: { ...snapshot, agent: result.agent },
           });
         } catch (err) {

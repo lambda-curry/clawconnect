@@ -198,6 +198,27 @@ ChatGPT will call `run_task`, then poll with `check_task` until the task complet
 - The widget polls the server directly via `oai.callTool()` — it does not require `check_task` to have widget metadata
 - If the widget causes issues, set `ENABLE_CHATGPT_UI_WIDGET=false` and restart
 
+#### Authentication & user identity
+
+The HTTP server (`apps/chatgpt`) gates `/mcp` with tokens supplied via `?pass=<token>` on the connector URL or `Authorization: Bearer <token>`. Two env vars control it:
+
+```env
+# Personal tokens — token authenticates AND identifies the caller.
+MCP_USER_TOKENS=Jake:a1b2c3...,Mohsen:d4e5f6...
+
+# Legacy shared pass — still accepted, but resolves to an anonymous caller.
+PUBLIC_MCP_PASS=shared-secret
+```
+
+When a request authenticates with a personal token:
+
+- every `run_task` is stamped with that person's name (`[Message from: Jake]` in the task the agent receives) — the model-supplied `senderName` argument is ignored, so identity derives from the credential rather than from anything spoofable
+- `serverInfo.name` becomes `ClawConnect (Jake)` so multiple people's connectors are distinguishable
+
+When a request authenticates with the legacy `PUBLIC_MCP_PASS`, tasks arrive unattributed (unless the model passes `senderName`) and tool responses nudge the caller to get a personal token. Revoking one person = removing their entry from `MCP_USER_TOKENS`; the shared pass never needs rotating for that.
+
+If neither env var is set, `/mcp` is open (no gate) — only do that on a private network.
+
 ## Usage
 
 Once configured, your AI agent has access to the MCP tools. Example flow:
