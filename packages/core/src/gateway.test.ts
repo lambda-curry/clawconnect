@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { extractMessageToolReply } from "./gateway.ts";
+import { extractMessageToolReply, formatLifecycleEventText } from "./gateway.ts";
 
 describe("extractMessageToolReply", () => {
   it("returns the trimmed `message` arg for codex-style `message` tool calls", () => {
@@ -49,5 +49,18 @@ describe("extractMessageToolReply", () => {
   it("prefers `message` over `content` over `text` when multiple are present", () => {
     const args = { message: "from message", content: "from content", text: "from text" };
     expect(extractMessageToolReply("message", args)).toBe("from message");
+  });
+});
+
+describe("formatLifecycleEventText", () => {
+  it("preserves the lifecycle phase instead of collapsing non-start phases to finished", () => {
+    expect(formatLifecycleEventText("start")).toBe("Agent lifecycle: start");
+    expect(formatLifecycleEventText("end")).toBe("Agent lifecycle: end");
+    expect(formatLifecycleEventText("compact")).toBe("Agent lifecycle: compact");
+  });
+
+  it("handles missing lifecycle phase explicitly", () => {
+    expect(formatLifecycleEventText(undefined)).toBe("Agent lifecycle: unknown");
+    expect(formatLifecycleEventText("  ")).toBe("Agent lifecycle: unknown");
   });
 });

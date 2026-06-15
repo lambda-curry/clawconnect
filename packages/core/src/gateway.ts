@@ -156,6 +156,11 @@ function extractAssistantMessageText(message: Record<string, unknown>): string {
   return "";
 }
 
+export function formatLifecycleEventText(phase: unknown): string {
+  const normalized = typeof phase === "string" && phase.trim() ? phase.trim() : "unknown";
+  return `Agent lifecycle: ${normalized}`;
+}
+
 // ── Gateway client ───────────────────────────────────────────────────────────
 
 export class OpenClawGateway {
@@ -661,10 +666,9 @@ export class OpenClawGateway {
 
         if (onEvent) {
           if (p.stream === "lifecycle") {
-            const phase = p.data?.phase as string;
             onEvent({
               type: "lifecycle",
-              text: phase === "start" ? "Agent started" : "Agent finished",
+              text: formatLifecycleEventText(p.data?.phase),
             });
           } else if (p.stream === "tool" && p.data?.phase === "start") {
             const toolName = (p.data?.name as string) ?? "unknown";

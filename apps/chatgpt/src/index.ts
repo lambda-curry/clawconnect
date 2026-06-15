@@ -571,7 +571,14 @@ const server = createServer(async (req, res) => {
             content: [
               {
                 type: "text",
-                text: identity.legacy ? `${submittedText}\n\nNote: ${GET_TOKEN_HINT}` : submittedText,
+                text: JSON.stringify({
+                  jobId: result.jobId,
+                  taskId: result.taskId,
+                  sessionKey: result.sessionKey,
+                  status: result.status,
+                  agent: result.agent,
+                  message: "Task submitted. Use check_task to poll for progress.",
+                }) + (identity.legacy ? `\n\nNote: ${GET_TOKEN_HINT}` : ""),
               },
             ],
             structuredContent: { ...snapshot, agent: result.agent },
@@ -628,7 +635,11 @@ const server = createServer(async (req, res) => {
             content: [
               {
                 type: "text",
-                text: isTerminal ? (snapshot.summary ?? snapshot.error ?? "") : "Still running. Poll again.",
+                text: isTerminal
+                  ? (snapshot.summary ?? snapshot.error ?? "")
+                  : snapshot.recovery
+                    ? "Recovering late transcript final text. Poll again."
+                    : "Still running. Poll again.",
               },
             ],
             structuredContent: snapshot,
@@ -728,6 +739,7 @@ const server = createServer(async (req, res) => {
             status: s.status,
             startedAt: s.startedAt,
             lastEventAt: s.lastEventAt,
+            recovery: s.recovery,
           };
           if (d === "summary" || has("summary")) {
             payload.summary = s.summary;
@@ -739,7 +751,7 @@ const server = createServer(async (req, res) => {
             payload.artifacts = s.artifacts;
           }
           if (d === "diagnostics" || d === "fullWithDiagnostics") {
-            payload.diagnostics = { error: s.error, errorInfo: s.errorInfo, continuationState: s.continuationState };
+            payload.diagnostics = { error: s.error, errorInfo: s.errorInfo, recovery: s.recovery, continuationState: s.continuationState };
           }
           respond({
             content: [{ type: "text", text: JSON.stringify(payload) }],
