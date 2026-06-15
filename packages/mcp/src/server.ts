@@ -98,7 +98,10 @@ function defaultFormatCheckTask(result: CheckTaskResult): McpToolResponse {
             agent: snapshot.agent,
             elapsedSeconds: Math.round((Date.now() - snapshot.startedAt) / 1000),
             logCount: snapshot.logs.length,
-            hint: "Task is actively running. Call check_task again to continue waiting.",
+            recovery: snapshot.recovery,
+            hint: snapshot.recovery
+              ? "Task is recovering late transcript final text. Call check_task again to continue waiting."
+              : "Task is actively running. Call check_task again to continue waiting.",
           }),
         },
       ],
@@ -115,6 +118,7 @@ function defaultFormatCheckTask(result: CheckTaskResult): McpToolResponse {
           sessionKey: snapshot.sessionKey,
           agent: snapshot.agent,
           status: snapshot.status,
+          recovery: snapshot.recovery,
           summary: snapshot.summary,
           error: snapshot.error,
           errorInfo: snapshot.errorInfo,
@@ -285,12 +289,13 @@ Pass the jobId returned by run_task. Available agents: ${agentList}.`,
               status: snapshot.status,
               startedAt: snapshot.startedAt,
               lastEventAt: snapshot.lastEventAt,
+              recovery: snapshot.recovery,
               summary: d === "summary" || has("summary") ? snapshot.summary : undefined,
               updates: has("updates") ? snapshot.logs : undefined,
               artifacts: has("artifacts") ? snapshot.artifacts : undefined,
               diagnostics:
                 d === "diagnostics" || d === "fullWithDiagnostics"
-                  ? { error: snapshot.error, errorInfo: snapshot.errorInfo, continuationState: snapshot.continuationState }
+                  ? { error: snapshot.error, errorInfo: snapshot.errorInfo, recovery: snapshot.recovery, continuationState: snapshot.continuationState }
                   : undefined,
             }),
           },

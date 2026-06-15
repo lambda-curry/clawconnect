@@ -39,6 +39,13 @@ export type LogEntry = { ts: number; type: string; text: string };
 export type JobStatus = "running" | "completed" | "completed_no_summary" | "error";
 export type TaskStatus = "queued" | "running" | "blocked" | "needs-human" | "done" | "failed";
 
+export type JobRecoveryState = {
+  reason: "no_live_final_text";
+  startedAt: number;
+  idleTimeoutMs: number;
+  hardCapMs: number;
+};
+
 export type Job = {
   jobId: string;
   sessionKey: string;
@@ -50,6 +57,7 @@ export type Job = {
   lastEventAt: number;
   logs: LogEntry[];
   artifacts: Artifacts;
+  recovery?: JobRecoveryState;
   /** Timestamp of the most recent lazy-transcript-recheck for a terminal job
    *  (completed_no_summary / error). Used to rate-limit re-reads so a poll
    *  storm doesn't hammer chat.history. Unset until the first recheck. */
@@ -68,6 +76,7 @@ export type JobSnapshot = {
   errorInfo?: ErrorInfo;
   logs: LogEntry[];
   artifacts: Artifacts;
+  recovery?: JobRecoveryState;
   continuationState?: ContinuationState;
   /** ClawConnect agent alias this job ran against. Present from multi-agent gateway onward. */
   agent?: string;

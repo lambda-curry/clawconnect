@@ -260,6 +260,20 @@ export class SessionManager {
     // that produce activity forever without ever stabilizing.
     const idleTimeoutMs = 5 * 60_000;
     const hardCapMs = RECOVERY_TIMEOUT_MS;
+    job.recovery = {
+      reason: "no_live_final_text",
+      startedAt: Date.now(),
+      idleTimeoutMs,
+      hardCapMs,
+    };
+    if (job.logs.length < MAX_LOG_ENTRIES) {
+      job.logs.push({
+        ts: Date.now(),
+        type: "recovery",
+        text:
+          "Recovering late transcript final text after live stream ended without visible final text",
+      });
+    }
     logDebug(
       `[job ${jobId}] no live final text — starting transcript long-poll ` +
         `(idle-timeout=${idleTimeoutMs / 1000}s, hard-cap=${hardCapMs / 1000}s)`,
@@ -284,6 +298,7 @@ export class SessionManager {
           if (recovered && recovered.length > 0) {
             job.status = "completed";
             job.summary = recovered;
+            job.recovery = undefined;
             extractPatternsFromSummary(artifacts, recovered);
             this.sessions.set(sessionKey, {
               sessionKey,
@@ -299,6 +314,7 @@ export class SessionManager {
           }
           job.status = "completed_no_summary";
           job.summary = "Stream finished with no response collected.";
+          job.recovery = undefined;
           this.sessions.set(sessionKey, {
             sessionKey,
             lastJobId: jobId,
@@ -318,6 +334,7 @@ export class SessionManager {
           if (job.status !== "running") return;
           job.lastEventAt = Date.now();
           job.status = "completed_no_summary";
+          job.recovery = undefined;
           job.summary = "Stream finished with no response collected.";
           this.sessions.set(sessionKey, {
             sessionKey,
@@ -403,6 +420,7 @@ export class SessionManager {
       errorInfo: job.errorInfo,
       logs: job.logs,
       artifacts: job.artifacts,
+      recovery: job.recovery,
       ...(continuation ? { continuationState: continuation } : {}),
     };
   }
