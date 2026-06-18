@@ -1,4 +1,5 @@
 import "dotenv/config";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { createServer } from "node:http";
 
 // Process-level safety net: a bug anywhere in a fire-and-forget Promise (e.g.,
@@ -395,26 +396,102 @@ const PUBLIC_MCP_PASS = process.env.PUBLIC_MCP_PASS ?? "";
  * PUBLIC_MCP_PASS (the legacy shared pass) keeps working but resolves to an
  * anonymous identity; those connections get a nudge to switch to a personal
  * token so agents know who they're working with.
+ *
+ * MCP_USER_TOKENS_FILE can point at a runtime-editable JSON file for adding or
+ * revoking tokens without restarting the MCP process. Supported JSON shapes:
+ *   { "Jake": "tok1", "Mohsen": "tok2" }
+ *   { "tokens": { "Jake": "tok1", "Mohsen": "tok2" } }
+ *   [{ "name": "Jake", "token": "tok1" }]
  */
-const USER_TOKENS = new Map<string, string>();
-for (const pair of (process.env.MCP_USER_TOKENS ?? "").split(",")) {
-  const trimmed = pair.trim();
-  if (!trimmed) continue;
-  const sep = trimmed.indexOf(":");
-  const name = sep > 0 ? trimmed.slice(0, sep).trim() : "";
-  const token = sep > 0 ? trimmed.slice(sep + 1).trim() : "";
-  if (!name || !token) {
-    console.warn(`[mcp] MCP_USER_TOKENS entry "${trimmed.slice(0, 16)}…" is not "Name:token" — skipped`);
-    continue;
+const MCP_USER_TOKENS_FILE = process.env.MCP_USER_TOKENS_FILE?.trim();
+
+function addToken(target: Map<string, string>, name: string, token: string, source: string) {
+  const cleanName = name.trim();
+  const cleanToken = token.trim();
+  if (!cleanName || !cleanToken) return;
+  if (target.has(cleanToken)) {
+    console.warn(`[mcp] ${source}: duplicate token for "${cleanName}" collides with "${target.get(cleanToken)}" — skipped`);
+    return;
   }
-  if (USER_TOKENS.has(token)) {
-    console.warn(`[mcp] MCP_USER_TOKENS: duplicate token for "${name}" collides with "${USER_TOKENS.get(token)}" — skipped`);
-    continue;
-  }
-  USER_TOKENS.set(token, name);
+  target.set(cleanToken, cleanName);
 }
-if (USER_TOKENS.size > 0) {
-  console.log(`[mcp] personal tokens loaded for: ${[...USER_TOKENS.values()].join(", ")}`);
+
+function parseTokenCsv(raw: string | undefined, source: string): Map<string, string> {
+  const tokens = new Map<string, string>();
+  for (const pair of (raw ?? "").split(",")) {
+    const trimmed = pair.trim();
+    if (!trimmed) continue;
+    const sep = trimmed.indexOf(":");
+    const name = sep > 0 ? trimmed.slice(0, sep).trim() : "";
+    const token = sep > 0 ? trimmed.slice(sep + 1).trim() : "";
+    if (!name || !token) {
+      console.warn(`[mcp] ${source} entry "${trimmed.slice(0, 16)}..." is not "Name:token" — skipped`);
+      continue;
+    }
+    addToken(tokens, name, token, source);
+  }
+  return tokens;
+}
+
+function parseTokenJson(raw: string, source: string): Map<string, string> {
+  const parsed = JSON.parse(raw) as unknown;
+  const tokens = new Map<string, string>();
+  if (Array.isArray(parsed)) {
+    for (const entry of parsed) {
+      if (!entry || typeof entry !== "object") continue;
+      const { name, token } = entry as Record<string, unknown>;
+      if (typeof name === "string" && typeof token === "string") addToken(tokens, name, token, source);
+    }
+    return tokens;
+  }
+  if (!parsed || typeof parsed !== "object") return tokens;
+  const obj = parsed as Record<string, unknown>;
+  const record = obj.tokens && typeof obj.tokens === "object" && !Array.isArray(obj.tokens)
+    ? (obj.tokens as Record<string, unknown>)
+    : obj;
+  for (const [name, token] of Object.entries(record)) {
+    if (typeof token === "string") addToken(tokens, name, token, source);
+  }
+  return tokens;
+}
+
+const ENV_USER_TOKENS = parseTokenCsv(process.env.MCP_USER_TOKENS, "MCP_USER_TOKENS");
+if (ENV_USER_TOKENS.size > 0) {
+  console.log(`[mcp] env personal tokens loaded for: ${[...ENV_USER_TOKENS.values()].join(", ")}`);
+}
+if (MCP_USER_TOKENS_FILE) {
+  console.log(`[mcp] runtime token file enabled: ${MCP_USER_TOKENS_FILE}`);
+}
+
+let fileTokenCache = new Map<string, string>();
+let fileTokenMtimeMs: number | null = null;
+
+function loadFileTokens(): Map<string, string> {
+  if (!MCP_USER_TOKENS_FILE) return fileTokenCache;
+  try {
+    if (!existsSync(MCP_USER_TOKENS_FILE)) {
+      if (fileTokenMtimeMs !== null || fileTokenCache.size > 0) {
+        console.warn(`[mcp] token file disappeared: ${MCP_USER_TOKENS_FILE}`);
+      }
+      fileTokenMtimeMs = null;
+      fileTokenCache = new Map();
+      return fileTokenCache;
+    }
+    const mtimeMs = statSync(MCP_USER_TOKENS_FILE).mtimeMs;
+    if (fileTokenMtimeMs === mtimeMs) return fileTokenCache;
+    fileTokenCache = parseTokenJson(readFileSync(MCP_USER_TOKENS_FILE, "utf8"), MCP_USER_TOKENS_FILE);
+    fileTokenMtimeMs = mtimeMs;
+    console.log(`[mcp] runtime personal tokens loaded for: ${[...fileTokenCache.values()].join(", ") || "(none)"}`);
+  } catch (err) {
+    console.warn(`[mcp] failed to read token file ${MCP_USER_TOKENS_FILE}: ${(err as Error).message}`);
+  }
+  return fileTokenCache;
+}
+
+function getUserTokens(): Map<string, string> {
+  const merged = new Map(ENV_USER_TOKENS);
+  for (const [token, name] of loadFileTokens()) addToken(merged, name, token, MCP_USER_TOKENS_FILE ?? "token file");
+  return merged;
 }
 
 const GET_TOKEN_HINT =
@@ -432,13 +509,14 @@ const GET_TOKEN_HINT =
 type Identity = { user: string | null; legacy?: boolean };
 
 function resolveIdentity(url: URL, req: import("node:http").IncomingMessage): Identity | null {
-  if (!PUBLIC_MCP_PASS && USER_TOKENS.size === 0) return { user: null }; // no gate configured (legacy open mode)
+  const userTokens = getUserTokens();
+  if (!PUBLIC_MCP_PASS && userTokens.size === 0) return { user: null }; // no gate configured (legacy open mode)
   const fromQuery = url.searchParams.get("pass");
   const auth = req.headers.authorization ?? (req.headers["authorization"] as string | undefined);
   const fromHeader = auth?.match(/^Bearer\s+(.+)$/i)?.[1]?.trim();
   for (const supplied of [fromQuery, fromHeader]) {
     if (!supplied) continue;
-    const name = USER_TOKENS.get(supplied);
+    const name = userTokens.get(supplied);
     if (name) return { user: name };
     if (PUBLIC_MCP_PASS && supplied === PUBLIC_MCP_PASS) return { user: null, legacy: true };
   }

@@ -206,6 +206,9 @@ The HTTP server (`apps/chatgpt`) gates `/mcp` with tokens supplied via `?pass=<t
 # Personal tokens — token authenticates AND identifies the caller.
 MCP_USER_TOKENS=Jake:a1b2c3...,Mohsen:d4e5f6...
 
+# Optional runtime-editable JSON token file. Changes are picked up without restart.
+MCP_USER_TOKENS_FILE=/data/clawconnect/user-tokens.json
+
 # Legacy shared pass — still accepted, but resolves to an anonymous caller.
 PUBLIC_MCP_PASS=shared-secret
 ```
@@ -215,7 +218,21 @@ When a request authenticates with a personal token:
 - every `run_task` is stamped with that person's name (`[Message from: Jake]` in the task the agent receives) — the model-supplied `senderName` argument is ignored, so identity derives from the credential rather than from anything spoofable
 - `serverInfo.name` becomes `ClawConnect (Jake)` so multiple people's connectors are distinguishable
 
-When a request authenticates with the legacy `PUBLIC_MCP_PASS`, tasks arrive unattributed (unless the model passes `senderName`) and tool responses nudge the caller to get a personal token. Revoking one person = removing their entry from `MCP_USER_TOKENS`; the shared pass never needs rotating for that.
+`MCP_USER_TOKENS_FILE` is additive with `MCP_USER_TOKENS` and supports these JSON shapes:
+
+```json
+{ "Faraz": "cc-faraz-...", "Junaid": "cc-junaid-..." }
+```
+
+```json
+{ "tokens": { "Faraz": "cc-faraz-...", "Junaid": "cc-junaid-..." } }
+```
+
+```json
+[{ "name": "Faraz", "token": "cc-faraz-..." }]
+```
+
+When a request authenticates with the legacy `PUBLIC_MCP_PASS`, tasks arrive unattributed (unless the model passes `senderName`) and tool responses nudge the caller to get a personal token. Revoking one person = removing their entry from `MCP_USER_TOKENS` or the runtime token file; the shared pass never needs rotating for that.
 
 If neither env var is set, `/mcp` is open (no gate) — only do that on a private network.
 
