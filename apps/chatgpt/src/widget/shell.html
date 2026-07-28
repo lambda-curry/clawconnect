@@ -1,0 +1,339 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+  :root {
+    --cc-bg: var(--color-background-primary, #ffffff);
+    --cc-fg: var(--color-text-primary, #111111);
+    --cc-fg-muted: var(--color-text-secondary, #666666);
+    --cc-border: var(--color-border-primary, #e2e2e2);
+    --cc-accent: var(--color-accent, #2563eb);
+    --cc-active: #2563eb;
+    --cc-needs-attention: #b45309;
+    --cc-completed: #15803d;
+    --cc-failed: #b91c1c;
+  }
+  :root[data-theme="dark"] {
+    --cc-bg: var(--color-background-primary, #18181b);
+    --cc-fg: var(--color-text-primary, #f4f4f5);
+    --cc-fg-muted: var(--color-text-secondary, #a1a1aa);
+    --cc-border: var(--color-border-primary, #3f3f46);
+  }
+  @media (prefers-color-scheme: dark) {
+    /* Only applies before the host has told us its theme via hostContext —
+       data-theme (set explicitly, see applyTheme()) always wins once known,
+       in both directions, per the bug the prior widget shipped. */
+    :root:not([data-theme]) {
+      --cc-bg: #18181b;
+      --cc-fg: #f4f4f5;
+      --cc-fg-muted: #a1a1aa;
+      --cc-border: #3f3f46;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: var(--cc-bg);
+    color: var(--cc-fg);
+  }
+  #root { padding: 10px 12px; overflow-x: hidden; }
+  .cc-row { border: 1px solid var(--cc-border); border-radius: 8px; padding: 8px 10px; margin-bottom: 6px; cursor: pointer; }
+  .cc-row:last-child { margin-bottom: 0; }
+  .cc-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cc-meta { color: var(--cc-fg-muted); font-size: 11px; margin-top: 2px; }
+  .cc-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 5px; }
+  .cc-dot--active { background: var(--cc-active); }
+  .cc-dot--needs_attention { background: var(--cc-needs-attention); }
+  .cc-dot--completed { background: var(--cc-completed); }
+  .cc-dot--failed { background: var(--cc-failed); }
+  .cc-history { margin-top: 6px; padding-left: 12px; border-left: 2px solid var(--cc-border); }
+  .cc-history-item { font-size: 12px; padding: 3px 0; color: var(--cc-fg-muted); }
+  .cc-actions { margin-top: 8px; display: flex; gap: 6px; flex-wrap: wrap; }
+  .cc-btn {
+    font: inherit; padding: 4px 9px; border-radius: 6px; border: 1px solid var(--cc-border);
+    background: transparent; color: var(--cc-fg); cursor: pointer;
+  }
+  .cc-btn:hover { border-color: var(--cc-accent); }
+  .cc-footer { margin-top: 8px; color: var(--cc-fg-muted); font-size: 11px; }
+  .cc-prompt { margin-top: 6px; padding: 6px 8px; border-radius: 6px; background: var(--cc-border); font-size: 12px; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<div id="root">Loading…</div>
+<script>
+__STATE_MODULE__
+
+// ── Bridge: window.openai primary (ChatGPT's actual implemented surface),
+// a minimal hand-rolled MCP-Apps postMessage fallback for a spec-compliant
+// host that doesn't implement window.openai. Read-only/navigation only —
+// no ui/message completion, no mutation calls, ever.
+const bridge = (() => {
+  let mcpAppsRequestId = 0;
+  const pending = new Map();
+
+  function viaWindowOpenAI() {
+    return typeof window.openai?.callTool === "function" ? window.openai : null;
+  }
+
+  function initMcpAppsFallback() {
+    window.addEventListener("message", (event) => {
+      const msg = event.data;
+      if (!msg || typeof msg !== "object" || msg.id === undefined) return;
+      const resolver = pending.get(msg.id);
+      if (!resolver) return;
+      pending.delete(msg.id);
+      if (msg.error) resolver.reject(new Error(msg.error.message || "tool call failed"));
+      else resolver.resolve(msg.result);
+    });
+    window.parent?.postMessage({ jsonrpc: "2.0", id: "ui/initialize", method: "ui/initialize", params: {} }, "*");
+  }
+  initMcpAppsFallback();
+
+  async function callTool(name, args) {
+    const openai = viaWindowOpenAI();
+    if (openai) return openai.callTool(name, args);
+    const id = `cc-${++mcpAppsRequestId}`;
+    const result = new Promise((resolve, reject) => {
+      pending.set(id, { resolve, reject });
+      setTimeout(() => {
+        if (pending.has(id)) {
+          pending.delete(id);
+          reject(new Error("tool call timed out"));
+        }
+      }, 15000);
+    });
+    window.parent?.postMessage({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } }, "*");
+    return result;
+  }
+
+  function readMountData() {
+    const openai = viaWindowOpenAI();
+    const output = openai?.toolOutput ?? null;
+    return output?.structuredContent ?? output ?? null;
+  }
+
+  function readWidgetState() {
+    return viaWindowOpenAI()?.widgetState ?? null;
+  }
+
+  function saveWidgetState(value) {
+    viaWindowOpenAI()?.setWidgetState?.(value);
+  }
+
+  function currentTheme() {
+    return viaWindowOpenAI()?.theme ?? (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+  }
+
+  function onThemeChange(cb) {
+    window.addEventListener("openai:set_globals", () => cb(currentTheme()));
+  }
+
+  return { callTool, readMountData, readWidgetState, saveWidgetState, currentTheme, onThemeChange };
+})();
+
+function applyTheme() {
+  document.documentElement.setAttribute("data-theme", bridge.currentTheme());
+}
+applyTheme();
+bridge.onThemeChange(applyTheme);
+
+// ── App state — bridge/DOM glue only. Every decision (grouping, titles,
+// view collapse, cadence, dedup) is delegated to the tested pure functions
+// imported above; this section never re-implements that logic.
+const app = {
+  mounted: null,
+  tasks: [],
+  view: "active",
+  allActivity: false,
+  knownSessionKeys: new Set(),
+  pollInFlight: false,
+  pollFailures: 0,
+  expanded: new Map(), // sessionKey -> history[]
+  promptText: new Map(), // taskId -> revealed prompt text
+};
+
+function rehydrate() {
+  const mountData = bridge.readMountData();
+  if (mountData?.jobId || mountData?.taskId) {
+    app.mounted = { taskId: mountData.taskId ?? mountData.jobId, sessionKey: mountData.sessionKey };
+    app.knownSessionKeys.add(app.mounted.sessionKey);
+  }
+  const saved = bridge.readWidgetState();
+  if (saved?.knownSessionKeys) for (const k of saved.knownSessionKeys) app.knownSessionKeys.add(k);
+  if (!app.mounted && saved?.mounted) app.mounted = saved.mounted;
+}
+
+function persist() {
+  bridge.saveWidgetState({ mounted: app.mounted, knownSessionKeys: [...app.knownSessionKeys] });
+}
+
+async function refresh() {
+  if (!shouldPoll({ pollInFlight: app.pollInFlight, tasks: app.tasks })) return;
+  app.pollInFlight = true;
+  try {
+    const result = await bridge.callTool("list_tasks", { view: app.allActivity ? "all" : "active" });
+    const tasks = result?.structuredContent?.tasks ?? result?.tasks ?? [];
+    const scope = resolveScope([...app.knownSessionKeys], app.allActivity);
+    app.tasks = filterTasksByScope(tasks, scope);
+    app.pollFailures = 0;
+  } catch {
+    app.pollFailures += 1;
+  } finally {
+    app.pollInFlight = false;
+    render();
+    scheduleNext();
+  }
+}
+
+function scheduleNext() {
+  const view = deriveViewMode(app.mounted, app.tasks);
+  const group =
+    view.mode === "focused"
+      ? groupStatus(app.tasks.find((t) => t.taskId === view.taskId || t.jobId === view.taskId)?.status ?? "running")
+      : "active";
+  const delay = pollIntervalMs(group, app.pollFailures);
+  if (delay === null) return; // terminal — stop polling entirely
+  setTimeout(refresh, delay);
+}
+
+async function toggleExpand(sessionKey) {
+  if (app.expanded.has(sessionKey)) {
+    app.expanded.delete(sessionKey);
+    render();
+    return;
+  }
+  try {
+    const result = await bridge.callTool("get_session", { sessionId: sessionKey, mode: "tasks" });
+    app.expanded.set(sessionKey, result?.structuredContent?.tasks ?? result?.tasks ?? []);
+  } catch {
+    app.expanded.set(sessionKey, []);
+  }
+  render();
+}
+
+async function revealPrompt(taskId) {
+  try {
+    const result = await bridge.callTool("get_task", { taskId, detail: "prompt" });
+    const prompt = result?.structuredContent?.prompt ?? result?.prompt;
+    app.promptText.set(taskId, prompt?.task ?? "(no prompt available)");
+  } catch {
+    app.promptText.set(taskId, "(failed to load)");
+  }
+  render();
+}
+
+function composeFollowUp(sessionKey, text) {
+  // Actions are messages, never mutations — the widget never calls a
+  // mutating tool itself; it hands a prompt back to the assistant.
+  window.openai?.sendFollowUpMessage?.({ prompt: `${text} (sessionKey: ${sessionKey})` });
+}
+
+function el(tag, props, children) {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(props ?? {})) {
+    if (k === "onclick") node.addEventListener("click", v);
+    else if (k === "class") node.className = v;
+    else node.setAttribute(k, v);
+  }
+  for (const child of children ?? []) {
+    if (child === null || child === undefined) continue;
+    node.append(typeof child === "string" ? document.createTextNode(child) : child);
+  }
+  return node;
+}
+
+function renderRow(row) {
+  const history = app.expanded.get(row.sessionKey);
+  const children = [
+    el("div", { class: "cc-title" }, [
+      el("span", { class: `cc-dot cc-dot--${row.group}` }, []),
+      row.title,
+    ]),
+    el("div", { class: "cc-meta" }, [`${row.latestTask.agent ?? "?"} · ${row.group.replace("_", " ")}`]),
+  ];
+  if (history) {
+    children.push(
+      el(
+        "div",
+        { class: "cc-history" },
+        history.map((h) =>
+          el("div", { class: "cc-history-item" }, [
+            el("span", { class: `cc-dot cc-dot--${groupStatus(h.status)}` }, []),
+            deriveTitle(h),
+          ]),
+        ),
+      ),
+    );
+  }
+  if (canReadPrompt(row.latestTask) && app.promptText.has(row.latestTask.taskId ?? row.latestTask.jobId)) {
+    children.push(el("div", { class: "cc-prompt" }, [app.promptText.get(row.latestTask.taskId ?? row.latestTask.jobId)]));
+  }
+  const actions = [];
+  if (canReadPrompt(row.latestTask)) {
+    actions.push(
+      el("button", { class: "cc-btn", onclick: (e) => { e.stopPropagation(); revealPrompt(row.latestTask.taskId ?? row.latestTask.jobId); } }, [
+        "Show original request",
+      ]),
+    );
+  }
+  actions.push(
+    el("button", { class: "cc-btn", onclick: (e) => { e.stopPropagation(); composeFollowUp(row.sessionKey, "Continue this task"); } }, [
+      "Continue",
+    ]),
+  );
+  children.push(el("div", { class: "cc-actions" }, actions));
+
+  const rowEl = el("div", { class: "cc-row", onclick: () => toggleExpand(row.sessionKey) }, children);
+  return rowEl;
+}
+
+function render() {
+  const root = document.getElementById("root");
+  root.innerHTML = "";
+  const view = deriveViewMode(app.mounted, app.tasks);
+  const rows = buildSessionRows(app.tasks, { highlightSessionKey: view.highlightSessionKey ?? app.mounted?.sessionKey });
+  const visibleRows = filterRows(rows, app.view);
+
+  if (visibleRows.length === 0) {
+    root.append(el("div", { class: "cc-meta" }, ["No active tasks."]));
+  } else {
+    for (const row of visibleRows) root.append(renderRow(row));
+  }
+
+  const footer = el("div", { class: "cc-footer" }, [
+    el(
+      "button",
+      {
+        class: "cc-btn",
+        onclick: () => {
+          app.view = app.view === "active" ? "recent" : "active";
+          render();
+        },
+      },
+      [app.view === "active" ? "Show recent" : "Show active"],
+    ),
+    " ",
+    el(
+      "button",
+      {
+        class: "cc-btn",
+        onclick: () => {
+          app.allActivity = !app.allActivity;
+          refresh();
+        },
+      },
+      [app.allActivity ? "This session only" : "All activity"],
+    ),
+  ]);
+  root.append(footer);
+  persist();
+}
+
+rehydrate();
+render();
+refresh();
+</script>
+</body>
+</html>

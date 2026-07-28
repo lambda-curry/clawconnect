@@ -31,7 +31,13 @@ import {
 } from "./ui-meta.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const DEFAULT_WIDGET_HTML_PATH = join(__dirname, "widget.html");
+// scripts/build-widget.mjs always writes to <package root>/dist/widget.html.
+// Resolving via "../dist" (not the running module's own directory) finds it
+// correctly whether this module is running compiled (dist/app.js, so
+// __dirname already is dist/) or via `tsx watch src/index.ts` in dev
+// (__dirname is src/) — as long as `node scripts/build-widget.mjs` has been
+// run at least once in either case.
+const DEFAULT_WIDGET_HTML_PATH = join(__dirname, "..", "dist", "widget.html");
 /** Versioned so a shape change bumps the URI rather than serving a stale cached resource under the same id. */
 const WIDGET_URI = "ui://clawconnect/task-center-v1.html";
 
