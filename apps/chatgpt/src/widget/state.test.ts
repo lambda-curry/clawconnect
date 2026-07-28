@@ -13,6 +13,11 @@ import {
   preferSnapshot,
   resolveScope,
   filterTasksByScope,
+  formatElapsed,
+  isStale,
+  deriveActivityLabel,
+  deriveTimeline,
+  deriveLatestUpdate,
 } from "./state.js";
 
 function task(overrides = {}) {
@@ -268,5 +273,77 @@ describe("conversation scope fallback", () => {
     expect(scope).toEqual({ scoped: false, sessionKeys: null });
     const tasks = [task({ sessionKey: "s1" }), task({ sessionKey: "unrelated" })];
     expect(filterTasksByScope(tasks, scope)).toHaveLength(2);
+  });
+});
+
+describe("formatElapsed", () => {
+  it("formats seconds, minutes, and hours", () => {
+    expect(formatElapsed(5_000)).toBe("5s");
+    expect(formatElapsed(90_000)).toBe("1m 30s");
+    expect(formatElapsed(3 * 60 * 60_000 + 5 * 60_000)).toBe("3h 5m");
+  });
+
+  it("handles zero/negative/non-finite gracefully rather than throwing", () => {
+    expect(formatElapsed(0)).toBe("0s");
+    expect(formatElapsed(-5)).toBe("0s");
+    expect(formatElapsed(NaN)).toBe("0s");
+  });
+});
+
+describe("isStale / deriveActivityLabel — a liveness claim paired with the evidence behind it", () => {
+  it("is not stale within the threshold, stale beyond it", () => {
+    const now = 100_000;
+    expect(isStale(now - 10_000, now)).toBe(false);
+    expect(isStale(now - 91_000, now)).toBe(true);
+  });
+
+  it("an active task well within the threshold reads as active, with elapsed time as evidence", () => {
+    const now = 100_000;
+    expect(deriveActivityLabel(task({ status: "running", lastEventAt: now - 5_000 }), now)).toBe("active 5s ago");
+  });
+
+  it("an active task past the stale threshold is flagged as possibly stuck — this is what makes \"is working\" trustworthy or not", () => {
+    const now = 200_000;
+    expect(deriveActivityLabel(task({ status: "running", lastEventAt: now - 120_000 }), now)).toBe(
+      "quiet for 2m 0s — may be stuck",
+    );
+  });
+
+  it("a terminal task reads as finished, not active/stale", () => {
+    const now = 100_000;
+    expect(deriveActivityLabel(task({ status: "done", lastEventAt: now - 5_000 }), now)).toBe("finished 5s ago");
+  });
+});
+
+describe("deriveTimeline / deriveLatestUpdate — the actual evidence, not just a status label", () => {
+  const logs = [
+    { ts: 1000, type: "lifecycle", text: "Started" },
+    { ts: 1200, type: "tool", text: "Reading files" },
+    { ts: 1400, type: "tool", text: "Reading files" },
+    { ts: 1600, type: "tool", text: "Reading files" },
+    { ts: 1800, type: "tool-result", text: "3 files read" },
+    { ts: 2000, type: "tool", text: "Running command: pnpm test" },
+  ];
+
+  it("collapses consecutive identical entries into one row with a count, instead of spamming duplicates", () => {
+    const timeline = deriveTimeline(logs, 10);
+    const readingFiles = timeline.find((row) => row.text === "Reading files");
+    expect(readingFiles?.count).toBe(3);
+  });
+
+  it("returns at most maxRows, most recent first", () => {
+    const timeline = deriveTimeline(logs, 2);
+    expect(timeline).toHaveLength(2);
+    expect(timeline[0].text).toBe("Running command: pnpm test");
+  });
+
+  it("returns an empty array for missing/empty logs rather than throwing", () => {
+    expect(deriveTimeline(undefined)).toEqual([]);
+    expect(deriveTimeline([])).toEqual([]);
+  });
+
+  it("deriveLatestUpdate returns the single most recent entry", () => {
+    expect(deriveLatestUpdate(logs)).toEqual({ ts: 2000, type: "tool", text: "Running command: pnpm test" });
+    expect(deriveLatestUpdate([])).toBeNull();
   });
 });

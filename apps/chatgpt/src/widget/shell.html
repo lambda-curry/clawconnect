@@ -152,6 +152,8 @@ const app = {
   pollFailures: 0,
   expanded: new Map(), // sessionKey -> history[]
   promptText: new Map(), // taskId -> revealed prompt text
+  timeline: [], // deriveTimeline() output for the one focused/highlighted task — the actual evidence behind "is working"
+  timelineFor: null, // taskId the current timeline belongs to, so a stale fetch never renders under the wrong row
 };
 
 function rehydrate() {
@@ -173,10 +175,39 @@ async function refresh() {
   if (!shouldPoll({ pollInFlight: app.pollInFlight, tasks: app.tasks })) return;
   app.pollInFlight = true;
   try {
-    const result = await bridge.callTool("list_tasks", { view: app.allActivity ? "all" : "active" });
-    const tasks = result?.structuredContent?.tasks ?? result?.tasks ?? [];
-    const scope = resolveScope([...app.knownSessionKeys], app.allActivity);
-    app.tasks = filterTasksByScope(tasks, scope);
+    const view = deriveViewMode(app.mounted, app.tasks);
+    if (view.mode === "focused") {
+      // One call gets both status and the actual log evidence — no need
+      // for a separate list_tasks read when there's only one task in scope.
+      const result = await bridge.callTool("get_task", { taskId: view.taskId, detail: "full" });
+      const snapshot = result?.structuredContent ?? result;
+      if (snapshot?.jobId || snapshot?.taskId) {
+        app.tasks = [snapshot];
+        app.timeline = deriveTimeline(snapshot.updates ?? snapshot.logs ?? []);
+        app.timelineFor = view.taskId;
+      }
+    } else {
+      const result = await bridge.callTool("list_tasks", { view: app.allActivity ? "all" : "active" });
+      const tasks = result?.structuredContent?.tasks ?? result?.tasks ?? [];
+      const scope = resolveScope([...app.knownSessionKeys], app.allActivity);
+      app.tasks = filterTasksByScope(tasks, scope);
+
+      // Bounded: exactly one extra read, only for the highlighted row (the
+      // one thing the user is actually looking at) — never fan-out across
+      // every row in the command center.
+      const highlightSessionKey = view.highlightSessionKey;
+      const highlighted = highlightSessionKey && app.tasks.find((t) => t.sessionKey === highlightSessionKey);
+      if (highlighted) {
+        const taskId = highlighted.taskId ?? highlighted.jobId;
+        const detail = await bridge.callTool("get_task", { taskId, detail: "updates" });
+        const updates = detail?.structuredContent?.updates ?? detail?.updates ?? [];
+        app.timeline = deriveTimeline(updates);
+        app.timelineFor = taskId;
+      } else {
+        app.timeline = [];
+        app.timelineFor = null;
+      }
+    }
     app.pollFailures = 0;
   } catch {
     app.pollFailures += 1;
@@ -246,13 +277,31 @@ function el(tag, props, children) {
 
 function renderRow(row) {
   const history = app.expanded.get(row.sessionKey);
+  const taskId = row.latestTask.taskId ?? row.latestTask.jobId;
   const children = [
     el("div", { class: "cc-title" }, [
       el("span", { class: `cc-dot cc-dot--${row.group}` }, []),
       row.title,
     ]),
-    el("div", { class: "cc-meta" }, [`${row.latestTask.agent ?? "?"} · ${row.group.replace("_", " ")}`]),
+    el("div", { class: "cc-meta" }, [
+      `${row.latestTask.agent ?? "?"} · ${deriveActivityLabel(row.latestTask, Date.now())}`,
+    ]),
   ];
+  // The actual evidence behind "is working" — only fetched (refresh()) for
+  // the one row currently in focus/highlighted, so this only renders there.
+  if (taskId && taskId === app.timelineFor && app.timeline.length > 0) {
+    children.push(
+      el(
+        "div",
+        { class: "cc-history" },
+        app.timeline.map((entry) =>
+          el("div", { class: "cc-history-item" }, [
+            entry.count > 1 ? `${entry.text} ×${entry.count}` : entry.text,
+          ]),
+        ),
+      ),
+    );
+  }
   if (history) {
     children.push(
       el(

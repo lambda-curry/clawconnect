@@ -195,3 +195,65 @@ export function filterTasksByScope(tasks, scope) {
   const allowed = new Set(scope.sessionKeys ?? []);
   return tasks.filter((t) => allowed.has(t.sessionKey));
 }
+
+/**
+ * A status label like "clawdy is working…" is not evidence — it's a claim.
+ * Without a timestamp behind it, there's no way to tell "still going" from
+ * "silently stuck." formatElapsed/deriveActivityLabel pair every liveness
+ * claim with how long ago the last real event actually landed, straight
+ * from lastEventAt (already present on every TaskSummary — costs no extra
+ * read). isStale flags when that gap is long enough to be worth calling out.
+ */
+export function formatElapsed(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return "0s";
+  const seconds = Math.floor(ms / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ${seconds % 60}s`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ${minutes % 60}m`;
+}
+
+const STALE_THRESHOLD_MS = 90_000;
+
+export function isStale(lastEventAt, now, thresholdMs = STALE_THRESHOLD_MS) {
+  return now - lastEventAt > thresholdMs;
+}
+
+/** Ties a task's group to the evidence behind it: how long ago its last real event landed, and whether that's long enough to flag as possibly stuck. */
+export function deriveActivityLabel(task, now) {
+  const elapsed = now - task.lastEventAt;
+  const group = groupStatus(task.status);
+  if (isTerminalGroup(group)) return `finished ${formatElapsed(elapsed)} ago`;
+  if (isStale(task.lastEventAt, now)) return `quiet for ${formatElapsed(elapsed)} — may be stuck`;
+  return `active ${formatElapsed(elapsed)} ago`;
+}
+
+/**
+ * Compact, deduplicated timeline from a task's raw log entries
+ * (JobSnapshot.logs / get_task(detail:"updates").updates) — the actual
+ * evidence that a "working" claim is backed by real activity, not just a
+ * static label. Consecutive entries with the same (type, text) collapse
+ * into one row with a count (a tool looping doesn't spam N identical
+ * rows). Returns at most `maxRows`, most recent first.
+ */
+export function deriveTimeline(logs, maxRows = 4) {
+  if (!logs || logs.length === 0) return [];
+  const collapsed = [];
+  for (const entry of logs) {
+    const last = collapsed[collapsed.length - 1];
+    if (last && last.type === entry.type && last.text === entry.text) {
+      last.count += 1;
+      last.ts = entry.ts;
+    } else {
+      collapsed.push({ type: entry.type, text: entry.text, ts: entry.ts, count: 1 });
+    }
+  }
+  return collapsed.slice(-maxRows).reverse();
+}
+
+/** The single most recent log entry, for a one-line "latest update" summary above the fuller timeline. */
+export function deriveLatestUpdate(logs) {
+  if (!logs || logs.length === 0) return null;
+  return logs[logs.length - 1];
+}
