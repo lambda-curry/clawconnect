@@ -164,3 +164,36 @@ describe("prompt storage", () => {
     expect(snapshot).not.toHaveProperty("prompt");
   });
 });
+
+describe("getJobHistory — backs get_session(mode:\"tasks\"), the UI's expandable task history", () => {
+  it("returns every real job submitted under a session, newest first", async () => {
+    const sessions = new SessionManager(fakeGateway(async () => "first answer"));
+    const first = sessions.submitTask({ task: "first ask" });
+    await new Promise((r) => setTimeout(r, 20));
+    await sessions.waitForJob(first.jobId, 0, undefined, "wait", 1_000);
+    expect(sessions.getJob(first.jobId)?.status).toBe("completed");
+
+    // The session is terminal now, so a second submit on the same
+    // sessionKey is allowed (not refused as busy).
+    const second = sessions.submitTask({ task: "second ask", sessionKey: first.sessionKey });
+    expect(second.status).toBe("running");
+
+    const history = sessions.getJobHistory(first.sessionKey);
+    expect(history.map((j) => j.jobId)).toEqual([second.jobId, first.jobId]);
+  });
+
+  it("returns an empty array for a session with no history", () => {
+    const sessions = new SessionManager(neverResolvingGateway());
+    expect(sessions.getJobHistory("no-such-session")).toEqual([]);
+  });
+
+  it("never includes a busy-rejected submission in the history — only real dispatched work", () => {
+    const sessions = new SessionManager(neverResolvingGateway());
+    const first = sessions.submitTask({ task: "first ask" });
+    const rejected = sessions.submitTask({ task: "second ask, while first still running", sessionKey: first.sessionKey });
+    expect(rejected.errorInfo?.message).toBe("session busy");
+
+    const history = sessions.getJobHistory(first.sessionKey);
+    expect(history.map((j) => j.jobId)).toEqual([first.jobId]);
+  });
+});

@@ -301,10 +301,10 @@ Pass the jobId returned by run_task. Available agents: ${agentList}.`,
 
   server.tool(
     "get_session",
-    `Inspect one session for debugging ("what exactly happened?"). Use mode="snapshot" for current state, "events" for bounded event retrieval, or "tail" for cursor-based tailing.`,
+    `Inspect one session for debugging ("what exactly happened?"). Use mode="snapshot" for current state, "events" for bounded event retrieval, "tail" for cursor-based tailing, or "tasks" to list every task ever run under this session (newest first) — the same TaskSummary shape as list_tasks.`,
     {
       sessionId: z.string().describe("Session key to inspect"),
-      mode: z.enum(["snapshot", "events", "tail"]).optional(),
+      mode: z.enum(["snapshot", "events", "tail", "tasks"]).optional(),
       limit: z.number().int().positive().max(200).optional().describe("Max events to return for events/tail modes"),
       after: z.number().int().nonnegative().optional().describe("Zero-based event cursor; for tail mode use returned nextAfter"),
       agent: agentEnum.optional().describe(`${agentDescription} Usually inferred from sessionId.`),

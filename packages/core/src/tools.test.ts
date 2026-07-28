@@ -150,6 +150,18 @@ describe("get_session read model", () => {
     const result = getSession(pool, { sessionId: "does-not-exist" });
     expect(result.found).toBe(false);
   });
+
+  it("tasks mode surfaces the session's job history through the pool, same TaskSummary shape as list_tasks", () => {
+    const pool = freshPool();
+    const run = runTask(pool, { task: "do it", agent: "hank" });
+    const result = getSession(pool, { sessionId: run.sessionKey, mode: "tasks" });
+    expect(result.found).toBe(true);
+    if (!result.found) return;
+    expect(result.events).toBeUndefined();
+    expect(result.tasks).toEqual([
+      expect.objectContaining({ taskId: run.jobId, jobId: run.jobId, sessionKey: run.sessionKey, agent: "hank", status: "running" }),
+    ]);
+  });
 });
 
 describe("prompt retrieval authorization (getTaskPrompt)", () => {

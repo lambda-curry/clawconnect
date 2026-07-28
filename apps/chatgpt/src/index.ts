@@ -364,15 +364,15 @@ Pass the jobId returned by run_task. Available agents: ${list}.`,
     },
     {
       name: "get_session",
-      description: `Inspect one session for debugging ("what exactly happened?"). Use mode="snapshot" for current state, "events" for bounded event retrieval, or "tail" for cursor-based tailing.`,
+      description: `Inspect one session for debugging ("what exactly happened?"). Use mode="snapshot" for current state, "events" for bounded event retrieval, "tail" for cursor-based tailing, or "tasks" to list every task ever run under this session (newest first) — the same TaskSummary shape as list_tasks.`,
       inputSchema: {
         type: "object",
         properties: {
           sessionId: { type: "string", description: "Session key to inspect" },
           mode: {
             type: "string",
-            enum: ["snapshot", "events", "tail"],
-            description: "Inspection mode: snapshot (default), events, or tail",
+            enum: ["snapshot", "events", "tail", "tasks"],
+            description: "Inspection mode: snapshot (default), events, tail, or tasks",
           },
           limit: { type: "number", description: "Max events to return for events/tail modes (1–200)" },
           after: { type: "number", description: "Zero-based event cursor; for tail mode use returned nextAfter" },

@@ -242,6 +242,21 @@ export function getSession(
   const after = Math.max(0, opts.after ?? 0);
   const events = job.logs.slice(after, after + limit);
 
+  const tasks: TaskSummary[] | undefined =
+    mode === "tasks"
+      ? entry.sessions.getJobHistory(opts.sessionId).map((historyJob) => ({
+          taskId: historyJob.jobId,
+          jobId: historyJob.jobId,
+          sessionKey: historyJob.sessionKey,
+          agent: entry.agent.id,
+          status: deriveTaskStatus(historyJob),
+          startedAt: historyJob.startedAt,
+          lastEventAt: historyJob.lastEventAt,
+          summary: historyJob.summary,
+          error: historyJob.error,
+        }))
+      : undefined;
+
   return {
     found: true,
     sessionKey: job.sessionKey,
@@ -252,7 +267,8 @@ export function getSession(
     lastEventAt: job.lastEventAt,
     summary: job.summary,
     error: job.error,
-    ...(mode === "snapshot" ? {} : { events }),
+    ...(mode === "snapshot" || mode === "tasks" ? {} : { events }),
     ...(mode === "tail" ? { nextAfter: after + events.length } : {}),
+    ...(tasks ? { tasks } : {}),
   };
 }

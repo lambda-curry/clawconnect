@@ -173,7 +173,7 @@ export type TaskSummary = {
   error?: string;
 };
 
-export type SessionInspectMode = "snapshot" | "events" | "tail";
+export type SessionInspectMode = "snapshot" | "events" | "tail" | "tasks";
 
 export type SessionInspectResult =
   | { found: false }
@@ -189,6 +189,8 @@ export type SessionInspectResult =
       error?: string;
       events?: LogEntry[];
       nextAfter?: number;
+      /** mode="tasks": every job ever submitted under this session, newest first. Plain core surface — not UI-specific. */
+      tasks?: TaskSummary[];
     };
 
 export type CheckTaskOpts = {

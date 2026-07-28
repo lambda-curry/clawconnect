@@ -109,6 +109,8 @@ export class SessionManager {
   private jobs = new Map<string, Job>();
   private latestJobBySession = new Map<string, string>();
   private sessions = new Map<string, ContinuationState>();
+  /** Every real (non-busy-rejected) jobId ever submitted under a sessionKey, oldest first. Backs get_session(mode:"tasks"). */
+  private jobHistoryBySession = new Map<string, string[]>();
 
   constructor(
     private readonly gateway: OpenClawGateway,
@@ -188,6 +190,9 @@ export class SessionManager {
     };
     this.jobs.set(jobId, job);
     this.latestJobBySession.set(sessionKey, jobId);
+    const history = this.jobHistoryBySession.get(sessionKey) ?? [];
+    history.push(jobId);
+    this.jobHistoryBySession.set(sessionKey, history);
     this.sessions.set(sessionKey, {
       sessionKey,
       lastJobId: jobId,
@@ -454,6 +459,16 @@ export class SessionManager {
     const latestJobId =
       this.latestJobBySession.get(sessionKey) ?? this.sessions.get(sessionKey)?.lastJobId;
     return latestJobId ? this.jobs.get(latestJobId) : undefined;
+  }
+
+  /** Every real job submitted under this session, newest first. Backs get_session(mode:"tasks"). */
+  getJobHistory(sessionKey: string): Job[] {
+    const ids = this.jobHistoryBySession.get(sessionKey) ?? [];
+    return ids
+      .slice()
+      .reverse()
+      .map((id) => this.jobs.get(id))
+      .filter((job): job is Job => job !== undefined);
   }
 
   getSessionState(sessionKey: string): ContinuationState | undefined {
