@@ -342,11 +342,15 @@ function render() {
   const root = document.getElementById("root");
   root.innerHTML = "";
   const view = deriveViewMode(app.mounted, app.tasks);
-  const rows = buildSessionRows(app.tasks, { highlightSessionKey: view.highlightSessionKey ?? app.mounted?.sessionKey });
-  const visibleRows = filterRows(rows, app.view);
+  const pinnedSessionKey = view.highlightSessionKey ?? app.mounted?.sessionKey;
+  const rows = buildSessionRows(app.tasks, { highlightSessionKey: pinnedSessionKey });
+  // The pinned (focused/mounted) session always shows, finished or not —
+  // a task completing is exactly when its result matters most. The Active
+  // filter only ever declutters everything else.
+  const visibleRows = filterRows(rows, app.view, pinnedSessionKey);
 
   if (visibleRows.length === 0) {
-    root.append(el("div", { class: "cc-meta" }, ["No active tasks."]));
+    root.append(el("div", { class: "cc-meta" }, [app.tasks.length === 0 ? "No active tasks." : "Nothing needs attention right now."]));
   } else {
     for (const row of visibleRows) root.append(renderRow(row));
   }

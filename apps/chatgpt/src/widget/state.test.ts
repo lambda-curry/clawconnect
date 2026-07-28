@@ -178,6 +178,20 @@ describe("filterRows — Active default view + Recent view, exact status preserv
     expect(recent).toHaveLength(4);
     expect(recent.find((r) => r.sessionKey === "d")?.latestTask.status).toBe("failed");
   });
+
+  it("the pinned (focused/mounted) session always shows in Active view even once it's terminal — a finished task must not disappear the moment it completes", () => {
+    const active = filterRows(rows, "active", "c"); // "c" is done — terminal, normally filtered
+    expect(active.map((r) => r.sessionKey).sort()).toEqual(["a", "b", "c"]);
+  });
+
+  it("pinning a session that's already visible in Active view doesn't duplicate it", () => {
+    const active = filterRows(rows, "active", "a"); // "a" is running — already visible
+    expect(active.filter((r) => r.sessionKey === "a")).toHaveLength(1);
+  });
+
+  it("with no pinned session, behavior is unchanged from the two-argument call", () => {
+    expect(filterRows(rows, "active")).toEqual(filterRows(rows, "active", undefined));
+  });
 });
 
 describe("expandSessionRow — expandable task history keyed by taskId", () => {

@@ -104,10 +104,17 @@ export function buildSessionRows(tasks, opts = {}) {
  * Active (default): only rows whose latest task still needs attention —
  * Active or Needs attention groups. Recent: every row, newest first
  * (buildSessionRows already sorts by lastEventAt).
+ *
+ * `pinnedSessionKey` (the focused/highlighted session — the one the user is
+ * actually watching) always shows regardless of group, in both views. A
+ * task finishing is exactly the moment its result matters most; the
+ * Active filter exists to declutter the *rest* of the command center, not
+ * to hide the one thing that just completed out from under the user who
+ * dispatched it.
  */
-export function filterRows(rows, view) {
+export function filterRows(rows, view, pinnedSessionKey) {
   if (view === "recent") return rows;
-  return rows.filter((r) => r.group === "active" || r.group === "needs_attention");
+  return rows.filter((r) => r.group === "active" || r.group === "needs_attention" || r.sessionKey === pinnedSessionKey);
 }
 
 /** Merges a get_session(mode:"tasks") read into a row's expanded task history, keyed by taskId. Exact per-task status is preserved — group is display-only, computed fresh per history entry. */
