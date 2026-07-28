@@ -8,6 +8,14 @@ export type { MemorySearchHit, MemorySearchResult, GetMemoryResult, SearchMemory
 export { classifyError } from "./errors.ts";
 export { emptyArtifacts, processEvent, extractPatternsFromSummary, deriveNextStep } from "./artifacts.ts";
 export { runTask, checkTask, getTask, getTaskPrompt, listSessions, listTasks, getSession } from "./tools.ts";
+export { setTelemetrySink, recordTelemetry } from "./telemetry.ts";
+export type { TelemetryEvent, TelemetrySink } from "./telemetry.ts";
+export {
+  buildRunTaskStructuredContent,
+  buildCheckTaskStructuredContent,
+  buildGetTaskStructuredContent,
+} from "./structured-content.ts";
+export type { TaskDetail } from "./structured-content.ts";
 export type {
   Artifacts,
   CheckMode,

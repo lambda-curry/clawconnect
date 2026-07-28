@@ -34,8 +34,11 @@ import {
   searchMemory,
   getMemory,
   listCollections,
+  buildRunTaskStructuredContent,
+  buildCheckTaskStructuredContent,
+  buildGetTaskStructuredContent,
 } from "@clawconnect/core";
-import type { AgentEntry, AgentRegistry, CheckMode, TaskSummary } from "@clawconnect/core";
+import type { AgentEntry, AgentRegistry, CheckMode, TaskDetail, TaskSummary } from "@clawconnect/core";
 
 // Widget UI is temporarily disabled to keep the surface focused on
 // run_task / check_task. Re-enable by restoring the widget imports and
@@ -643,24 +646,16 @@ const server = createServer(async (req, res) => {
             senderName: identity.user ?? (typeof args.senderName === "string" ? args.senderName : undefined),
           });
           console.log(`[mcp] submitted job ${result.jobId} on agent ${result.agent} session ${result.sessionKey} sender=${identity.user ?? args.senderName ?? "unknown"}${identity.legacy ? " (legacy token)" : ""}`);
-          const entry = pool.forJob(result.jobId)!;
-          const snapshot = entry.sessions.buildSnapshot(entry.sessions.getJob(result.jobId)!);
+          const structuredContent = buildRunTaskStructuredContent(result);
           respond({
             content: [
               {
                 type: "text",
-                text: JSON.stringify({
-                  jobId: result.jobId,
-                  taskId: result.taskId,
-                  sessionKey: result.sessionKey,
-                  status: result.status,
-                  agent: result.agent,
-                  nextAction: result.nextAction,
-                  message: "Task submitted. Use check_task to poll for progress.",
-                }) + (identity.legacy ? `\n\nNote: ${GET_TOKEN_HINT}` : ""),
+                text: JSON.stringify({ ...structuredContent, message: "Task submitted. Use check_task to poll for progress." }) +
+                  (identity.legacy ? `\n\nNote: ${GET_TOKEN_HINT}` : ""),
               },
             ],
-            structuredContent: { ...snapshot, agent: result.agent },
+            structuredContent,
           });
         } catch (err) {
           respond({
@@ -722,7 +717,7 @@ const server = createServer(async (req, res) => {
                     : "Still running. Poll again.",
               },
             ],
-            structuredContent: snapshot,
+            structuredContent: buildCheckTaskStructuredContent(result),
             ...(isError ? { isError: true } : {}),
           });
         }
@@ -819,34 +814,7 @@ const server = createServer(async (req, res) => {
             respond({ content: [{ type: "text", text: JSON.stringify(payload) }], structuredContent: payload });
           }
         } else {
-          const s = result.snapshot;
-          const d = detail ?? "summary";
-          const has = (field: string) => d === field || d === "full" || d === "fullWithDiagnostics";
-          const payload: Record<string, unknown> = {
-            taskId: s.jobId,
-            jobId: s.jobId,
-            sessionKey: s.sessionKey,
-            agent: s.agent,
-            status: s.status,
-            startedAt: s.startedAt,
-            lastEventAt: s.lastEventAt,
-            recovery: s.recovery,
-            pollCount: s.pollCount,
-            continuePolling: result.continuePolling,
-            nextAction: s.nextAction,
-          };
-          if (d === "summary" || has("summary")) {
-            payload.summary = s.summary;
-          }
-          if (has("updates")) {
-            payload.updates = s.logs;
-          }
-          if (has("artifacts")) {
-            payload.artifacts = s.artifacts;
-          }
-          if (d === "diagnostics" || d === "fullWithDiagnostics") {
-            payload.diagnostics = { error: s.error, errorInfo: s.errorInfo, recovery: s.recovery, continuationState: s.continuationState };
-          }
+          const payload = buildGetTaskStructuredContent(result, detail as TaskDetail | undefined);
           respond({
             content: [{ type: "text", text: JSON.stringify(payload) }],
             structuredContent: payload,

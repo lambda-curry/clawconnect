@@ -14,6 +14,9 @@ import {
   searchMemory,
   getMemory,
   listCollections,
+  buildRunTaskStructuredContent,
+  buildCheckTaskStructuredContent,
+  buildGetTaskStructuredContent,
 } from "@clawconnect/core";
 import type {
   AgentRegistry,
@@ -61,18 +64,11 @@ export type ProviderConfig = {
 // ── Default formatters (optimized for agentic use / Claude Code) ────────────
 
 function defaultFormatRunTask(result: RunTaskResult): McpToolResponse {
-  const payload = {
-    jobId: result.jobId,
-    taskId: result.taskId,
-    sessionKey: result.sessionKey,
-    status: result.status,
-    agent: result.agent,
-    nextAction: result.nextAction,
-    message: "Task submitted. Use check_task to poll for progress.",
-  };
+  const structuredContent = buildRunTaskStructuredContent(result);
+  const payload = { ...structuredContent, message: "Task submitted. Use check_task to poll for progress." };
   return {
     content: [{ type: "text" as const, text: JSON.stringify(payload) }],
-    structuredContent: payload,
+    structuredContent,
   };
 }
 
@@ -85,9 +81,12 @@ function defaultFormatCheckTask(result: CheckTaskResult): McpToolResponse {
   }
 
   const { snapshot, isTerminal, isError, continuePolling } = result;
+  // structuredContent is always the full snapshot — client-neutral, shared
+  // with the ChatGPT transport (buildCheckTaskStructuredContent). Only the
+  // TEXT content stays minimal while running, to save tokens during polling.
+  const structuredContent = buildCheckTaskStructuredContent(result);
 
   if (!isTerminal) {
-    // While running: keep response minimal to save tokens during polling
     const payload = {
       status: "running",
       jobId: snapshot.jobId,
@@ -105,7 +104,7 @@ function defaultFormatCheckTask(result: CheckTaskResult): McpToolResponse {
     };
     return {
       content: [{ type: "text" as const, text: JSON.stringify(payload) }],
-      structuredContent: payload,
+      structuredContent,
     };
   }
 
@@ -127,7 +126,7 @@ function defaultFormatCheckTask(result: CheckTaskResult): McpToolResponse {
   };
   return {
     content: [{ type: "text" as const, text: JSON.stringify(payload) }],
-    structuredContent: payload,
+    structuredContent,
     ...(isError ? { isError: true } : {}),
   };
 }
@@ -291,28 +290,7 @@ Pass the jobId returned by run_task. Available agents: ${agentList}.`,
       }
       const result = getTask(pool, { jobId: taskId });
       if (!result.found) return defaultFormatCheckTask(result);
-      const snapshot = result.snapshot;
-      const has = (field: string) => d === field || d === "full" || d === "fullWithDiagnostics";
-      const payload = {
-        taskId: snapshot.jobId,
-        jobId: snapshot.jobId,
-        sessionKey: snapshot.sessionKey,
-        agent: snapshot.agent,
-        status: snapshot.status,
-        startedAt: snapshot.startedAt,
-        lastEventAt: snapshot.lastEventAt,
-        recovery: snapshot.recovery,
-        pollCount: snapshot.pollCount,
-        continuePolling: result.continuePolling,
-        nextAction: snapshot.nextAction,
-        summary: d === "summary" || has("summary") ? snapshot.summary : undefined,
-        updates: has("updates") ? snapshot.logs : undefined,
-        artifacts: has("artifacts") ? snapshot.artifacts : undefined,
-        diagnostics:
-          d === "diagnostics" || d === "fullWithDiagnostics"
-            ? { error: snapshot.error, errorInfo: snapshot.errorInfo, recovery: snapshot.recovery, continuationState: snapshot.continuationState }
-            : undefined,
-      };
+      const payload = buildGetTaskStructuredContent(result, detail);
       return {
         content: [{ type: "text", text: JSON.stringify(payload) }],
         structuredContent: payload,

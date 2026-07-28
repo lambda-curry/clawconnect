@@ -1,4 +1,5 @@
 import { GatewayPool } from "./gateway-pool.ts";
+import { recordTelemetry } from "./telemetry.ts";
 import type {
   CheckTaskOpts,
   CheckTaskResult,
@@ -12,6 +13,7 @@ import type {
 } from "./types.ts";
 
 export function runTask(pool: GatewayPool, input: TaskInput): RunTaskResult {
+  const start = Date.now();
   const entry = pool.forAgent(input.agent);
   const job = entry.sessions.submitTask({
     task: input.task,
@@ -20,6 +22,16 @@ export function runTask(pool: GatewayPool, input: TaskInput): RunTaskResult {
     senderName: input.senderName,
   });
   pool.rememberJob(job.jobId, entry.agent.id);
+  recordTelemetry({
+    tool: "run_task",
+    jobId: job.jobId,
+    taskId: job.jobId,
+    sessionKey: job.sessionKey,
+    agent: entry.agent.id,
+    status: job.status,
+    durationMs: Date.now() - start,
+    duplicateJob: job.errorInfo?.message === "session busy",
+  });
   return {
     jobId: job.jobId,
     taskId: job.jobId,
@@ -48,6 +60,7 @@ function deriveTaskStatus(job: { status: string; error?: string; artifacts: { ne
 }
 
 export function listTasks(pool: GatewayPool): TaskSummary[] {
+  const start = Date.now();
   const items: TaskSummary[] = [];
   for (const entry of pool.allEntries()) {
     for (const session of entry.sessions.listSessions()) {
@@ -66,6 +79,7 @@ export function listTasks(pool: GatewayPool): TaskSummary[] {
       });
     }
   }
+  recordTelemetry({ tool: "list_tasks", taskCount: items.length, durationMs: Date.now() - start });
   return items;
 }
 
@@ -97,8 +111,12 @@ function resolvePoolEntry(pool: GatewayPool, opts: { jobId?: string; sessionKey?
  * non-terminal — continuePolling is true and nextAction says to call again.
  */
 export async function checkTask(pool: GatewayPool, opts: CheckTaskOpts): Promise<CheckTaskResult> {
+  const start = Date.now();
   const entry = resolvePoolEntry(pool, opts);
-  if (!entry) return notFound();
+  if (!entry) {
+    recordTelemetry({ tool: "check_task", jobId: opts.jobId, sessionKey: opts.sessionKey, requestedWaitMs: opts.waitMs, status: "not_found", durationMs: Date.now() - start });
+    return notFound();
+  }
 
   const job = await entry.sessions.waitForJob(
     opts.jobId,
@@ -107,10 +125,25 @@ export async function checkTask(pool: GatewayPool, opts: CheckTaskOpts): Promise
     opts.mode ?? "poll",
     opts.waitMs,
   );
-  if (!job) return notFound();
+  if (!job) {
+    recordTelemetry({ tool: "check_task", jobId: opts.jobId, sessionKey: opts.sessionKey, agent: entry.agent.id, requestedWaitMs: opts.waitMs, status: "not_found", durationMs: Date.now() - start });
+    return notFound();
+  }
 
   const snapshot = entry.sessions.buildSnapshot(job);
   const isTerminal = job.status !== "running";
+  recordTelemetry({
+    tool: "check_task",
+    jobId: job.jobId,
+    taskId: job.jobId,
+    sessionKey: job.sessionKey,
+    agent: entry.agent.id,
+    pollCount: job.pollCount,
+    requestedWaitMs: opts.waitMs,
+    status: job.status,
+    durationMs: Date.now() - start,
+    terminalRetrieval: isTerminal,
+  });
   return {
     found: true,
     snapshot: { ...snapshot, agent: entry.agent.id },
@@ -126,13 +159,31 @@ export async function checkTask(pool: GatewayPool, opts: CheckTaskOpts): Promise
  * what distinguishes it from check_task (contract decision 6).
  */
 export function getTask(pool: GatewayPool, opts: { jobId?: string; sessionKey?: string; agent?: string }): CheckTaskResult {
+  const start = Date.now();
   const entry = resolvePoolEntry(pool, opts);
-  if (!entry) return notFound();
+  if (!entry) {
+    recordTelemetry({ tool: "get_task", jobId: opts.jobId, sessionKey: opts.sessionKey, status: "not_found", durationMs: Date.now() - start });
+    return notFound();
+  }
   const job = entry.sessions.resolveJob(opts.jobId, opts.sessionKey);
-  if (!job) return notFound();
+  if (!job) {
+    recordTelemetry({ tool: "get_task", jobId: opts.jobId, sessionKey: opts.sessionKey, agent: entry.agent.id, status: "not_found", durationMs: Date.now() - start });
+    return notFound();
+  }
 
   const snapshot = entry.sessions.buildSnapshot(job);
   const isTerminal = job.status !== "running";
+  recordTelemetry({
+    tool: "get_task",
+    jobId: job.jobId,
+    taskId: job.jobId,
+    sessionKey: job.sessionKey,
+    agent: entry.agent.id,
+    pollCount: job.pollCount,
+    status: job.status,
+    durationMs: Date.now() - start,
+    terminalRetrieval: isTerminal,
+  });
   return {
     found: true,
     snapshot: { ...snapshot, agent: entry.agent.id },
