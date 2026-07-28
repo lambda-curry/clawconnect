@@ -99,6 +99,34 @@
   }
   .cc-prompt-body { padding: 8px 10px; font-size: 12px; white-space: pre-wrap; }
   .cc-prompt-close { background: none; border: none; color: var(--cc-fg-muted); cursor: pointer; font: inherit; padding: 0; }
+  .cc-note { color: var(--cc-fg-muted); font-size: 11px; margin-top: 8px; }
+
+  /* ── Fullscreen ("Task Center") — same tested pure functions as inline,
+     a different layout only. Never load-bearing: see openTaskCenter(). */
+  #root.cc-fullscreen { padding: 0; height: 100vh; display: flex; flex-direction: column; }
+  .cc-fs-header {
+    flex: none; display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 16px; border-bottom: 1px solid var(--cc-border);
+  }
+  .cc-fs-title { font-weight: 700; font-size: 15px; }
+  .cc-fs-body { flex: 1; display: flex; overflow: hidden; }
+  .cc-fs-sidebar { width: 220px; flex: none; border-right: 1px solid var(--cc-border); overflow-y: auto; padding: 10px; }
+  .cc-fs-sidebar-controls { display: flex; gap: 6px; margin-bottom: 10px; }
+  .cc-fs-session { padding: 8px 10px; border-radius: 8px; cursor: pointer; margin-bottom: 4px; border-left: 3px solid transparent; }
+  .cc-fs-session--selected { background: var(--cc-bg-subtle); border-left-color: var(--cc-accent); }
+  .cc-fs-main { flex: 1; display: flex; overflow: hidden; }
+  .cc-fs-tasklist { width: 260px; flex: none; border-right: 1px solid var(--cc-border); overflow-y: auto; padding: 10px; }
+  .cc-fs-task { display: flex; align-items: center; padding: 7px 8px; border-radius: 6px; cursor: pointer; font-size: 12.5px; }
+  .cc-fs-task--selected { background: var(--cc-bg-subtle); }
+  .cc-fs-detail { flex: 1; overflow-y: auto; padding: 16px 18px; }
+  .cc-fs-tabs { display: flex; gap: 6px; margin: 12px 0; }
+  .cc-fs-detail-body { font-size: 13px; }
+  .cc-fs-detail-body > * { margin-bottom: 8px; }
+  @media (max-width: 640px) {
+    .cc-fs-body { flex-direction: column; overflow-y: auto; }
+    .cc-fs-sidebar, .cc-fs-tasklist { width: 100%; border-right: none; border-bottom: 1px solid var(--cc-border); max-height: 180px; }
+    .cc-fs-main { flex-direction: column; }
+  }
 </style>
 </head>
 <body>
@@ -132,21 +160,65 @@ const bridge = (() => {
   }
   initMcpAppsFallback();
 
-  async function callTool(name, args) {
-    const openai = viaWindowOpenAI();
-    if (openai) return openai.callTool(name, args);
+  function sendMcpAppsRequest(method, params, timeoutMs) {
     const id = `cc-${++mcpAppsRequestId}`;
     const result = new Promise((resolve, reject) => {
       pending.set(id, { resolve, reject });
       setTimeout(() => {
         if (pending.has(id)) {
           pending.delete(id);
-          reject(new Error("tool call timed out"));
+          reject(new Error(`${method} timed out`));
         }
-      }, 15000);
+      }, timeoutMs);
     });
-    window.parent?.postMessage({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } }, "*");
+    window.parent?.postMessage({ jsonrpc: "2.0", id, method, params }, "*");
     return result;
+  }
+
+  async function callTool(name, args) {
+    const openai = viaWindowOpenAI();
+    if (openai) return openai.callTool(name, args);
+    return sendMcpAppsRequest("tools/call", { name, arguments: args }, 15000);
+  }
+
+  /**
+   * Display mode is a *request*, not a contract — per
+   * developers.openai.com/plugins/reference.md ("no explicit guarantees
+   * that hosts will honor display mode requests... hosts retain
+   * discretion") and the ext-apps spec's own doc comment on
+   * McpUiRequestDisplayModeRequest ("the host will respond with the actual
+   * display mode that was set, which may differ from the requested mode
+   * if not supported"). There is also no reliable way to ask a host in
+   * advance whether it supports a mode at all — window.openai exposes no
+   * such query. The only correct pattern is: request, then read back
+   * whatever the host says actually happened (the resolved value if the
+   * call succeeds, `displayMode` afterward either way) — never assume the
+   * request took effect.
+   */
+  function supportsDisplayModeRequest() {
+    const openai = viaWindowOpenAI();
+    return typeof openai?.requestDisplayMode === "function";
+  }
+
+  async function requestDisplayMode(mode) {
+    const openai = viaWindowOpenAI();
+    if (openai?.requestDisplayMode) {
+      const result = await openai.requestDisplayMode({ mode });
+      return result?.mode ?? openai.displayMode ?? mode;
+    }
+    // Minimal MCP-Apps fallback — same request shape as the App class's
+    // requestDisplayMode, same "response may differ from what was asked"
+    // caveat applies.
+    const result = await sendMcpAppsRequest("ui/request-display-mode", { mode }, 5000).catch(() => null);
+    return result?.mode ?? "inline";
+  }
+
+  function currentDisplayMode() {
+    return viaWindowOpenAI()?.displayMode ?? "inline";
+  }
+
+  function onDisplayModeChange(cb) {
+    window.addEventListener("openai:set_globals", () => cb(currentDisplayMode()));
   }
 
   function readMountData() {
@@ -171,7 +243,18 @@ const bridge = (() => {
     window.addEventListener("openai:set_globals", () => cb(currentTheme()));
   }
 
-  return { callTool, readMountData, readWidgetState, saveWidgetState, currentTheme, onThemeChange };
+  return {
+    callTool,
+    readMountData,
+    readWidgetState,
+    saveWidgetState,
+    currentTheme,
+    onThemeChange,
+    supportsDisplayModeRequest,
+    requestDisplayMode,
+    currentDisplayMode,
+    onDisplayModeChange,
+  };
 })();
 
 function applyTheme() {
@@ -196,7 +279,66 @@ const app = {
   promptText: new Map(), // taskId -> revealed prompt text
   timeline: [], // deriveTimeline() output for the one focused/highlighted task — the actual evidence behind "is working"
   timelineFor: null, // taskId the current timeline belongs to, so a stale fetch never renders under the wrong row
+  pinnedDetail: null, // full JobSnapshot (artifacts included) for the one pinned/selected task — see mergePinnedDetail()
+  // Fullscreen — see openTaskCenter(). displayMode reflects what the host
+  // actually confirmed, never what was merely requested.
+  displayMode: "inline",
+  displayModeNote: null, // set when a fullscreen request was made but not honored — shown once, inline, not a silent failure
+  selectedSessionKey: null, // fullscreen sidebar selection
+  selectedTaskId: null, // fullscreen task-list selection
+  detailTab: "overview",
 };
+
+// Fullscreen is a request, never a dependency — every read/action the
+// fullscreen view uses is identical to the inline card's; the only
+// difference is layout. If the host never confirms fullscreen, the card
+// stays exactly as useful as it already was.
+async function openTaskCenter() {
+  if (!bridge.supportsDisplayModeRequest()) {
+    app.displayModeNote = "Fullscreen isn't available in this host.";
+    render();
+    return;
+  }
+  let granted = "inline";
+  try {
+    granted = await bridge.requestDisplayMode("fullscreen");
+  } catch {
+    granted = "inline";
+  }
+  if (granted === "fullscreen") {
+    app.displayMode = "fullscreen";
+    app.displayModeNote = null;
+    // Fullscreen is the "see everything" surface — widen scope so the
+    // sidebar isn't just the one pinned session, and show every group by
+    // default (the Active/Recent toggle still works from here).
+    app.allActivity = true;
+    app.view = "recent";
+    app.selectedSessionKey = app.selectedSessionKey ?? app.mounted?.sessionKey ?? null;
+    refresh();
+  } else {
+    app.displayModeNote = "The host didn't grant fullscreen — staying inline.";
+  }
+  render();
+}
+
+function closeTaskCenter() {
+  // Best-effort request back to inline; the local state flips regardless
+  // so the Close button always visibly works even if the host is slow or
+  // never confirms — same "never load-bearing" principle as everywhere
+  // else the card fetches something.
+  bridge.requestDisplayMode("inline").catch(() => {});
+  app.displayMode = "inline";
+  render();
+}
+
+bridge.onDisplayModeChange((mode) => {
+  // The host can also change display mode on its own (e.g. its own chrome
+  // close button) — stay in sync rather than trusting only our own calls.
+  if (mode !== app.displayMode) {
+    app.displayMode = mode === "fullscreen" ? "fullscreen" : "inline";
+    render();
+  }
+});
 
 function rehydrate() {
   const mountData = bridge.readMountData();
@@ -231,41 +373,55 @@ async function refreshPinnedCounts(sessionKey) {
 async function refresh() {
   if (!shouldPoll({ pollInFlight: app.pollInFlight, tasks: app.tasks })) return;
   app.pollInFlight = true;
+  const fullscreen = app.displayMode === "fullscreen";
   try {
-    const view = deriveViewMode(app.mounted, app.tasks);
-    if (view.mode === "focused") {
-      // One call gets both status and the actual log evidence — no need
-      // for a separate list_tasks read when there's only one task in scope.
-      const result = await bridge.callTool("get_task", { taskId: view.taskId, detail: "full" });
-      const snapshot = result?.structuredContent ?? result;
-      if (snapshot?.jobId || snapshot?.taskId) {
-        app.tasks = [snapshot];
-        app.timeline = deriveTimeline(snapshot.updates ?? snapshot.logs ?? []);
-        app.timelineFor = view.taskId;
-      }
-      await refreshPinnedCounts(view.sessionKey);
-    } else {
-      const result = await bridge.callTool("list_tasks", { view: app.allActivity ? "all" : "active" });
-      const tasks = result?.structuredContent?.tasks ?? result?.tasks ?? [];
-      const scope = resolveScope([...app.knownSessionKeys], app.allActivity);
-      app.tasks = filterTasksByScope(tasks, scope);
+    // Always fetch the task list first, never just the one pinned task in
+    // isolation. Bug found via browser smoke test: an earlier version
+    // special-cased "only one active session known so far" (view.mode ===
+    // "focused") to skip list_tasks and fetch only that one task — but
+    // that's self-reinforcing. deriveViewMode's "focused vs aggregate"
+    // decision is computed FROM app.tasks, and app.tasks only grows by
+    // calling list_tasks — so a card that started single-task could never
+    // discover a second session came into existence, and toggling "All
+    // activity" (which only flips a fetch parameter) had no visible effect
+    // because the branch that would use it never ran. One list_tasks call
+    // per cycle is a small, already-bounded cost; the alternative is a
+    // card that can get stuck narrow forever.
+    const listView = fullscreen || app.allActivity ? "all" : "active";
+    const result = await bridge.callTool("list_tasks", { view: listView });
+    const tasks = result?.structuredContent?.tasks ?? result?.tasks ?? [];
+    const scope = resolveScope([...app.knownSessionKeys], app.allActivity || fullscreen);
+    app.tasks = filterTasksByScope(tasks, scope);
 
-      // Bounded: exactly one extra read, only for the highlighted row (the
-      // one thing the user is actually looking at) — never fan-out across
-      // every row in the command center.
-      const highlightSessionKey = view.highlightSessionKey;
-      const highlighted = highlightSessionKey && app.tasks.find((t) => t.sessionKey === highlightSessionKey);
-      if (highlighted) {
-        const taskId = highlighted.taskId ?? highlighted.jobId;
-        const detail = await bridge.callTool("get_task", { taskId, detail: "updates" });
-        const updates = detail?.structuredContent?.updates ?? detail?.updates ?? [];
-        app.timeline = deriveTimeline(updates);
-        app.timelineFor = taskId;
-        await refreshPinnedCounts(highlightSessionKey);
-      } else {
-        app.timeline = [];
-        app.timelineFor = null;
-      }
+    const view = deriveViewMode(app.mounted, app.tasks);
+    const pinnedSessionKey = fullscreen
+      ? (app.selectedSessionKey ?? view.highlightSessionKey)
+      : (view.mode === "focused" ? view.sessionKey : view.highlightSessionKey);
+
+    // Bounded: exactly one extra read, only for the one session the user is
+    // actually looking at (pinned inline, or selected in the fullscreen
+    // sidebar) — never fan-out across every row in the command center.
+    const sessionTasks = pinnedSessionKey ? app.tasks.filter((t) => t.sessionKey === pinnedSessionKey) : [];
+    const selected =
+      (app.selectedTaskId && sessionTasks.find((t) => (t.taskId ?? t.jobId) === app.selectedTaskId)) ??
+      sessionTasks[0];
+    if (selected) {
+      const taskId = selected.taskId ?? selected.jobId;
+      // detail:"full" (not "updates") — list_tasks' TaskSummary has no
+      // `artifacts` field (see packages/core/src/tools.ts's listTasks()),
+      // so without the full snapshot here, deriveTitle's PR/branch
+      // detection and the fullscreen Artifacts tab would silently never
+      // have anything to show for *any* row, pinned or not.
+      const detail = await bridge.callTool("get_task", { taskId, detail: "full" });
+      const snapshot = detail?.structuredContent ?? detail;
+      app.pinnedDetail = snapshot?.jobId || snapshot?.taskId ? snapshot : null;
+      app.timeline = deriveTimeline(snapshot?.updates ?? snapshot?.logs ?? []);
+      app.timelineFor = taskId;
+      await refreshPinnedCounts(pinnedSessionKey);
+    } else {
+      app.pinnedDetail = null;
+      app.timeline = [];
+      app.timelineFor = null;
     }
     app.pollFailures = 0;
   } catch {
@@ -414,10 +570,14 @@ function renderRow(row, opts = {}) {
     );
   }
   actions.push(
+    // Label names the effect explicitly (it sends a chat message asking the
+    // assistant to continue — never a direct/in-widget action, per "actions
+    // are messages, never mutations") rather than a bare "Continue" that
+    // reads as if the button itself does something.
     el(
       "button",
       { class: "cc-btn cc-btn--primary", onclick: (e) => { e.stopPropagation(); composeFollowUp(row.sessionKey, "Continue this task"); } },
-      ["Continue"],
+      ["Continue in chat"],
     ),
   );
   children.push(el("div", { class: "cc-actions" }, actions));
@@ -429,9 +589,19 @@ function renderRow(row, opts = {}) {
 function render() {
   const root = document.getElementById("root");
   root.innerHTML = "";
+  root.className = app.displayMode === "fullscreen" ? "cc-fullscreen" : "";
+  if (app.displayMode === "fullscreen") {
+    renderFullscreen(root);
+  } else {
+    renderInline(root);
+  }
+  persist();
+}
+
+function renderInline(root) {
   const view = deriveViewMode(app.mounted, app.tasks);
   const pinnedSessionKey = view.highlightSessionKey ?? app.mounted?.sessionKey;
-  const rows = buildSessionRows(app.tasks, { highlightSessionKey: pinnedSessionKey });
+  const rows = buildSessionRows(mergePinnedDetail(app.tasks, app.pinnedDetail), { highlightSessionKey: pinnedSessionKey });
   // The pinned (focused/mounted) session always shows, finished or not —
   // a task completing is exactly when its result matters most. The Active
   // filter only ever declutters everything else.
@@ -443,7 +613,11 @@ function render() {
     for (const row of visibleRows) root.append(renderRow(row, { pinned: row.sessionKey === pinnedSessionKey }));
   }
 
-  const footer = el("div", { class: "cc-footer" }, [
+  if (app.displayModeNote) {
+    root.append(el("div", { class: "cc-note" }, [app.displayModeNote]));
+  }
+
+  const footerChildren = [
     el(
       "button",
       {
@@ -467,9 +641,158 @@ function render() {
       },
       [app.allActivity ? "This session only" : "All activity"],
     ),
+  ];
+  // Feature-detected, not assumed — see requestDisplayMode's doc comment.
+  // Absent entirely (not disabled/greyed) when the host gives no signal it
+  // implements display-mode requests at all.
+  if (bridge.supportsDisplayModeRequest()) {
+    footerChildren.push(" ", el("button", { class: "cc-btn cc-btn--primary", onclick: openTaskCenter }, ["Open Task Center"]));
+  }
+  root.append(el("div", { class: "cc-footer" }, footerChildren));
+}
+
+function renderFullscreen(root) {
+  const rows = buildSessionRows(mergePinnedDetail(app.tasks, app.pinnedDetail), { highlightSessionKey: app.selectedSessionKey });
+  const visibleRows = filterRows(rows, app.view, app.selectedSessionKey);
+
+  const header = el("div", { class: "cc-fs-header" }, [
+    el("div", { class: "cc-fs-title" }, ["Task Center"]),
+    el("button", { class: "cc-btn", onclick: closeTaskCenter }, ["Close"]),
   ]);
-  root.append(footer);
-  persist();
+
+  const sidebar = el(
+    "div",
+    { class: "cc-fs-sidebar" },
+    [
+      el("div", { class: "cc-fs-sidebar-controls" }, [
+        el(
+          "button",
+          { class: "cc-btn", onclick: () => { app.view = app.view === "active" ? "recent" : "active"; render(); } },
+          [app.view === "active" ? "Recent" : "Active"],
+        ),
+        el(
+          "button",
+          { class: "cc-btn", onclick: () => { app.allActivity = !app.allActivity; refresh(); } },
+          [app.allActivity ? "This session" : "All activity"],
+        ),
+      ]),
+      ...(visibleRows.length === 0
+        ? [el("div", { class: "cc-meta" }, ["Nothing here yet."])]
+        : visibleRows.map((row) => {
+            const selected = row.sessionKey === app.selectedSessionKey;
+            const pill = deriveStatusPill(row.group);
+            return el(
+              "div",
+              {
+                class: `cc-fs-session${selected ? " cc-fs-session--selected" : ""}`,
+                onclick: () => {
+                  app.selectedSessionKey = row.sessionKey;
+                  app.selectedTaskId = null;
+                  app.detailTab = "overview";
+                  refresh();
+                },
+              },
+              [
+                el("div", { class: "cc-title" }, [row.title]),
+                el("div", { class: "cc-meta" }, [`${pill.icon} ${row.latestTask.agent ?? "?"} · ${deriveActivityLabel(row.latestTask, Date.now())}`]),
+              ],
+            );
+          })),
+    ],
+  );
+
+  const selectedSessionKey = app.selectedSessionKey;
+  const history = selectedSessionKey ? app.expanded.get(selectedSessionKey) : undefined;
+  const selectedSummary = history?.find((t) => (t.taskId ?? t.jobId) === app.selectedTaskId) ?? history?.[0];
+  // get_session(mode:"tasks") also returns plain TaskSummary (no
+  // artifacts) — swap in the full snapshot when the selection matches the
+  // one pinned/detail-fetched task, same as mergePinnedDetail() does for rows.
+  const selectedTask = selectedSummary ? mergePinnedDetail([selectedSummary], app.pinnedDetail)[0] : selectedSummary;
+
+  const taskList = el(
+    "div",
+    { class: "cc-fs-tasklist" },
+    !selectedSessionKey
+      ? [el("div", { class: "cc-meta" }, ["Select a session."])]
+      : !history
+        ? [el("div", { class: "cc-meta" }, ["Loading…"])]
+        : history.length === 0
+          ? [el("div", { class: "cc-meta" }, ["No tasks in this session yet."])]
+          : history.map((t) => {
+              const tid = t.taskId ?? t.jobId;
+              const selected = Boolean(selectedTask) && tid === (selectedTask.taskId ?? selectedTask.jobId);
+              return el(
+                "div",
+                {
+                  class: `cc-fs-task${selected ? " cc-fs-task--selected" : ""}`,
+                  onclick: () => { app.selectedTaskId = tid; app.detailTab = "overview"; refresh(); },
+                },
+                [el("span", { class: `cc-dot cc-dot--${groupStatus(t.status)}` }, []), deriveTitle(t)],
+              );
+            }),
+  );
+
+  const main = el("div", { class: "cc-fs-main" }, [taskList, renderDetailPane(selectedTask)]);
+  root.append(header, el("div", { class: "cc-fs-body" }, [sidebar, main]));
+}
+
+function renderDetailPane(task) {
+  if (!task) {
+    return el("div", { class: "cc-fs-detail" }, [el("div", { class: "cc-meta" }, ["Select a task to see its details."])]);
+  }
+  const taskId = task.taskId ?? task.jobId;
+  const tabs = deriveDetailTabs(task);
+  if (!tabs.includes(app.detailTab)) app.detailTab = "overview";
+  const tabLabels = { overview: "Overview", artifacts: "Artifacts", prompt: "Original prompt" };
+
+  const tabButtons = tabs.map((tab) =>
+    el(
+      "button",
+      { class: `cc-btn${app.detailTab === tab ? " cc-btn--primary" : ""}`, onclick: () => { app.detailTab = tab; render(); } },
+      [tabLabels[tab]],
+    ),
+  );
+
+  const body = [];
+  if (app.detailTab === "overview") {
+    const pill = deriveStatusPill(groupStatus(task.status));
+    body.push(el("span", { class: `cc-pill cc-pill--${groupStatus(task.status)}` }, [`${pill.icon} ${pill.label}`]));
+    body.push(el("div", { class: "cc-meta" }, [`${task.agent ?? "?"} · ${deriveActivityLabel(task, Date.now())}`]));
+    // Same evidence as the inline card's update line, from the same
+    // bounded per-selection fetch in refresh() — not a separate concept.
+    if (taskId === app.timelineFor && app.timeline.length > 0) {
+      body.push(
+        el(
+          "div",
+          { class: "cc-history" },
+          app.timeline.map((entry) =>
+            el("div", { class: "cc-history-item" }, [entry.count > 1 ? `${entry.text} ×${entry.count}` : entry.text]),
+          ),
+        ),
+      );
+    }
+    if (task.summary) body.push(el("div", {}, [task.summary]));
+    if (task.error) body.push(el("div", {}, [`Error: ${task.error}`]));
+  } else if (app.detailTab === "artifacts") {
+    const a = task.artifacts ?? {};
+    if (a.prUrl) body.push(el("div", {}, [`Pull request: ${a.prUrl}`]));
+    if (a.branchName) body.push(el("div", {}, [`Branch: ${a.branchName}`]));
+    if (a.commitSha) body.push(el("div", {}, [`Commit: ${a.commitSha}`]));
+    if (a.filesChanged?.length) body.push(el("div", {}, [`Files changed: ${a.filesChanged.join(", ")}`]));
+    if (a.commandsRun?.length) body.push(el("div", {}, [`Commands run: ${a.commandsRun.length}`]));
+  } else if (app.detailTab === "prompt") {
+    if (app.promptText.has(taskId)) {
+      body.push(el("div", { class: "cc-prompt-body" }, [app.promptText.get(taskId)]));
+    } else {
+      body.push(el("button", { class: "cc-btn cc-btn--primary", onclick: () => revealPrompt(taskId) }, ["Show original request"]));
+    }
+  }
+
+  return el("div", { class: "cc-fs-detail" }, [
+    el("div", { class: "cc-title" }, [deriveTitle(task)]),
+    el("div", { class: "cc-fs-tabs" }, tabButtons),
+    el("div", { class: "cc-fs-detail-body" }, body),
+  ]);
 }
 
 rehydrate();

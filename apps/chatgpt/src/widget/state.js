@@ -51,7 +51,14 @@ export function deriveTitle(task) {
   if (task.status === "running" || task.status === "queued") {
     return task.agent ? `${task.agent} is working…` : "Working…";
   }
-  if (task.error) return "Task failed";
+  // Bug found via browser smoke test: this used to key off task.error being
+  // truthy, which also fires for "blocked" (core sets error to a
+  // session-busy message for that status — see deriveTaskStatus in
+  // packages/core/src/tools.ts) and mislabeled a blocked task as failed.
+  // Key off the actual status instead.
+  if (task.status === "failed") return "Task failed";
+  if (task.status === "blocked") return "Blocked";
+  if (task.status === "needs-human") return "Needs your input";
   const id = task.taskId ?? task.jobId ?? "";
   return `Task ${String(id).slice(0, 8)}`;
 }
@@ -130,6 +137,26 @@ export function filterRows(rows, view, pinnedSessionKey) {
   return rows.filter((r) => r.group === "active" || r.group === "needs_attention" || r.sessionKey === pinnedSessionKey);
 }
 
+/**
+ * Swaps the pinned/selected task's plain TaskSummary (list_tasks and
+ * get_session(mode:"tasks") never include `artifacts` — see
+ * packages/core/src/tools.ts's listTasks()) for the full JobSnapshot
+ * fetched alongside it (get_task detail:"full"), leaving every other task
+ * as the plain summary that was actually fetched for it.
+ *
+ * Exists as a pure function (not inlined at the shell.html call site)
+ * specifically because a bug here is invisible in a screenshot that
+ * happens to use richer mock data than production ever returns — it needs
+ * its own fixture-driven test with a deliberately TaskSummary-shaped
+ * (no-artifacts) non-pinned task, the same shape a real list_tasks call
+ * returns.
+ */
+export function mergePinnedDetail(tasks, pinnedDetail) {
+  if (!pinnedDetail) return tasks;
+  const pinnedId = pinnedDetail.taskId ?? pinnedDetail.jobId;
+  return tasks.map((t) => ((t.taskId ?? t.jobId) === pinnedId ? { ...t, ...pinnedDetail } : t));
+}
+
 /** Merges a get_session(mode:"tasks") read into a row's expanded task history, keyed by taskId. Exact per-task status is preserved — group is display-only, computed fresh per history entry. */
 export function expandSessionRow(row, historyTasks) {
   return {
@@ -182,6 +209,20 @@ export function deriveDetailSections(task) {
   if (task.error || task.errorInfo) sections.push("error");
   if (task.recovery) sections.push("recovery");
   return sections;
+}
+
+/**
+ * The fullscreen detail pane's tab set — "overview" always, "artifacts"
+ * only when there's something to show, "prompt" only when the id is
+ * resolvable (canReadPrompt). Built on deriveDetailSections rather than
+ * duplicating its presence checks, so the two stay in lockstep.
+ */
+export function deriveDetailTabs(task) {
+  const sections = deriveDetailSections(task);
+  const tabs = ["overview"];
+  if (sections.includes("artifacts")) tabs.push("artifacts");
+  if (canReadPrompt(task)) tabs.push("prompt");
+  return tabs;
 }
 
 /**
