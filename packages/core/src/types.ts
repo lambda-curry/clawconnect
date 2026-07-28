@@ -46,6 +46,19 @@ export type JobRecoveryState = {
   hardCapMs: number;
 };
 
+/**
+ * The original submitted task, stored so it can be retrieved later (e.g. for
+ * diagnostics or "what did I actually ask for" recall). Deliberately never
+ * included in JobSnapshot / telemetry — only exposed through the dedicated
+ * getTaskPrompt() read path (get_task detail="prompt"), gated by the same
+ * per-agent scope authorization as every other field.
+ */
+export type JobPrompt = {
+  task: string;
+  context?: string;
+  senderName?: string;
+};
+
 export type Job = {
   jobId: string;
   sessionKey: string;
@@ -62,7 +75,19 @@ export type Job = {
    *  (completed_no_summary / error). Used to rate-limit re-reads so a poll
    *  storm doesn't hammer chat.history. Unset until the first recheck. */
   lastRecheckAt?: number;
+  /** Number of times waitForJob has been called for this job (check_task calls). */
+  pollCount: number;
+  /** The original submitted task/context/senderName. See JobPrompt. */
+  prompt: JobPrompt;
 };
+
+/**
+ * Exact next call a caller should make. `null` once the job is terminal —
+ * there's nothing left to poll. A hint derived from current status, not a
+ * guarantee: the job can still transition (e.g. late-recovery upgrade)
+ * between when this is computed and when the caller acts on it.
+ */
+export type NextAction = { tool: "check_task"; args: { taskId: string; sessionKey: string } } | null;
 
 export type JobSnapshot = {
   jobId: string;
@@ -80,6 +105,12 @@ export type JobSnapshot = {
   continuationState?: ContinuationState;
   /** ClawConnect agent alias this job ran against. Present from multi-agent gateway onward. */
   agent?: string;
+  /** Number of check_task waits served for this job so far. */
+  pollCount: number;
+  /** True while status is "running" — the caller should call check_task again. False at any terminal status. */
+  continuePolling: boolean;
+  /** The exact next call to make, or null once terminal. See NextAction. */
+  nextAction: NextAction;
 };
 
 export type ContinuationState = {
@@ -126,6 +157,8 @@ export type RunTaskResult = {
   status: "running";
   /** ClawConnect agent alias the task was dispatched to. */
   agent?: string;
+  /** Exact next call to make to collect the result. Always non-null immediately after run_task. */
+  nextAction: NextAction;
 };
 
 export type TaskSummary = {
@@ -165,6 +198,13 @@ export type CheckTaskOpts = {
   mode?: CheckMode;
   /** Optional explicit agent. If omitted, resolved from jobId/sessionKey. */
   agent?: string;
+  /**
+   * How long a check_task call may block, in ms, before returning a
+   * non-terminal snapshot. Omit for the default (45s — see DEFAULT_WAIT_MS
+   * in session.ts). Invalid values (negative, NaN, non-finite, too large)
+   * clamp to the nearest bound rather than erroring.
+   */
+  waitMs?: number;
 };
 
 export type CheckTaskResult =
@@ -174,4 +214,14 @@ export type CheckTaskResult =
       snapshot: JobSnapshot;
       isTerminal: boolean;
       isError: boolean;
+      /** True whenever isTerminal is false — mirrors snapshot.continuePolling for callers that don't want to unwrap the snapshot. */
+      continuePolling: boolean;
     };
+
+/**
+ * Result of a prompt-retrieval read (get_task detail="prompt"). Deliberately
+ * a distinct type from CheckTaskResult/JobSnapshot so the prompt can never
+ * leak into a normal check_task/get_task response by accident — the only
+ * function that returns this type is getTaskPrompt().
+ */
+export type TaskPromptResult = { found: false } | { found: true; prompt: JobPrompt };

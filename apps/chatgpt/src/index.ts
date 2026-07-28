@@ -24,6 +24,8 @@ import {
   loadAgentRegistry,
   runTask,
   checkTask,
+  getTask,
+  getTaskPrompt,
   listSessions,
   listTasks,
   getSession,
@@ -187,7 +189,7 @@ function buildTools(allowedIds: string[], defaultId: string, identity: Identity)
       name: "run_task",
       description: `Delegate work to an OpenClaw agent for deeper investigation, implementation, or judgment that benefits from that agent's own context, tools, and identity. Returns a jobId and sessionKey immediately while the task runs in the background.
 
-The actual result is what the user wants — not the jobId. After calling run_task, immediately call check_task with mode="wait" in a loop, passing the same jobId, until status is no longer "running". Then report the real outcome (summary, files changed, errors, etc.) to the user. A typical short task takes 30s–3min and needs 1–5 check_task calls.
+The actual result is what the user wants — not the jobId. After calling run_task, immediately call check_task with mode="wait" in a loop, passing the same jobId, until status is no longer "running" (equivalently: until continuePolling is false). Then report the real outcome (summary, files changed, errors, etc.) to the user. A typical short task takes 30s–3min and needs a handful of check_task calls at the default 45s wait window. The response's nextAction field always names the exact next call to make.
 
 Skip the polling loop only when:
 - The user explicitly asked for fire-and-forget ("just dispatch it, I'll check later").
@@ -221,11 +223,11 @@ Pass sessionKey from a previous result to continue the same thread. Available ag
     },
     {
       name: "check_task",
-      description: `Check whether a previously dispatched run_task job has finished, and collect the result.
+      description: `Check whether a previously dispatched run_task job has finished, and collect the result. This is the only tool that waits — get_task is for an immediate, non-blocking read.
 
-With mode="wait" (recommended): blocks up to 50 seconds and only returns on a terminal status (completed / completed_no_summary / error) or timeout. Call repeatedly with the same jobId until status is no longer "running" — that's how you get the actual answer.
+With mode="wait" (recommended, default): blocks for up to waitMs (default 45000ms, override with waitMs, clamped to [1000, 120000]) and only returns early on a terminal status (completed / completed_no_summary / error). A timeout return is NOT an error and NOT terminal — continuePolling is true and nextAction says to call check_task again with the same jobId. Never submit a new run_task because a check_task call timed out.
 
-With mode="poll": returns as soon as any new log activity appears. Use this only when you need intermediate progress (live UI), not when you just want the final result.
+With mode="poll": returns as soon as any new log activity appears (also bounded by waitMs). Use this only when you need intermediate progress (live UI), not when you just want the final result.
 
 Pass the jobId returned by run_task. Available agents: ${list}.`,
       inputSchema: {
@@ -247,7 +249,11 @@ Pass the jobId returned by run_task. Available agents: ${list}.`,
           mode: {
             type: "string",
             enum: ["poll", "wait"],
-            description: 'Polling mode: "wait" (default) blocks up to 50s and only returns on a terminal status — use this when you want the result. "poll" returns on any new log activity — use for live progress UIs.',
+            description: 'Polling mode: "wait" (default) blocks up to waitMs and only returns on a terminal status — a timeout return is non-terminal, just call again. "poll" returns on any new log activity — use for live progress UIs.',
+          },
+          waitMs: {
+            type: "number",
+            description: "Max time to block, in ms. Default 45000. Clamped to [1000, 120000].",
           },
         },
       },
@@ -337,21 +343,16 @@ Pass the jobId returned by run_task. Available agents: ${list}.`,
     },
     {
       name: "get_task",
-      description: `Inspect a task by taskId/jobId with a detail preset controlling which fields are returned.`,
+      description: `Inspect a task by taskId/jobId with a detail preset controlling which fields are returned. Unlike check_task, this NEVER waits — it's an immediate snapshot of whatever state exists right now (including status="running"), for diagnostics, manual reads, or UI refresh. Use check_task to actually wait for a result.`,
       inputSchema: {
         type: "object",
         properties: {
           taskId: { type: "string", description: "Task identifier (same as jobId in v1)" },
           detail: {
             type: "string",
-            enum: ["core", "summary", "updates", "artifacts", "diagnostics", "full", "fullWithDiagnostics"],
+            enum: ["core", "summary", "updates", "artifacts", "diagnostics", "prompt", "full", "fullWithDiagnostics"],
             description:
-              'Detail preset. Omit for summary. core=ids+status only; summary=+summary; updates=+logs; artifacts=+artifacts; diagnostics=+error info; full=core+summary+updates+artifacts; fullWithDiagnostics=full+diagnostics',
-          },
-          mode: {
-            type: "string",
-            enum: ["poll", "wait"],
-            description: 'Uses check semantics: "wait" blocks up to timeout; "poll" returns on updates',
+              'Detail preset. Omit for summary. core=ids+status only; summary=+summary; updates=+logs; artifacts=+artifacts; diagnostics=+error info; prompt=the original submitted task/context (not included by any other preset); full=core+summary+updates+artifacts; fullWithDiagnostics=full+diagnostics',
           },
         },
         required: ["taskId"],
@@ -644,7 +645,6 @@ const server = createServer(async (req, res) => {
           console.log(`[mcp] submitted job ${result.jobId} on agent ${result.agent} session ${result.sessionKey} sender=${identity.user ?? args.senderName ?? "unknown"}${identity.legacy ? " (legacy token)" : ""}`);
           const entry = pool.forJob(result.jobId)!;
           const snapshot = entry.sessions.buildSnapshot(entry.sessions.getJob(result.jobId)!);
-          const submittedText = `Task submitted to ${result.agent}. Job ID: ${result.jobId}`;
           respond({
             content: [
               {
@@ -655,6 +655,7 @@ const server = createServer(async (req, res) => {
                   sessionKey: result.sessionKey,
                   status: result.status,
                   agent: result.agent,
+                  nextAction: result.nextAction,
                   message: "Task submitted. Use check_task to poll for progress.",
                 }) + (identity.legacy ? `\n\nNote: ${GET_TOKEN_HINT}` : ""),
               },
@@ -684,6 +685,7 @@ const server = createServer(async (req, res) => {
           agent: requestedAgent,
           knownLogCount: Number(args.knownLogCount) || 0,
           mode,
+          waitMs: args.waitMs !== undefined ? Number(args.waitMs) : undefined,
         });
 
         if (!result.found) {
@@ -788,10 +790,11 @@ const server = createServer(async (req, res) => {
           structuredContent: { tasks: filtered },
         });
       } else if (name === "get_task") {
+        // get_task NEVER waits (contract decision 6) — getTask() is an
+        // immediate, synchronous read, unlike check_task's checkTask().
         const taskId = typeof args.taskId === "string" ? args.taskId : "";
         const detail = typeof args.detail === "string" ? args.detail : undefined;
-        const mode = (typeof args.mode === "string" ? args.mode : undefined) as CheckMode | undefined;
-        const result = await checkTask(pool, { jobId: taskId, mode: mode ?? "wait" });
+        const result = getTask(pool, { jobId: taskId });
 
         if (!result.found) {
           respond({
@@ -805,6 +808,16 @@ const server = createServer(async (req, res) => {
             structuredContent: { taskId, status: "error", error: "Task not found." },
             isError: true,
           });
+        } else if (detail === "prompt") {
+          // Same per-agent scope authorization as every other field — already
+          // enforced above before this branch runs.
+          const promptResult = getTaskPrompt(pool, { jobId: taskId });
+          if (!promptResult.found) {
+            respond({ content: [{ type: "text", text: "Task not found." }], isError: true });
+          } else {
+            const payload = { taskId, prompt: promptResult.prompt };
+            respond({ content: [{ type: "text", text: JSON.stringify(payload) }], structuredContent: payload });
+          }
         } else {
           const s = result.snapshot;
           const d = detail ?? "summary";
@@ -818,6 +831,9 @@ const server = createServer(async (req, res) => {
             startedAt: s.startedAt,
             lastEventAt: s.lastEventAt,
             recovery: s.recovery,
+            pollCount: s.pollCount,
+            continuePolling: result.continuePolling,
+            nextAction: s.nextAction,
           };
           if (d === "summary" || has("summary")) {
             payload.summary = s.summary;

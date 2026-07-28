@@ -7,7 +7,7 @@ export { searchMemory, getMemory, listCollections, DEFAULT_QMD_URL } from "./mem
 export type { MemorySearchHit, MemorySearchResult, GetMemoryResult, SearchMemoryOpts, CollectionListing } from "./memory.ts";
 export { classifyError } from "./errors.ts";
 export { emptyArtifacts, processEvent, extractPatternsFromSummary, deriveNextStep } from "./artifacts.ts";
-export { runTask, checkTask, listSessions, listTasks, getSession } from "./tools.ts";
+export { runTask, checkTask, getTask, getTaskPrompt, listSessions, listTasks, getSession } from "./tools.ts";
 export type {
   Artifacts,
   CheckMode,
@@ -19,13 +19,16 @@ export type {
   GatewayConfig,
   GatewayEvent,
   Job,
+  JobPrompt,
   JobSnapshot,
   JobStatus,
   LogEntry,
+  NextAction,
   RunTaskResult,
   SessionInspectMode,
   SessionInspectResult,
   TaskInput,
   TaskSummary,
   TaskStatus,
+  TaskPromptResult,
 } from "./types.ts";

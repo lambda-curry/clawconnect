@@ -6,6 +6,7 @@ import type {
   RunTaskResult,
   SessionInspectMode,
   SessionInspectResult,
+  TaskPromptResult,
   TaskSummary,
   TaskInput,
 } from "./types.ts";
@@ -25,6 +26,7 @@ export function runTask(pool: GatewayPool, input: TaskInput): RunTaskResult {
     sessionKey: job.sessionKey,
     status: "running",
     agent: entry.agent.id,
+    nextAction: { tool: "check_task", args: { taskId: job.jobId, sessionKey: job.sessionKey } },
   };
 }
 
@@ -71,7 +73,8 @@ function notFound(): CheckTaskResult {
   return { found: false };
 }
 
-export async function checkTask(pool: GatewayPool, opts: CheckTaskOpts): Promise<CheckTaskResult> {
+/** Shared entry-resolution logic for checkTask/getTask/getTaskPrompt. */
+function resolvePoolEntry(pool: GatewayPool, opts: { jobId?: string; sessionKey?: string; agent?: string }) {
   let entry = opts.agent ? pool.forAgent(opts.agent) : undefined;
   if (!entry && opts.jobId) entry = pool.forJob(opts.jobId);
   if (!entry && opts.sessionKey) entry = pool.forSession(opts.sessionKey);
@@ -85,6 +88,16 @@ export async function checkTask(pool: GatewayPool, opts: CheckTaskOpts): Promise
       }
     }
   }
+  return entry;
+}
+
+/**
+ * check_task: the only tool that waits. Blocks for up to opts.waitMs (default
+ * 45s, clamped) and returns early on a terminal status. A timeout return is
+ * non-terminal — continuePolling is true and nextAction says to call again.
+ */
+export async function checkTask(pool: GatewayPool, opts: CheckTaskOpts): Promise<CheckTaskResult> {
+  const entry = resolvePoolEntry(pool, opts);
   if (!entry) return notFound();
 
   const job = await entry.sessions.waitForJob(
@@ -92,16 +105,58 @@ export async function checkTask(pool: GatewayPool, opts: CheckTaskOpts): Promise
     opts.knownLogCount ?? 0,
     opts.sessionKey,
     opts.mode ?? "poll",
+    opts.waitMs,
   );
   if (!job) return notFound();
 
   const snapshot = entry.sessions.buildSnapshot(job);
+  const isTerminal = job.status !== "running";
   return {
     found: true,
     snapshot: { ...snapshot, agent: entry.agent.id },
-    isTerminal: job.status !== "running",
+    isTerminal,
     isError: job.status === "error",
+    continuePolling: !isTerminal,
   };
+}
+
+/**
+ * get_task: an immediate snapshot, never waits. Resolves whatever state
+ * exists right now — including status="running" if that's the truth. This is
+ * what distinguishes it from check_task (contract decision 6).
+ */
+export function getTask(pool: GatewayPool, opts: { jobId?: string; sessionKey?: string; agent?: string }): CheckTaskResult {
+  const entry = resolvePoolEntry(pool, opts);
+  if (!entry) return notFound();
+  const job = entry.sessions.resolveJob(opts.jobId, opts.sessionKey);
+  if (!job) return notFound();
+
+  const snapshot = entry.sessions.buildSnapshot(job);
+  const isTerminal = job.status !== "running";
+  return {
+    found: true,
+    snapshot: { ...snapshot, agent: entry.agent.id },
+    isTerminal,
+    isError: job.status === "error",
+    continuePolling: !isTerminal,
+  };
+}
+
+/**
+ * get_task detail="prompt": the original submitted task/context/senderName.
+ * Never included in check_task/get_task's normal snapshot — a separate read
+ * path, gated by the same per-agent scope authorization as everything else
+ * (enforced by the caller, same as any other out-of-scope job access).
+ */
+export function getTaskPrompt(
+  pool: GatewayPool,
+  opts: { jobId?: string; sessionKey?: string; agent?: string },
+): TaskPromptResult {
+  const entry = resolvePoolEntry(pool, opts);
+  if (!entry) return { found: false };
+  const job = entry.sessions.resolveJob(opts.jobId, opts.sessionKey);
+  if (!job) return { found: false };
+  return { found: true, prompt: job.prompt };
 }
 
 export function listSessions(pool: GatewayPool): ContinuationState[] {

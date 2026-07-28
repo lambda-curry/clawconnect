@@ -7,7 +7,7 @@ import {
 } from "./artifacts.ts";
 import { classifyError } from "./errors.ts";
 import { OpenClawGateway } from "./gateway.ts";
-import type { CheckMode, ContinuationState, Job, JobSnapshot, TaskInput } from "./types.ts";
+import type { CheckMode, ContinuationState, Job, JobSnapshot, JobStatus, NextAction, TaskInput } from "./types.ts";
 
 function readEnvMs(name: string, fallbackMs: number): number {
   const raw = process.env[name];
@@ -27,8 +27,22 @@ const TIMEOUT_MS = readEnvMs("CLAWCONNECT_TIMEOUT_MS", 30 * 60_000); // 30 min
 // writing visible text). The cap below is the absolute safety ceiling for
 // runs that produce activity forever without ever stabilizing.
 const RECOVERY_TIMEOUT_MS = readEnvMs("CLAWCONNECT_RECOVERY_TIMEOUT_MS", 90 * 60_000); // 90 min
-const POLL_WAIT_MS = 50_000; // max time check waits before returning
+// check_task's bounded-wait window (contract: docs/decisions/2026-07-27-task-
+// contract.md decision 4 — "default wait target is 45 seconds and callers may
+// override it"). Invalid/out-of-range waitMs values clamp rather than error.
+const DEFAULT_WAIT_MS = readEnvMs("CLAWCONNECT_CHECK_WAIT_MS", 45_000);
+const MIN_WAIT_MS = 1_000;
+const MAX_WAIT_MS = readEnvMs("CLAWCONNECT_CHECK_MAX_WAIT_MS", 120_000);
 const MAX_LOG_ENTRIES = 200;
+
+function resolveWaitMs(requested: number | undefined): number {
+  if (requested === undefined || !Number.isFinite(requested)) return DEFAULT_WAIT_MS;
+  return Math.min(Math.max(requested, MIN_WAIT_MS), MAX_WAIT_MS);
+}
+
+function buildNextAction(job: { jobId: string; sessionKey: string; status: JobStatus }): NextAction {
+  return job.status === "running" ? { tool: "check_task", args: { taskId: job.jobId, sessionKey: job.sessionKey } } : null;
+}
 
 const LEGACY_CHATGPT_SESSION_PREFIX = "agent:chatgpt:";
 
@@ -136,6 +150,8 @@ export class SessionManager {
         lastEventAt: Date.now(),
         logs: [],
         artifacts: emptyArtifacts(),
+        pollCount: 0,
+        prompt: { task: input.task, context: input.context, senderName: input.senderName },
       };
       this.jobs.set(busyJobId, busyJob);
       logDebug(
@@ -167,6 +183,8 @@ export class SessionManager {
       lastEventAt: logs.length > 0 ? now : 0,
       logs,
       artifacts,
+      pollCount: 0,
+      prompt: { task: input.task, context: input.context, senderName: input.senderName },
     };
     this.jobs.set(jobId, job);
     this.latestJobBySession.set(sessionKey, jobId);
@@ -421,6 +439,9 @@ export class SessionManager {
       logs: job.logs,
       artifacts: job.artifacts,
       recovery: job.recovery,
+      pollCount: job.pollCount,
+      continuePolling: job.status === "running",
+      nextAction: buildNextAction(job),
       ...(continuation ? { continuationState: continuation } : {}),
     };
   }
@@ -459,6 +480,7 @@ export class SessionManager {
     knownLogCount = 0,
     sessionKey?: string,
     mode: CheckMode = "poll",
+    waitMs?: number,
   ): Promise<Job | undefined> {
     const job = this.resolveJob(jobId, sessionKey);
     if (!job) {
@@ -467,6 +489,7 @@ export class SessionManager {
       );
       return undefined;
     }
+    job.pollCount += 1;
     if (job.status !== "running") {
       // SFR-247 lazy recovery: the openclaw session is durable on the same
       // sessionKey even after restart, and the agent may eventually write a
@@ -482,10 +505,11 @@ export class SessionManager {
       );
       return job;
     }
+    const effectiveWaitMs = resolveWaitMs(waitMs);
     logDebug(
-      `[waitForJob] job ${job.jobId.slice(0, 8)} waiting mode=${mode} (known=${knownLogCount}, current=${job.logs.length})`,
+      `[waitForJob] job ${job.jobId.slice(0, 8)} waiting mode=${mode} waitMs=${effectiveWaitMs} (known=${knownLogCount}, current=${job.logs.length})`,
     );
-    const deadline = Date.now() + POLL_WAIT_MS;
+    const deadline = Date.now() + effectiveWaitMs;
     while (Date.now() < deadline && job.status === "running") {
       await new Promise((r) => setTimeout(r, 500));
       // In "poll" mode: return early on new logs (live progress for widgets)

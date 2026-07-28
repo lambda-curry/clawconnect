@@ -184,7 +184,65 @@ stuck"). The replacement:
 | Wait semantics | Fake-clock tests: default 45s target; explicit `waitMs` override; invalid (negative/NaN/huge) `waitMs` clamps instead of erroring; terminal status ends the wait immediately regardless of `waitMs`; timeout returns `continuePolling: true` without creating a duplicate job | `packages/core/src/session.test.ts` |
 | UI absent/failure | Full `run_task` → `check_task` → terminal lifecycle over the HTTP transport with `ENABLE_CHATGPT_UI_WIDGET` unset/false; `resources/list` returns no widget resource | `apps/chatgpt/src/index.test.ts` |
 
-## 8. Explicit non-goals for this slice
+## 8. Build gate — UI architecture work paused pending explorer review
+
+Two prior explorations were found mid-build, both diverged from the same
+`a60fb4f` base as this branch:
+
+- `fleet/cf-clawconnect-mcp-ui-explorer` (worktree
+  `~/.claude-fleet/cf-clawconnect-mcp-ui-explorer`): a full MCP Apps
+  (SEP-1865) task-progress card replacing `widget.html`, with a pure state
+  machine, build/verify scripts, and a written report
+  (`docs/chatgpt-mcp-apps-task-ui.md` on that branch) reaching the same
+  "immediate read, never a long-held wait" conclusion as this doc's §6,
+  independently, from the UI side. Not pushed, not deployed, not merged.
+- `fleet/cf-clawconnect-debugger-builder` (worktree
+  `~/.claude-fleet/cf-clawconnect-debugger-builder`): commits `333d975`
+  (`pollCount`/`continuePolling`/`retryAfterMs`/`nextAction` on
+  `JobSnapshot`+`RunTaskResult`) and `102a2d7` (parameterized `waitMs`, a
+  `snapshot` `CheckMode`) — structurally very close to what this build needed
+  for §3. Also not pushed, not merged.
+
+**What was reused vs. not, and why:** the `pollCount`/`continuePolling`/
+`nextAction` field shapes from `333d975` were adopted here (implemented fresh
+in this worktree, not cherry-picked) because they're a clean, well-reasoned
+match for contract decisions 3 and 5. Two choices from that branch were
+**not** adopted, because they conflict with the accepted contract this build
+targets, not because they're wrong in isolation:
+
+1. `102a2d7`'s default wait window is **~8s** (`CLAWCONNECT_CHECK_WAIT_MS`,
+   capped at 50s). The accepted contract (decision 4) is explicit: **45s
+   default**. The 8s number reads as the "bounded hybrid wait" experiment the
+   contract's transitional note describes as feeding into the decision — the
+   decision that emerged from it is 45s, not 8s. This build implements 45s.
+2. `102a2d7` added a `"snapshot"` value to the shared `CheckMode` enum, and
+   `get_task`'s default mode stayed `"wait"` (still blocking unless a caller
+   remembers to pass `mode: "snapshot"`). The accepted contract (decision 6)
+   is that `get_task` is *always* an immediate snapshot — never opt-in. This
+   build gives `get_task` its own non-waiting code path (`getTask()` in
+   `tools.ts`) with no wait-mode escape hatch at all, which is the stronger
+   and simpler guarantee.
+
+**Gate, per explicit instruction received mid-build:** architecture-dependent
+ChatGPT UI commits (this doc's §6, task list item "re-enable minimal
+read-only multi-session ChatGPT widget") are **paused** until the
+`cf-clawconnect-mcp-ui-explorer` report and prototype are formally reviewed
+against the accepted task contract and reconciled with whatever the debugger
+branch's overlapping work resolves to. The explorer's own draft finding
+(`docs/arbor/clawconnect-chatgpt-ui-finding.draft.md` on that branch) already
+flags the `CheckMode` collision with the debugger branch and asks for
+reconciliation "on one branch before either merges" — that reconciliation
+has not happened yet as of this build. Independent non-UI compatibility work
+(this section, §3–§5, §7) is not blocked by this gate and proceeded.
+
+Concretely un-superseded by this gate: the explorer's MCP Apps protocol
+research (§1 of its report) and 12-state UX design (§3) are reusable
+reference material once the gate clears — nothing here invalidates them, and
+this build's `nextAction`/`continuePolling`/`pollCount` fields are exactly
+the "data contract" (§3 of the explorer report) a future card would consume
+unchanged.
+
+## 9. Explicit non-goals for this slice
 
 - No rearchitecture of `apps/chatgpt`'s hand-rolled JSON-RPC into the MCP
   SDK's HTTP transport. Real risk (auth gate, CORS, per-connection scoping)
