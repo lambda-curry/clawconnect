@@ -201,8 +201,10 @@ ChatGPT will call `run_task`, then poll with `check_task` until the task complet
 #### Notes
 
 - `check_task` is annotated as read-only/idempotent, which may reduce approval prompts during polling
-- The widget polls the server directly via `oai.callTool()` — it does not require `check_task` to have widget metadata
-- If the widget causes issues, set `ENABLE_CHATGPT_UI_WIDGET=false` and restart
+- The widget is a read-only "task center": session-first rows (one per `sessionKey`), collapsing to a focused single-task view when only one session has active work, expandable into per-session task history. It polls `get_task`/`list_tasks`/`get_session` directly (never `check_task`) on an attention-shaped cadence that stops entirely once everything in scope is terminal — the assistant's own `check_task(mode:"wait")` loop is unaffected by and independent of whether the widget is mounted, enabled, or even loads successfully. See `docs/architecture/2026-07-27-chatgpt-ui-reconciliation.md` for the full design.
+- Task titles are generated from non-sensitive fields (summary/artifacts/status) by default; the original submitted prompt is never shown unless you explicitly use the "Show original request" action (`get_task detail:"prompt"`, same authorization boundary as the API)
+- If the widget causes issues, set `ENABLE_CHATGPT_UI_WIDGET=false` and restart — `run_task`/`check_task` correctness never depends on it
+- **Not verified against live ChatGPT rendering** — this is a local, test-ready prototype (unit-tested state logic + HTTP-integration-tested server wiring), not a deployed/live-tested one. See the Local Testing coverage table below
 
 #### Authentication & user identity
 
@@ -303,19 +305,23 @@ pnpm install
 ./node_modules/.bin/vp run -r build --force   # full workspace build + typecheck, all 4 packages
 ```
 
-As of this contract implementation: **6 test files, 53 tests, all passing.** Coverage by client surface:
+As of this contract implementation: **9 test files, 105 tests, all passing.** Coverage by client surface:
 
 | Surface | What's verified | Where |
 |---|---|---|
 | Generic MCP (Claude Code, Cursor, Codex, any bare MCP client) | `tools/list`/`tools/call` over the real stdio `McpServer` via the SDK's `InMemoryTransport` — unversioned tool names, no ChatGPT-only `_meta` leakage, `check_task` has `waitMs`, `get_task` has neither `waitMs` nor `mode` (it never waits) | `packages/mcp/src/server.test.ts` |
 | Claude / Claude Code | Unrecognized extra properties in tool arguments and a request-level `_meta` block (progress tokens, `io.modelcontextprotocol/related-task`) don't reject the call | `packages/mcp/src/server.test.ts` |
-| ChatGPT (structural, not live) | `structuredContent` shape is produced by the exact same shared builders (`packages/core/src/structured-content.ts`) the ChatGPT HTTP app calls — cross-transport identity is enforced by construction, not by a live comparison. **Not verified: anything inside ChatGPT itself** — that needs a deploy, which this build deliberately does not do. The ChatGPT UI widget rebuild itself is gated pending review of a prior exploration session; see `docs/architecture/2026-07-27-multi-client-compatibility.md` §8 | `packages/core/src/structured-content.test.ts` |
+| ChatGPT — protocol/meta layer | MCP Apps constants/builders (`protocolVersion` negotiation, extensions capability, `_meta.ui`/legacy-alias shapes) verified against the installed `@modelcontextprotocol/ext-apps@1.5.0` package, not assumed; every builder returns nothing at all when the widget is disabled | `apps/chatgpt/src/ui-meta.test.ts` |
+| ChatGPT — HTTP transport | Real ephemeral `http.Server` + real `fetch()` against `createApp()`'s request listener (no live OpenClaw gateway — agents point at an unroutable loopback port). Unmounted core independence (`run_task`→`get_task` succeeds identically whether the widget is disabled, enabled, or enabled-with-a-broken-resource-file); missing-metadata fallback (disabled ⇒ empty `resources/list`, no `extensions` capability, no `ui`/`openai/outputTemplate`/`openai/widgetAccessible` on any tool); enabled-with-a-real-resource (`resources/read` serves it, only `run_task` carries a `resourceUri`, `get_task`/`list_tasks`/`get_session` are app-callable without one, `check_task` carries no `_meta` at all) | `apps/chatgpt/src/app.test.ts` |
+| ChatGPT — widget decision logic | The full UX model as pure functions: status grouping (exact status preserved), generated titles (never from the stored prompt), aggregate-command-center-collapsing-to-focused-task, session-first rows with expandable task history, Active/Recent views, context-aware detail sections, attention-shaped poll cadence, dedup ("never a second read in flight") and bound ("stop once everything is terminal") guards, out-of-order-read safety, and the documented conversation-scope fallback | `apps/chatgpt/src/widget/state.test.ts` |
 | Wait semantics | Fake-clock coverage: 45s default, explicit `waitMs` override, invalid values (negative/NaN/huge) clamp instead of erroring, terminal status returns immediately regardless of `waitMs`, a timeout is non-terminal with no duplicate job created on re-poll, `pollCount` increments per call | `packages/core/src/session-wait.test.ts` |
-| Concurrency, sessions, prompt authorization | Concurrent `taskId`/`sessionKey` pairs across agents never cross-resolve; a second `run_task` on a still-running session is refused, not silently overwritten; `get_session` snapshot/events/tail pagination; `get_task detail: "prompt"` round-trip and its absence from every other detail level | `packages/core/src/tools.test.ts` |
+| Concurrency, sessions, prompt authorization | Concurrent `taskId`/`sessionKey` pairs across agents never cross-resolve; a second `run_task` on a still-running session is refused, not silently overwritten; `get_session` snapshot/events/tail/tasks modes; `get_task detail: "prompt"` round-trip and its absence from every other detail level | `packages/core/src/tools.test.ts` |
 
-None of the above touch a live OpenClaw gateway or a live ChatGPT connection — `GatewayPool` connects lazily, so tests that never resolve an agent (unknown job/session ids) do no network I/O at all, and tests that do submit a task mock `OpenClawGateway` at the constructor level.
+None of the above touch a live OpenClaw gateway or a live ChatGPT connection — `GatewayPool` connects lazily, so tests that never resolve an agent (unknown job/session ids) do no network I/O at all, tests that do submit a task either mock `OpenClawGateway` at the constructor level or point at an unroutable loopback port, and nothing here was verified by actually rendering inside ChatGPT (a hard constraint on this build — see `docs/architecture/2026-07-27-chatgpt-ui-reconciliation.md` §6).
 
-**Known build-tool quirk:** `vp pack --force` (part of `vp run -r build --force`) sometimes rewrites the `bin` field in `packages/cli/package.json` and `packages/mcp/package.json` (`clawconnect` → `cli`, `clawconnect-mcp` → `mcp`), which would silently break the published binary names if committed. This is a vite-plus behavior, not something this project's code does — after any `vp run -r build --force`, check `git status` on those two files and `git checkout` them if changed, before committing.
+**Known build-tool quirks (vite-plus, not this project's code):**
+- `vp pack --force` (part of `vp run -r build --force`) sometimes rewrites the `bin` field in `packages/cli/package.json` and `packages/mcp/package.json` (`clawconnect` → `cli`, `clawconnect-mcp` → `mcp`), which would silently break the published binary names if committed. After any `vp run -r build --force`, check `git status` on those two files and `git checkout` them if changed, before committing.
+- After deleting a package's `dist/` directory, `vp run -r build --force` can replay a cached "success" for a step without actually regenerating output, so a later step in the same package (e.g. `apps/chatgpt`'s widget-copy/build step) fails against a directory that was never recreated. `./node_modules/.bin/vp cache clean` resolves it.
 
 ## Architecture
 
