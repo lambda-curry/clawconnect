@@ -18,6 +18,9 @@ import {
   deriveActivityLabel,
   deriveTimeline,
   deriveLatestUpdate,
+  deriveStatusPill,
+  deriveCounts,
+  formatCounts,
 } from "./state.js";
 
 function task(overrides = {}) {
@@ -359,5 +362,42 @@ describe("deriveTimeline / deriveLatestUpdate — the actual evidence, not just 
   it("deriveLatestUpdate returns the single most recent entry", () => {
     expect(deriveLatestUpdate(logs)).toEqual({ ts: 2000, type: "tool", text: "Running command: pnpm test" });
     expect(deriveLatestUpdate([])).toBeNull();
+  });
+});
+
+describe("deriveStatusPill — status communicated by icon + text, never color alone", () => {
+  it("returns a distinct icon and label for every group", () => {
+    const pills = ["active", "needs_attention", "completed", "failed"].map(deriveStatusPill);
+    expect(new Set(pills.map((p) => p.icon)).size).toBe(4);
+    expect(new Set(pills.map((p) => p.label)).size).toBe(4);
+    expect(pills.every((p) => typeof p.icon === "string" && typeof p.label === "string")).toBe(true);
+  });
+});
+
+describe("deriveCounts / formatCounts — the inline card's compact session summary", () => {
+  const history = [
+    task({ status: "running" }),
+    task({ status: "done" }),
+    task({ status: "done" }),
+    task({ status: "blocked" }),
+    task({ status: "failed" }),
+  ];
+
+  it("counts every group plus a total", () => {
+    expect(deriveCounts(history)).toEqual({ active: 1, needs_attention: 1, completed: 2, failed: 1, total: 5 });
+  });
+
+  it("handles missing/empty history without throwing", () => {
+    expect(deriveCounts(undefined)).toEqual({ active: 0, needs_attention: 0, completed: 0, failed: 0, total: 0 });
+    expect(deriveCounts([])).toEqual({ active: 0, needs_attention: 0, completed: 0, failed: 0, total: 0 });
+  });
+
+  it("formats only the non-zero groups, in a fixed order, joined compactly", () => {
+    expect(formatCounts(deriveCounts(history))).toBe("1 running · 1 needs attention · 2 completed · 1 failed");
+    expect(formatCounts(deriveCounts([task({ status: "done" })]))).toBe("1 completed");
+  });
+
+  it("formats to an empty string for no history — the caller decides what to show instead", () => {
+    expect(formatCounts(deriveCounts([]))).toBe("");
   });
 });

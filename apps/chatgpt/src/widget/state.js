@@ -21,6 +21,19 @@ function isTerminalGroup(group) {
 }
 
 /**
+ * Icon + label for a group — status must never be communicated by color
+ * alone (accessibility; also just more honest about what's happening).
+ * Plain Unicode glyphs, no icon library, so the self-contained resource
+ * stays self-contained.
+ */
+export function deriveStatusPill(group) {
+  if (group === "active") return { icon: "●", label: "Running" };
+  if (group === "needs_attention") return { icon: "⚠", label: "Needs attention" };
+  if (group === "completed") return { icon: "✓", label: "Completed" };
+  return { icon: "✕", label: "Failed" };
+}
+
+/**
  * Generated title, derived only from fields already present in a normal
  * (non-"prompt") task/snapshot — artifacts, summary, status, agent. Never
  * the stored prompt, so the default render path never needs
@@ -124,6 +137,32 @@ export function expandSessionRow(row, historyTasks) {
     expanded: true,
     history: historyTasks.map((t) => ({ ...t, group: groupStatus(t.status), title: deriveTitle(t) })),
   };
+}
+
+/**
+ * Compact per-session counts ("1 running · 6 completed") from a session's
+ * task history (get_session(mode:"tasks")) — the inline card's summary
+ * line. Deliberately just counts, not the itemized list (that's
+ * expandSessionRow's job, click-triggered) — the inline card stays compact
+ * by design.
+ */
+export function deriveCounts(historyTasks) {
+  const counts = { active: 0, needs_attention: 0, completed: 0, failed: 0, total: 0 };
+  for (const t of historyTasks ?? []) {
+    counts[groupStatus(t.status)] += 1;
+    counts.total += 1;
+  }
+  return counts;
+}
+
+/** The counts line as shown text, e.g. "1 running · 6 completed" — omits zero groups so it stays compact rather than "0 needs attention · 0 failed" noise. */
+export function formatCounts(counts) {
+  const parts = [];
+  if (counts.active) parts.push(`${counts.active} running`);
+  if (counts.needs_attention) parts.push(`${counts.needs_attention} needs attention`);
+  if (counts.completed) parts.push(`${counts.completed} completed`);
+  if (counts.failed) parts.push(`${counts.failed} failed`);
+  return parts.join(" · ");
 }
 
 /**

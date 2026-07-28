@@ -5,10 +5,16 @@
 <style>
   :root {
     --cc-bg: var(--color-background-primary, #ffffff);
+    --cc-bg-subtle: var(--color-background-secondary, #f7f7f8);
     --cc-fg: var(--color-text-primary, #111111);
     --cc-fg-muted: var(--color-text-secondary, #666666);
     --cc-border: var(--color-border-primary, #e2e2e2);
-    --cc-accent: var(--color-accent, #2563eb);
+    /* Saffron — the one accent color, used sparingly (see design notes
+       below): the primary action, the focused row's marker, nothing else.
+       Status itself is never conveyed by color alone — deriveStatusPill
+       pairs every status with a distinct icon + label. */
+    --cc-accent: var(--color-accent, #d97e2c);
+    --cc-accent-fg: #ffffff;
     --cc-active: #2563eb;
     --cc-needs-attention: #b45309;
     --cc-completed: #15803d;
@@ -16,48 +22,83 @@
   }
   :root[data-theme="dark"] {
     --cc-bg: var(--color-background-primary, #18181b);
+    --cc-bg-subtle: var(--color-background-secondary, #232326);
     --cc-fg: var(--color-text-primary, #f4f4f5);
     --cc-fg-muted: var(--color-text-secondary, #a1a1aa);
     --cc-border: var(--color-border-primary, #3f3f46);
+    --cc-accent: var(--color-accent, #eb9c4f);
+    --cc-accent-fg: #1a1200;
   }
   @media (prefers-color-scheme: dark) {
     /* Only applies before the host has told us its theme via hostContext —
-       data-theme (set explicitly, see applyTheme()) always wins once known,
+       data-theme (set explicitly, see applyTheme()) always wins over this
        in both directions, per the bug the prior widget shipped. */
     :root:not([data-theme]) {
       --cc-bg: #18181b;
+      --cc-bg-subtle: #232326;
       --cc-fg: #f4f4f5;
       --cc-fg-muted: #a1a1aa;
       --cc-border: #3f3f46;
+      --cc-accent: #eb9c4f;
+      --cc-accent-fg: #1a1200;
     }
   }
   * { box-sizing: border-box; }
   body {
     margin: 0;
-    font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font: 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     background: var(--cc-bg);
     color: var(--cc-fg);
   }
-  #root { padding: 10px 12px; overflow-x: hidden; }
-  .cc-row { border: 1px solid var(--cc-border); border-radius: 8px; padding: 8px 10px; margin-bottom: 6px; cursor: pointer; }
+  #root { padding: 12px 14px; overflow-x: hidden; }
+  .cc-row {
+    border: 1px solid var(--cc-border); border-radius: 10px; padding: 12px 14px;
+    margin-bottom: 8px; cursor: pointer; position: relative;
+  }
   .cc-row:last-child { margin-bottom: 0; }
-  .cc-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .cc-meta { color: var(--cc-fg-muted); font-size: 11px; margin-top: 2px; }
+  /* The one place the accent marks something: the row currently in focus —
+     not every row, not the whole card. */
+  .cc-row--pinned { border-color: var(--cc-accent); }
+  .cc-row--pinned::before {
+    content: ""; position: absolute; left: 0; top: 10px; bottom: 10px; width: 3px;
+    background: var(--cc-accent); border-radius: 0 3px 3px 0;
+  }
+  .cc-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+  .cc-title { font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cc-pill {
+    flex: none; display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 600;
+    padding: 2px 8px; border-radius: 999px; border: 1px solid currentColor; white-space: nowrap;
+  }
+  .cc-pill--active { color: var(--cc-active); }
+  .cc-pill--needs_attention { color: var(--cc-needs-attention); }
+  .cc-pill--completed { color: var(--cc-completed); }
+  .cc-pill--failed { color: var(--cc-failed); }
+  .cc-meta { color: var(--cc-fg-muted); font-size: 11.5px; margin-top: 3px; }
+  .cc-update { display: flex; align-items: baseline; gap: 6px; margin-top: 8px; font-size: 12.5px; }
+  .cc-update-icon { flex: none; }
+  .cc-counts { color: var(--cc-fg-muted); font-size: 11.5px; margin-top: 6px; }
   .cc-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 5px; }
   .cc-dot--active { background: var(--cc-active); }
   .cc-dot--needs_attention { background: var(--cc-needs-attention); }
   .cc-dot--completed { background: var(--cc-completed); }
   .cc-dot--failed { background: var(--cc-failed); }
-  .cc-history { margin-top: 6px; padding-left: 12px; border-left: 2px solid var(--cc-border); }
+  .cc-history { margin-top: 8px; padding-left: 12px; border-left: 2px solid var(--cc-border); }
   .cc-history-item { font-size: 12px; padding: 3px 0; color: var(--cc-fg-muted); }
-  .cc-actions { margin-top: 8px; display: flex; gap: 6px; flex-wrap: wrap; }
+  .cc-actions { margin-top: 10px; display: flex; gap: 6px; flex-wrap: wrap; }
   .cc-btn {
-    font: inherit; padding: 4px 9px; border-radius: 6px; border: 1px solid var(--cc-border);
+    font: inherit; padding: 5px 10px; border-radius: 7px; border: 1px solid var(--cc-border);
     background: transparent; color: var(--cc-fg); cursor: pointer;
   }
   .cc-btn:hover { border-color: var(--cc-accent); }
-  .cc-footer { margin-top: 8px; color: var(--cc-fg-muted); font-size: 11px; }
-  .cc-prompt { margin-top: 6px; padding: 6px 8px; border-radius: 6px; background: var(--cc-border); font-size: 12px; white-space: pre-wrap; }
+  .cc-btn--primary { background: var(--cc-accent); border-color: var(--cc-accent); color: var(--cc-accent-fg); font-weight: 600; }
+  .cc-footer { margin-top: 10px; color: var(--cc-fg-muted); font-size: 11px; }
+  .cc-prompt { margin-top: 8px; border-radius: 8px; background: var(--cc-bg-subtle); border: 1px solid var(--cc-border); overflow: hidden; }
+  .cc-prompt-head {
+    display: flex; align-items: center; justify-content: space-between; padding: 6px 10px;
+    font-size: 11px; font-weight: 600; color: var(--cc-fg-muted); border-bottom: 1px solid var(--cc-border);
+  }
+  .cc-prompt-body { padding: 8px 10px; font-size: 12px; white-space: pre-wrap; }
+  .cc-prompt-close { background: none; border: none; color: var(--cc-fg-muted); cursor: pointer; font: inherit; padding: 0; }
 </style>
 </head>
 <body>
@@ -150,7 +191,8 @@ const app = {
   knownSessionKeys: new Set(),
   pollInFlight: false,
   pollFailures: 0,
-  expanded: new Map(), // sessionKey -> history[]
+  expanded: new Map(), // sessionKey -> history[] (task summaries) — for the pinned session this is kept fresh automatically every refresh(); for any other row it's fetched once on click
+  historyOpen: new Set(), // sessionKeys where the itemized history list should render, vs. just the compact counts line
   promptText: new Map(), // taskId -> revealed prompt text
   timeline: [], // deriveTimeline() output for the one focused/highlighted task — the actual evidence behind "is working"
   timelineFor: null, // taskId the current timeline belongs to, so a stale fetch never renders under the wrong row
@@ -171,6 +213,21 @@ function persist() {
   bridge.saveWidgetState({ mounted: app.mounted, knownSessionKeys: [...app.knownSessionKeys] });
 }
 
+// Keeps the pinned session's task-history count fresh (the inline card's
+// "1 running · 6 completed" line) — one bounded call, only for the session
+// currently in focus, same session the timeline fetch already targets. A
+// transient failure leaves whatever was cached before rather than blanking
+// out a number that was already showing.
+async function refreshPinnedCounts(sessionKey) {
+  if (!sessionKey) return;
+  try {
+    const result = await bridge.callTool("get_session", { sessionId: sessionKey, mode: "tasks" });
+    app.expanded.set(sessionKey, result?.structuredContent?.tasks ?? result?.tasks ?? []);
+  } catch {
+    /* keep the previously cached counts */
+  }
+}
+
 async function refresh() {
   if (!shouldPoll({ pollInFlight: app.pollInFlight, tasks: app.tasks })) return;
   app.pollInFlight = true;
@@ -186,6 +243,7 @@ async function refresh() {
         app.timeline = deriveTimeline(snapshot.updates ?? snapshot.logs ?? []);
         app.timelineFor = view.taskId;
       }
+      await refreshPinnedCounts(view.sessionKey);
     } else {
       const result = await bridge.callTool("list_tasks", { view: app.allActivity ? "all" : "active" });
       const tasks = result?.structuredContent?.tasks ?? result?.tasks ?? [];
@@ -203,6 +261,7 @@ async function refresh() {
         const updates = detail?.structuredContent?.updates ?? detail?.updates ?? [];
         app.timeline = deriveTimeline(updates);
         app.timelineFor = taskId;
+        await refreshPinnedCounts(highlightSessionKey);
       } else {
         app.timeline = [];
         app.timelineFor = null;
@@ -230,16 +289,22 @@ function scheduleNext() {
 }
 
 async function toggleExpand(sessionKey) {
-  if (app.expanded.has(sessionKey)) {
-    app.expanded.delete(sessionKey);
+  if (app.historyOpen.has(sessionKey)) {
+    app.historyOpen.delete(sessionKey);
     render();
     return;
   }
-  try {
-    const result = await bridge.callTool("get_session", { sessionId: sessionKey, mode: "tasks" });
-    app.expanded.set(sessionKey, result?.structuredContent?.tasks ?? result?.tasks ?? []);
-  } catch {
-    app.expanded.set(sessionKey, []);
+  app.historyOpen.add(sessionKey);
+  // The pinned session's history is already kept fresh by refreshPinnedCounts()
+  // on every poll — only fetch here if nothing's cached yet (a non-pinned row,
+  // or before the first refresh has landed).
+  if (!app.expanded.has(sessionKey)) {
+    try {
+      const result = await bridge.callTool("get_session", { sessionId: sessionKey, mode: "tasks" });
+      app.expanded.set(sessionKey, result?.structuredContent?.tasks ?? result?.tasks ?? []);
+    } catch {
+      app.expanded.set(sessionKey, []);
+    }
   }
   render();
 }
@@ -275,67 +340,90 @@ function el(tag, props, children) {
   return node;
 }
 
-function renderRow(row) {
-  const history = app.expanded.get(row.sessionKey);
+function renderRow(row, opts = {}) {
   const taskId = row.latestTask.taskId ?? row.latestTask.jobId;
+  const pill = deriveStatusPill(row.group);
+  const history = app.expanded.get(row.sessionKey);
+  const historyOpen = app.historyOpen.has(row.sessionKey);
+  const promptRevealed = canReadPrompt(row.latestTask) && app.promptText.has(taskId);
+
   const children = [
-    el("div", { class: "cc-title" }, [
-      el("span", { class: `cc-dot cc-dot--${row.group}` }, []),
-      row.title,
+    el("div", { class: "cc-head" }, [
+      el("div", { class: "cc-title" }, [row.title]),
+      el("span", { class: `cc-pill cc-pill--${row.group}` }, [`${pill.icon} ${pill.label}`]),
     ]),
     el("div", { class: "cc-meta" }, [
       `${row.latestTask.agent ?? "?"} · ${deriveActivityLabel(row.latestTask, Date.now())}`,
     ]),
   ];
-  // The actual evidence behind "is working" — only fetched (refresh()) for
-  // the one row currently in focus/highlighted, so this only renders there.
-  if (taskId && taskId === app.timelineFor && app.timeline.length > 0) {
+
+  // The actual evidence behind "is working" — a real log line, not just a
+  // status word. Only present for the one row currently in focus/highlighted
+  // (refresh() only fetches it there — see the bounded-reads note in refresh()).
+  const latestEntry = taskId === app.timelineFor ? app.timeline[0] : undefined;
+  if (latestEntry) {
     children.push(
-      el(
-        "div",
-        { class: "cc-history" },
-        app.timeline.map((entry) =>
-          el("div", { class: "cc-history-item" }, [
-            entry.count > 1 ? `${entry.text} ×${entry.count}` : entry.text,
-          ]),
-        ),
-      ),
+      el("div", { class: "cc-update" }, [
+        el("span", { class: "cc-update-icon" }, [pill.icon]),
+        el("span", {}, [latestEntry.count > 1 ? `${latestEntry.text} ×${latestEntry.count}` : latestEntry.text]),
+      ]),
     );
   }
-  if (history) {
-    children.push(
-      el(
-        "div",
-        { class: "cc-history" },
-        history.map((h) =>
-          el("div", { class: "cc-history-item" }, [
-            el("span", { class: `cc-dot cc-dot--${groupStatus(h.status)}` }, []),
-            deriveTitle(h),
-          ]),
+
+  // Compact counts by default ("1 running · 6 completed"); the itemized
+  // list only once the user explicitly asks for it (click) — keeps the
+  // inline card compact per the preserved design constraint.
+  if (history && history.length > 0) {
+    if (historyOpen) {
+      children.push(
+        el(
+          "div",
+          { class: "cc-history" },
+          history.map((h) =>
+            el("div", { class: "cc-history-item" }, [
+              el("span", { class: `cc-dot cc-dot--${groupStatus(h.status)}` }, []),
+              deriveTitle(h),
+            ]),
+          ),
         ),
-      ),
+      );
+    } else {
+      const counts = formatCounts(deriveCounts(history));
+      if (counts) children.push(el("div", { class: "cc-counts" }, [counts]));
+    }
+  }
+
+  if (promptRevealed) {
+    children.push(
+      el("div", { class: "cc-prompt" }, [
+        el("div", { class: "cc-prompt-head" }, [
+          "Original prompt",
+          el("button", { class: "cc-prompt-close", onclick: (e) => { e.stopPropagation(); app.promptText.delete(taskId); render(); } }, ["✕"]),
+        ]),
+        el("div", { class: "cc-prompt-body" }, [app.promptText.get(taskId)]),
+      ]),
     );
   }
-  if (canReadPrompt(row.latestTask) && app.promptText.has(row.latestTask.taskId ?? row.latestTask.jobId)) {
-    children.push(el("div", { class: "cc-prompt" }, [app.promptText.get(row.latestTask.taskId ?? row.latestTask.jobId)]));
-  }
+
   const actions = [];
-  if (canReadPrompt(row.latestTask)) {
+  if (canReadPrompt(row.latestTask) && !promptRevealed) {
     actions.push(
-      el("button", { class: "cc-btn", onclick: (e) => { e.stopPropagation(); revealPrompt(row.latestTask.taskId ?? row.latestTask.jobId); } }, [
+      el("button", { class: "cc-btn", onclick: (e) => { e.stopPropagation(); revealPrompt(taskId); } }, [
         "Show original request",
       ]),
     );
   }
   actions.push(
-    el("button", { class: "cc-btn", onclick: (e) => { e.stopPropagation(); composeFollowUp(row.sessionKey, "Continue this task"); } }, [
-      "Continue",
-    ]),
+    el(
+      "button",
+      { class: "cc-btn cc-btn--primary", onclick: (e) => { e.stopPropagation(); composeFollowUp(row.sessionKey, "Continue this task"); } },
+      ["Continue"],
+    ),
   );
   children.push(el("div", { class: "cc-actions" }, actions));
 
-  const rowEl = el("div", { class: "cc-row", onclick: () => toggleExpand(row.sessionKey) }, children);
-  return rowEl;
+  const classes = opts.pinned ? "cc-row cc-row--pinned" : "cc-row";
+  return el("div", { class: classes, onclick: () => toggleExpand(row.sessionKey) }, children);
 }
 
 function render() {
@@ -352,7 +440,7 @@ function render() {
   if (visibleRows.length === 0) {
     root.append(el("div", { class: "cc-meta" }, [app.tasks.length === 0 ? "No active tasks." : "Nothing needs attention right now."]));
   } else {
-    for (const row of visibleRows) root.append(renderRow(row));
+    for (const row of visibleRows) root.append(renderRow(row, { pinned: row.sessionKey === pinnedSessionKey }));
   }
 
   const footer = el("div", { class: "cc-footer" }, [
