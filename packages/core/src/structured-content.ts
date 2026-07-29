@@ -47,6 +47,7 @@ export function buildGetTaskStructuredContent(result: FoundCheckTaskResult, deta
     recovery: snapshot.recovery,
     pollCount: snapshot.pollCount,
     continuePolling,
+    retryAfterMs: snapshot.retryAfterMs,
     nextAction: snapshot.nextAction,
     isTerminal,
     isError,

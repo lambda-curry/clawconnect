@@ -105,6 +105,9 @@ describe("SessionManager.waitForJob — check_task wait semantics", () => {
 
       const snapshot = sessions.buildSnapshot(result!);
       expect(snapshot.continuePolling).toBe(true);
+      // A wait-mode call already blocked for its full window, so it's safe
+      // to call again right away — no artificial backoff outside recovery.
+      expect(snapshot.retryAfterMs).toBe(0);
       expect(snapshot.nextAction).toEqual({ tool: "check_task", args: { taskId: job.jobId, sessionKey: job.sessionKey } });
 
       // Re-polling the same job is safe and does not spawn a second job —
@@ -116,6 +119,23 @@ describe("SessionManager.waitForJob — check_task wait semantics", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("suggests a 10s retryAfterMs while late-recovery is watching the transcript (still status=running)", () => {
+    const sessions = new SessionManager(neverResolvingGateway());
+    const job = sessions.submitTask({ task: "do the thing" });
+    const liveJob = sessions.getJob(job.jobId)!;
+
+    // Simulate the state recoverLateFinalText puts a job into: still
+    // "running" (the caller keeps polling normally) but internally watching
+    // the transcript on its own ~10s server-side cadence — see
+    // recoverLateFinalText in session.ts.
+    liveJob.recovery = { reason: "no_live_final_text", startedAt: Date.now(), idleTimeoutMs: 300_000, hardCapMs: 5_400_000 };
+
+    const snapshot = sessions.buildSnapshot(liveJob);
+    expect(snapshot.status).toBe("running");
+    expect(snapshot.continuePolling).toBe(true);
+    expect(snapshot.retryAfterMs).toBe(10_000);
   });
 
   it("increments pollCount on every waitForJob call", async () => {

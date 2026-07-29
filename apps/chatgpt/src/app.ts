@@ -213,7 +213,12 @@ Pass sessionKey from a previous result to continue the same thread. Available ag
           title: "Run Task",
           readOnlyHint: false,
           destructiveHint: false,
-          openWorldHint: false,
+          // The dispatched agent has its own tools and can reach outside this
+          // connection (filesystem, network, other services) — this
+          // connection has no visibility into what run_task itself does
+          // beyond queueing. Matches the generic MCP server's annotation;
+          // annotations are hints for client UX, not enforced guarantees.
+          openWorldHint: true,
         },
         _meta: {
           ...buildMountMeta(WIDGET_ENABLED, WIDGET_URI),
@@ -224,9 +229,11 @@ Pass sessionKey from a previous result to continue the same thread. Available ag
         name: "check_task",
         description: `Check whether a previously dispatched run_task job has finished, and collect the result. This is the only tool that waits — get_task is for an immediate, non-blocking read.
 
-With mode="wait" (recommended, default): blocks for up to waitMs (default 45000ms, override with waitMs, clamped to [1000, 120000]) and only returns early on a terminal status (completed / completed_no_summary / error). A timeout return is NOT an error and NOT terminal — continuePolling is true and nextAction says to call check_task again with the same jobId. Never submit a new run_task because a check_task call timed out.
+With mode="wait" (recommended, default): blocks for up to waitMs (default 45000ms, override with waitMs, clamped to [1000, 120000]) and only returns early on a terminal status (completed / completed_no_summary / error). A timeout return is NOT an error and NOT terminal — continuePolling is true and nextAction says to call check_task again with the same jobId. There is no cap on how many times you may do this; never submit a new run_task because a check_task call timed out (that risks a duplicate — the session-busy guard will reject it anyway).
 
 With mode="poll": returns as soon as any new log activity appears (also bounded by waitMs). Use this only when you need intermediate progress (live UI), not when you just want the final result.
+
+If a job returns status="completed_no_summary" or status="error" on a long, tool-heavy run, calling check_task again 30–60 seconds later can upgrade it: the openclaw session may have produced the final answer after the connector marked terminal, and a lazy re-read of the transcript on subsequent polls will surface it. Worth one or two follow-up polls before reporting back that no result was produced.
 
 Pass the jobId returned by run_task. Available agents: ${list}.`,
         inputSchema: {

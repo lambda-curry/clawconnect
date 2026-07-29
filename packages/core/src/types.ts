@@ -109,6 +109,8 @@ export type JobSnapshot = {
   pollCount: number;
   /** True while status is "running" — the caller should call check_task again. False at any terminal status. */
   continuePolling: boolean;
+  /** Suggested delay, in ms, before the next check_task call. 0 when a wait-mode call already blocked for its full window (safe to call again immediately) or when the job is terminal; nonzero during late-recovery, where the transcript is only re-read periodically server-side. */
+  retryAfterMs: number;
   /** The exact next call to make, or null once terminal. See NextAction. */
   nextAction: NextAction;
 };

@@ -431,6 +431,7 @@ export class SessionManager {
 
   buildSnapshot(job: Job): JobSnapshot {
     const continuation = this.sessions.get(job.sessionKey);
+    const continuePolling = job.status === "running";
     return {
       jobId: job.jobId,
       sessionKey: job.sessionKey,
@@ -445,7 +446,13 @@ export class SessionManager {
       artifacts: job.artifacts,
       recovery: job.recovery,
       pollCount: job.pollCount,
-      continuePolling: job.status === "running",
+      continuePolling,
+      // A wait-mode check_task call already blocked for its full window
+      // before returning, so it's normally safe to call again immediately —
+      // except during late-recovery, where the transcript is only re-read
+      // every ~10s server-side (see recoverLateFinalText below), so hammering
+      // check_task faster than that just burns round-trips for no new info.
+      retryAfterMs: continuePolling ? (job.recovery ? 10_000 : 0) : 0,
       nextAction: buildNextAction(job),
       ...(continuation ? { continuationState: continuation } : {}),
     };

@@ -97,6 +97,7 @@ function defaultFormatCheckTask(result: CheckTaskResult): McpToolResponse {
       pollCount: snapshot.pollCount,
       recovery: snapshot.recovery,
       continuePolling,
+      retryAfterMs: snapshot.retryAfterMs,
       nextAction: snapshot.nextAction,
       hint: snapshot.recovery
         ? "Task is recovering late transcript final text. Call check_task again to continue waiting."
@@ -122,6 +123,7 @@ function defaultFormatCheckTask(result: CheckTaskResult): McpToolResponse {
     continuationState: snapshot.continuationState,
     pollCount: snapshot.pollCount,
     continuePolling,
+    retryAfterMs: snapshot.retryAfterMs,
     nextAction: snapshot.nextAction,
   };
   return {
