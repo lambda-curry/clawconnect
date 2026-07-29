@@ -17,9 +17,11 @@ const SRC_DIR = join(__dirname, "..", "src", "widget");
 const DIST_DIR = join(__dirname, "..", "dist");
 
 const stateJs = readFileSync(join(SRC_DIR, "state.js"), "utf8");
+const protocolJs = readFileSync(join(SRC_DIR, "protocol.js"), "utf8");
 const shellHtml = readFileSync(join(SRC_DIR, "shell.html"), "utf8");
 
-const inlinedState = stateJs.replace(/^export (function|const) /gm, "$1 ");
+const stripExports = (src) => src.replace(/^export (function|const) /gm, "$1 ");
+const inlinedState = `${stripExports(protocolJs)}\n${stripExports(stateJs)}`;
 
 // Line-start only, so this doesn't false-positive on the word "export"
 // appearing in a comment (as it does a few lines up in this very file).

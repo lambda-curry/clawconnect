@@ -209,6 +209,35 @@ Pass sessionKey from a previous result to continue the same thread. Available ag
           },
           required: ["task"],
         },
+        // Matches buildRunTaskStructuredContent's exact shape (packages/core/
+        // src/structured-content.ts) — this is what the widget's mount data
+        // and any structuredContent-reading client actually receive.
+        outputSchema: {
+          type: "object",
+          properties: {
+            jobId: { type: "string" },
+            taskId: { type: "string" },
+            sessionKey: { type: "string" },
+            status: { type: "string", enum: ["running"] },
+            agent: { type: "string" },
+            nextAction: {
+              type: ["object", "null"],
+              properties: {
+                tool: { type: "string", enum: ["check_task"] },
+                args: {
+                  type: "object",
+                  properties: {
+                    taskId: { type: "string" },
+                    sessionKey: { type: "string" },
+                  },
+                  required: ["taskId", "sessionKey"],
+                },
+              },
+              required: ["tool", "args"],
+            },
+          },
+          required: ["jobId", "taskId", "sessionKey", "status", "nextAction"],
+        },
         annotations: {
           title: "Run Task",
           readOnlyHint: false,

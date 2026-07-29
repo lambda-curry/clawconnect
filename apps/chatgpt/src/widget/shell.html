@@ -156,7 +156,21 @@ const bridge = (() => {
       if (msg.error) resolver.reject(new Error(msg.error.message || "tool call failed"));
       else resolver.resolve(msg.result);
     });
-    window.parent?.postMessage({ jsonrpc: "2.0", id: "ui/initialize", method: "ui/initialize", params: {} }, "*");
+    // Full ui/initialize -> ui/notifications/initialized handshake, per
+    // App.connect() in @modelcontextprotocol/ext-apps@1.5.0 (dist/src/
+    // app-bridge.js) — a spec-compliant host won't route ui/message,
+    // tools/call, or ui/request-display-mode to this view until it sees
+    // this. A real ChatGPT host (window.openai path) never speaks raw
+    // postMessage JSON-RPC, so this simply times out there and is ignored —
+    // window.openai remains the primary path everywhere else in this file.
+    sendMcpAppsRequest("ui/initialize", buildUiInitializeParams(), 5000)
+      .then(() => {
+        window.parent?.postMessage(buildUiInitializedNotification(), "*");
+      })
+      .catch(() => {
+        // No spec-compliant host answered — nothing to recover, every other
+        // fallback call already treats its own timeout as "unsupported".
+      });
   }
   initMcpAppsFallback();
 
