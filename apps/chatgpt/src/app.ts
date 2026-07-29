@@ -40,10 +40,17 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_WIDGET_HTML_PATH = join(__dirname, "..", "dist", "widget.html");
 /** Versioned so a shape change bumps the URI rather than serving a stale cached resource under the same id. */
 const WIDGET_URI = "ui://clawconnect/task-center-v1.html";
+// One JSON file per agent (see GatewayPool/JsonFileJobStore) — outside dist/
+// and src/ so a build never touches it. Restart-safety only: deleting this
+// directory just means in-flight jobs re-derive from scratch instead of
+// reattaching, same as the pre-persistence behavior.
+const DEFAULT_JOB_STORE_DIR = join(__dirname, "..", ".job-store");
 
 export interface CreateAppOptions {
   /** Path to the built, self-contained widget HTML. Overridable so tests don't depend on a real build having run. */
   widgetHtmlPath?: string;
+  /** Directory for per-agent job-persistence files. Defaults on (DEFAULT_JOB_STORE_DIR) — override so tests write into a scratch dir instead of the real default. */
+  jobStoreDir?: string;
 }
 
 export interface App {
@@ -79,7 +86,11 @@ export function createApp(registry: AgentRegistry, opts: CreateAppOptions = {}):
   }
 
   const hono = new Hono();
-  const pool = new GatewayPool(registry);
+  const pool = new GatewayPool(registry, opts.jobStoreDir ?? DEFAULT_JOB_STORE_DIR);
+  // Reload every configured agent's persisted jobs now, not lazily on first
+  // request — otherwise an agent nobody has queried yet since the restart
+  // would leave its in-flight jobs unrecovered indefinitely.
+  pool.warmAll();
   const AGENT_IDS = registry.agents.map((a) => a.id);
   const AGENT_LIST = AGENT_IDS.join(", ");
 

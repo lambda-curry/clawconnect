@@ -1,5 +1,7 @@
+import { join } from "node:path";
 import { OpenClawGateway } from "./gateway.ts";
 import { SessionManager } from "./session.ts";
+import { JsonFileJobStore } from "./job-store.ts";
 import { resolveAgent } from "./agent-registry.ts";
 import type { AgentEntry, AgentRegistry } from "./agent-registry.ts";
 
@@ -13,7 +15,16 @@ export class GatewayPool {
   private entries = new Map<string, PoolEntry>();
   private jobIndex = new Map<string, string>();
 
-  constructor(private readonly registry: AgentRegistry) {}
+  /**
+   * When set, each agent's SessionManager gets its own file
+   * (`<jobStoreDir>/<agentId>.json`) so an in-flight job survives a process
+   * restart — see job-store.ts. Omit to keep the pool fully in-memory
+   * (e.g. the stdio MCP server, or tests).
+   */
+  constructor(
+    private readonly registry: AgentRegistry,
+    private readonly jobStoreDir?: string,
+  ) {}
 
   list(): AgentEntry[] {
     return [...this.registry.agents];
@@ -28,7 +39,8 @@ export class GatewayPool {
     if (existing) return existing;
     const agent = resolveAgent(this.registry, agentId);
     const gateway = new OpenClawGateway({ url: agent.url, token: agent.password });
-    const sessions = new SessionManager(gateway, agent.openclawAgentId);
+    const store = this.jobStoreDir ? new JsonFileJobStore(join(this.jobStoreDir, `${agent.id}.json`)) : undefined;
+    const sessions = new SessionManager(gateway, agent.openclawAgentId, store);
     const entry: PoolEntry = { agent, gateway, sessions };
     this.entries.set(agent.id, entry);
     return entry;
@@ -37,6 +49,19 @@ export class GatewayPool {
   forAgent(idOrUndefined?: string): PoolEntry {
     const agent = resolveAgent(this.registry, idOrUndefined);
     return this.getOrCreate(agent.id);
+  }
+
+  /**
+   * Eagerly instantiate every configured agent's pool entry (and, when
+   * jobStoreDir is set, reload its persisted jobs) instead of waiting for
+   * the first request that happens to touch each one. Cheap: constructing a
+   * SessionManager/OpenClawGateway never opens a live connection on its own
+   * (see OpenClawGateway.connect) — this just makes sure a restart doesn't
+   * leave some agents' in-flight jobs unrecovered simply because no request
+   * for that agent has arrived yet.
+   */
+  warmAll(): void {
+    for (const agent of this.registry.agents) this.getOrCreate(agent.id);
   }
 
   rememberJob(jobId: string, agentId: string): void {

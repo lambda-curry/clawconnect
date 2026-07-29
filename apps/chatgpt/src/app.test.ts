@@ -39,7 +39,12 @@ async function startTestApp(opts: { widgetEnabled?: boolean; widgetHtmlPath?: st
   if (opts.widgetEnabled) process.env.ENABLE_CHATGPT_UI_WIDGET = "true";
   else delete process.env.ENABLE_CHATGPT_UI_WIDGET;
 
-  const { requestListener, pool } = createApp(fakeRegistry(), { widgetHtmlPath: opts.widgetHtmlPath });
+  // Scratch dir, never the real default — a test run must never read or
+  // write apps/chatgpt/.job-store.
+  const jobStoreDir = mkdtempSync(join(tmpdir(), "clawconnect-jobstore-"));
+  tmpDirs.push(jobStoreDir);
+
+  const { requestListener, pool } = createApp(fakeRegistry(), { widgetHtmlPath: opts.widgetHtmlPath, jobStoreDir });
   const server = createServer(requestListener);
   servers.push(server);
   await new Promise<void>((resolve) => server.listen(0, resolve));

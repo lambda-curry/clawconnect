@@ -1,6 +1,8 @@
 export { OpenClawGateway } from "./gateway.ts";
 export { SessionManager } from "./session.ts";
 export { GatewayPool } from "./gateway-pool.ts";
+export { JsonFileJobStore } from "./job-store.ts";
+export type { JobStore, PersistedJob } from "./job-store.ts";
 export { loadAgentRegistry, resolveAgent, REGISTRY_PATH, agentBlurb, agentDescriptor } from "./agent-registry.ts";
 export type { AgentEntry, AgentRegistry } from "./agent-registry.ts";
 export { searchMemory, getMemory, listCollections, DEFAULT_QMD_URL } from "./memory.ts";

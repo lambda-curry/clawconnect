@@ -7,6 +7,7 @@ import {
 } from "./artifacts.ts";
 import { classifyError } from "./errors.ts";
 import { OpenClawGateway } from "./gateway.ts";
+import type { JobStore, PersistedJob } from "./job-store.ts";
 import type { CheckMode, ContinuationState, Job, JobSnapshot, JobStatus, NextAction, TaskInput } from "./types.ts";
 
 function readEnvMs(name: string, fallbackMs: number): number {
@@ -115,7 +116,66 @@ export class SessionManager {
   constructor(
     private readonly gateway: OpenClawGateway,
     private readonly agentId: string = "main",
-  ) {}
+    private readonly store?: JobStore,
+  ) {
+    if (store) this.rehydrateFromStore(store);
+  }
+
+  /**
+   * Reattach to jobs a prior process instance was still tracking when it
+   * exited/restarted. The live chat() streaming connection is gone — that
+   * can't be recovered — but the underlying OpenClaw session is durable on
+   * the same sessionKey, so each reloaded job goes straight into the same
+   * transcript-recovery path an empty live chat.final already uses (see
+   * recoverLateFinalText). Logs/artifacts are not persisted and start empty;
+   * only the outcome (does it finish, what did it say) is re-derived.
+   */
+  private rehydrateFromStore(store: JobStore): void {
+    for (const pj of store.load()) {
+      if (this.jobs.has(pj.jobId)) continue;
+      const artifacts = emptyArtifacts();
+      const job: Job = {
+        jobId: pj.jobId,
+        sessionKey: pj.sessionKey,
+        status: "running",
+        startedAt: pj.startedAt,
+        lastEventAt: pj.lastEventAt,
+        logs: [],
+        artifacts,
+        pollCount: pj.pollCount,
+        prompt: pj.prompt,
+      };
+      this.jobs.set(pj.jobId, job);
+      this.latestJobBySession.set(pj.sessionKey, pj.jobId);
+      const history = this.jobHistoryBySession.get(pj.sessionKey) ?? [];
+      history.push(pj.jobId);
+      this.jobHistoryBySession.set(pj.sessionKey, history);
+      logDebug(`[job ${pj.jobId.slice(0, 8)}] reloaded from job store, reattaching via transcript recovery`);
+      this.recoverLateFinalText(job, pj.sessionKey, pj.jobId, artifacts);
+    }
+  }
+
+  /**
+   * Overwrites the persisted file with exactly the jobs currently
+   * status==="running" — a job drops out the moment it goes terminal, no
+   * separate prune step. Cheap: the active set is always small, and this is
+   * only called at submission and at each running->terminal transition, not
+   * on every poll. No-op when no store is configured.
+   */
+  private persistActiveJobs(): void {
+    if (!this.store) return;
+    const active: PersistedJob[] = [...this.jobs.values()]
+      .filter((j) => j.status === "running")
+      .map((j) => ({
+        jobId: j.jobId,
+        sessionKey: j.sessionKey,
+        startedAt: j.startedAt,
+        lastEventAt: j.lastEventAt,
+        pollCount: j.pollCount,
+        prompt: j.prompt,
+      }));
+    this.store.save(active);
+  }
 
   submitTask(input: TaskInput): Job {
     // buildSubmitMessage prepends the `message`-tool veto preamble, the
@@ -199,6 +259,7 @@ export class SessionManager {
       lastSummary: "",
       artifacts,
     });
+    this.persistActiveJobs();
 
     this.gateway
       .chat(sessionKey, message, TIMEOUT_MS, (event) => {
@@ -241,6 +302,7 @@ export class SessionManager {
             artifacts,
             recommendedNextStep: deriveNextStep(artifacts, job.status),
           });
+          this.persistActiveJobs();
           logDebug(
             `[job ${jobId}] ${job.status}, ${reply.length} chars, ${artifacts.filesChanged.length} files`,
           );
@@ -257,6 +319,7 @@ export class SessionManager {
             artifacts,
             recommendedNextStep: deriveNextStep(artifacts, "error"),
           });
+          this.persistActiveJobs();
           logDebug(`[job ${jobId}] error (${job.errorInfo.category}): ${job.error}`);
         },
       );
@@ -335,6 +398,7 @@ export class SessionManager {
               artifacts,
               recommendedNextStep: deriveNextStep(artifacts, job.status),
             });
+            this.persistActiveJobs();
             logDebug(
               `[job ${jobId}] late-recovery succeeded via transcript (${recovered.length} chars)`,
             );
@@ -350,6 +414,7 @@ export class SessionManager {
             artifacts,
             recommendedNextStep: deriveNextStep(artifacts, job.status),
           });
+          this.persistActiveJobs();
           logDebug(
             `[job ${jobId}] late-recovery exhausted (idle-timeout=${idleTimeoutMs / 1000}s, hard-cap=${hardCapMs / 1000}s) — completed_no_summary`,
           );
@@ -371,6 +436,7 @@ export class SessionManager {
             artifacts,
             recommendedNextStep: deriveNextStep(artifacts, job.status),
           });
+          this.persistActiveJobs();
           logDebug(
             `[job ${jobId}] late-recovery threw: ${err instanceof Error ? err.message : String(err)}`,
           );

@@ -12,6 +12,9 @@
 node_modules/
 dist/
 
+# runtime state
+.job-store/
+
 # env
 .env
 .env.production
