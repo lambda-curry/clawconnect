@@ -9,16 +9,17 @@
     --cc-fg: var(--color-text-primary, #111111);
     --cc-fg-muted: var(--color-text-secondary, #666666);
     --cc-border: var(--color-border-primary, #e2e2e2);
-    /* Saffron — the one accent color, used sparingly (see design notes
-       below): the primary action, the focused row's marker, nothing else.
-       Status itself is never conveyed by color alone — deriveStatusPill
-       pairs every status with a distinct icon + label. */
-    --cc-accent: var(--color-accent, #d97e2c);
-    --cc-accent-fg: #ffffff;
-    --cc-active: #2563eb;
-    --cc-needs-attention: #b45309;
-    --cc-completed: #15803d;
-    --cc-failed: #b91c1c;
+    /* Actions stay neutral so the widget blends into the host surface.
+       Status colors are reserved for status pills/dots and paired with
+       visible icons + labels, never used as general-purpose accents. */
+    --cc-action-bg: #f1f1f1;
+    --cc-action-hover: #e7e7e7;
+    --cc-action-selected: #e4e4e4;
+    --cc-action-fg: #252525;
+    --cc-active: #9a7b45;
+    --cc-needs-attention: #9a6b4a;
+    --cc-completed: #63856d;
+    --cc-failed: #a56b6b;
   }
   :root[data-theme="dark"] {
     --cc-bg: var(--color-background-primary, #18181b);
@@ -26,8 +27,14 @@
     --cc-fg: var(--color-text-primary, #f4f4f5);
     --cc-fg-muted: var(--color-text-secondary, #a1a1aa);
     --cc-border: var(--color-border-primary, #3f3f46);
-    --cc-accent: var(--color-accent, #eb9c4f);
-    --cc-accent-fg: #1a1200;
+    --cc-action-bg: #2b2b2f;
+    --cc-action-hover: #35353a;
+    --cc-action-selected: #38383d;
+    --cc-action-fg: #e4e4e7;
+    --cc-active: #c0a06a;
+    --cc-needs-attention: #bd8b68;
+    --cc-completed: #83aa8c;
+    --cc-failed: #c58a8a;
   }
   @media (prefers-color-scheme: dark) {
     /* Only applies before the host has told us its theme via hostContext —
@@ -39,8 +46,14 @@
       --cc-fg: #f4f4f5;
       --cc-fg-muted: #a1a1aa;
       --cc-border: #3f3f46;
-      --cc-accent: #eb9c4f;
-      --cc-accent-fg: #1a1200;
+      --cc-action-bg: #2b2b2f;
+      --cc-action-hover: #35353a;
+      --cc-action-selected: #38383d;
+      --cc-action-fg: #e4e4e7;
+      --cc-active: #c0a06a;
+      --cc-needs-attention: #bd8b68;
+      --cc-completed: #83aa8c;
+      --cc-failed: #c58a8a;
     }
   }
   * { box-sizing: border-box; }
@@ -50,18 +63,16 @@
     background: var(--cc-bg);
     color: var(--cc-fg);
   }
-  #root { padding: 12px 14px; overflow-x: hidden; }
+  #root { padding: 10px 12px; overflow-x: hidden; }
   .cc-row {
-    border: 1px solid var(--cc-border); border-radius: 10px; padding: 12px 14px;
+    border: 1px solid var(--cc-border); border-left: 3px solid var(--cc-border); border-radius: 10px; padding: 12px 14px;
     margin-bottom: 8px; cursor: pointer; position: relative;
   }
   .cc-row:last-child { margin-bottom: 0; }
-  /* The one place the accent marks something: the row currently in focus —
-     not every row, not the whole card. */
-  .cc-row--pinned { border-color: var(--cc-accent); }
+  /* Keep focus visible through structure and neutral contrast, not accent. */
+  .cc-row--pinned { border-color: var(--cc-border); border-left-color: var(--cc-border); }
   .cc-row--pinned::before {
-    content: ""; position: absolute; left: 0; top: 10px; bottom: 10px; width: 3px;
-    background: var(--cc-accent); border-radius: 0 3px 3px 0;
+    content: none;
   }
   .cc-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
   .cc-title { font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -74,7 +85,7 @@
   .cc-pill--completed { color: var(--cc-completed); }
   .cc-pill--failed { color: var(--cc-failed); }
   .cc-meta { color: var(--cc-fg-muted); font-size: 11.5px; margin-top: 3px; }
-  .cc-update { display: flex; align-items: baseline; gap: 6px; margin-top: 8px; font-size: 12.5px; }
+  .cc-update { display: flex; align-items: baseline; gap: 6px; margin-top: 8px; padding-top: 7px; border-top: 1px solid var(--cc-border); color: var(--cc-fg-muted); font-size: 11px; }
   .cc-update-icon { flex: none; }
   .cc-counts { color: var(--cc-fg-muted); font-size: 11.5px; margin-top: 6px; }
   .cc-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 5px; }
@@ -85,7 +96,24 @@
   .cc-history { margin-top: 8px; padding-left: 12px; border-left: 2px solid var(--cc-border); }
   .cc-history-item { font-size: 12px; padding: 3px 0; color: var(--cc-fg-muted); }
   .cc-actions { margin-top: 10px; display: flex; gap: 6px; flex-wrap: wrap; }
-  .cc-toolbar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+  .cc-segmented { display: inline-flex; gap: 14px; margin-top: 10px; border-bottom: 1px solid var(--cc-border); }
+  .cc-segment { border: 0; border-radius: 0; padding: 4px 0 5px; font-size: 11px; color: var(--cc-fg-muted); }
+  .cc-segment--selected { background: var(--cc-action-selected); color: var(--cc-fg); font-weight: 600; border-bottom: 2px solid var(--cc-fg-muted); margin-bottom: -1px; }
+  .cc-response { margin-top: 8px; font-size: 12.5px; }
+  .cc-response.cc-plain, .cc-prompt-body.cc-plain { white-space: pre-wrap; }
+  .cc-response h1, .cc-response h2, .cc-response h3, .cc-prompt-body h1, .cc-prompt-body h2, .cc-prompt-body h3 { margin: 10px 0 4px; line-height: 1.25; }
+  .cc-response p, .cc-prompt-body p { margin: 5px 0; }
+  .cc-response ul, .cc-response ol, .cc-prompt-body ul, .cc-prompt-body ol { margin: 5px 0; padding-left: 20px; }
+  .cc-response blockquote, .cc-prompt-body blockquote { margin: 7px 0; padding-left: 10px; border-left: 3px solid var(--cc-border); color: var(--cc-fg-muted); }
+  .cc-response code, .cc-prompt-body code { padding: 1px 4px; border-radius: 4px; background: var(--cc-bg-subtle); font: 0.9em ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .cc-response pre, .cc-prompt-body pre { margin: 8px 0; padding: 9px 10px; overflow-x: auto; border-radius: 7px; background: #202124; color: #e8eaed; }
+  .cc-response pre code, .cc-prompt-body pre code { padding: 0; background: none; color: inherit; }
+  .cc-response table, .cc-prompt-body table { border-collapse: collapse; width: 100%; margin: 8px 0; font-size: 12px; }
+  .cc-response th, .cc-response td, .cc-prompt-body th, .cc-prompt-body td { border: 1px solid var(--cc-border); padding: 4px 7px; text-align: left; }
+  .cc-response th, .cc-prompt-body th { background: var(--cc-bg-subtle); font-weight: 600; }
+  .cc-response a, .cc-prompt-body a { color: var(--cc-active); text-decoration: underline; }
+  .cc-diagnostics { margin-top: 8px; font-size: 12px; white-space: pre-wrap; color: var(--cc-failed); }
+  .cc-toolbar { display: flex; align-items: center; justify-content: flex-end; gap: 6px; flex-wrap: wrap; margin-bottom: 6px; min-height: 28px; }
   .cc-control {
     display: inline-flex; align-items: center; gap: 5px; min-height: 28px;
     padding: 4px 8px; font-size: 11.5px; border-radius: 7px;
@@ -95,17 +123,29 @@
     font: inherit; padding: 5px 10px; border-radius: 7px; border: 1px solid var(--cc-border);
     background: transparent; color: var(--cc-fg); cursor: pointer;
   }
-  .cc-btn:hover { border-color: var(--cc-accent); }
-  .cc-btn--primary { background: var(--cc-accent); border-color: var(--cc-accent); color: var(--cc-accent-fg); font-weight: 600; }
+  .cc-btn:hover { background: var(--cc-action-hover); border-color: var(--cc-border); }
+  .cc-btn:focus-visible { outline: 2px solid var(--cc-fg-muted); outline-offset: 2px; }
+  .cc-btn--primary { background: var(--cc-action-bg); border-color: var(--cc-border); color: var(--cc-action-fg); font-weight: 600; }
   .cc-footer { margin-top: 10px; color: var(--cc-fg-muted); font-size: 11px; }
   .cc-prompt { margin-top: 8px; border-radius: 8px; background: var(--cc-bg-subtle); border: 1px solid var(--cc-border); overflow: hidden; }
   .cc-prompt-head {
     display: flex; align-items: center; justify-content: space-between; padding: 6px 10px;
     font-size: 11px; font-weight: 600; color: var(--cc-fg-muted); border-bottom: 1px solid var(--cc-border);
   }
-  .cc-prompt-body { padding: 8px 10px; font-size: 12px; white-space: pre-wrap; }
+  .cc-prompt-body { padding: 8px 10px; font-size: 12px; }
+  .cc-prompt-loading { padding: 10px; color: var(--cc-fg-muted); }
   .cc-prompt-close { background: none; border: none; color: var(--cc-fg-muted); cursor: pointer; font: inherit; padding: 0; }
   .cc-note { color: var(--cc-fg-muted); font-size: 11px; margin-top: 8px; }
+  .cc-empty {
+    display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px;
+    border: 1px solid var(--cc-border); border-radius: 9px; background: var(--cc-bg-subtle);
+    min-height: 58px;
+  }
+  .cc-empty-icon { color: var(--cc-fg-muted); font-size: 16px; line-height: 1.35; }
+  .cc-empty-title { font-size: 13px; font-weight: 600; line-height: 1.35; }
+  .cc-empty-copy { color: var(--cc-fg-muted); font-size: 11.5px; line-height: 1.4; margin-top: 2px; }
+  .cc-live-loading { display: inline-block; width: 10px; height: 10px; margin-top: 10px; border: 1.5px solid var(--cc-border); border-top-color: var(--cc-fg-muted); border-radius: 50%; animation: cc-spin .8s linear infinite; }
+  @keyframes cc-spin { to { transform: rotate(360deg); } }
 
   /* ── Fullscreen ("Task Center") — same tested pure functions as inline,
      a different layout only. Never load-bearing: see openTaskCenter(). */
@@ -117,9 +157,8 @@
   .cc-fs-title { font-weight: 700; font-size: 15px; }
   .cc-fs-body { flex: 1; display: flex; overflow: hidden; }
   .cc-fs-sidebar { width: 220px; flex: none; border-right: 1px solid var(--cc-border); overflow-y: auto; padding: 10px; }
-  .cc-fs-sidebar-controls { display: flex; gap: 6px; margin-bottom: 10px; }
   .cc-fs-session { padding: 8px 10px; border-radius: 8px; cursor: pointer; margin-bottom: 4px; border-left: 3px solid transparent; }
-  .cc-fs-session--selected { background: var(--cc-bg-subtle); border-left-color: var(--cc-accent); }
+  .cc-fs-session--selected { background: var(--cc-bg-subtle); border-left-color: var(--cc-border); }
   .cc-fs-main { flex: 1; display: flex; overflow: hidden; }
   .cc-fs-tasklist { width: 260px; flex: none; border-right: 1px solid var(--cc-border); overflow-y: auto; padding: 10px; }
   .cc-fs-task { display: flex; align-items: center; padding: 7px 8px; border-radius: 6px; cursor: pointer; font-size: 12.5px; }
@@ -296,10 +335,13 @@ const app = {
   pollFailures: 0,
   expanded: new Map(), // sessionKey -> history[] (task summaries) — for the pinned session this is kept fresh automatically every refresh(); for any other row it's fetched once on click
   historyOpen: new Set(), // sessionKeys where the itemized history list should render, vs. just the compact counts line
-  promptText: new Map(), // taskId -> revealed prompt text
+  promptText: new Map(), // taskId -> preloaded prompt text
+  promptLoading: new Set(),
   timeline: [], // deriveTimeline() output for the one focused/highlighted task — the actual evidence behind "is working"
   timelineFor: null, // taskId the current timeline belongs to, so a stale fetch never renders under the wrong row
   pinnedDetail: null, // full JobSnapshot (artifacts included) for the one pinned/selected task — see mergePinnedDetail()
+  cardTab: "response",
+  cardTabFor: null,
   // Fullscreen — see openTaskCenter(). displayMode reflects what the host
   // actually confirmed, never what was merely requested.
   displayMode: "inline",
@@ -330,7 +372,7 @@ async function openTaskCenter() {
     app.displayModeNote = null;
     // Fullscreen is the "see everything" surface — widen scope so the
     // sidebar isn't just the one pinned session, and show every group by
-    // default (the Active/Recent toggle still works from here).
+    // default.
     app.allActivity = true;
     app.view = "recent";
     app.selectedSessionKey = app.selectedSessionKey ?? app.mounted?.sessionKey ?? null;
@@ -424,7 +466,10 @@ async function refresh() {
     const sessionTasks = pinnedSessionKey ? app.tasks.filter((t) => t.sessionKey === pinnedSessionKey) : [];
     const selected =
       (app.selectedTaskId && sessionTasks.find((t) => (t.taskId ?? t.jobId) === app.selectedTaskId)) ??
-      sessionTasks[0];
+      sessionTasks[0] ??
+      // list_tasks(view:"active") intentionally omits completed work. The
+      // mounted run is still authoritative and must be fetched directly.
+      (app.mounted?.taskId ? { taskId: app.mounted.taskId, jobId: app.mounted.taskId, sessionKey: app.mounted.sessionKey } : undefined);
     if (selected) {
       const taskId = selected.taskId ?? selected.jobId;
       // detail:"full" (not "updates") — list_tasks' TaskSummary has no
@@ -432,12 +477,18 @@ async function refresh() {
       // so without the full snapshot here, deriveTitle's PR/branch
       // detection and the fullscreen Artifacts tab would silently never
       // have anything to show for *any* row, pinned or not.
-      const detail = await bridge.callTool("get_task", { taskId, detail: "full" });
+      const [detail, promptDetail] = await Promise.all([
+        bridge.callTool("get_task", { taskId, detail: "full" }),
+        bridge.callTool("get_task", { taskId, detail: "prompt" }),
+      ]);
       const snapshot = detail?.structuredContent ?? detail;
+      const prompt = promptDetail?.structuredContent?.prompt ?? promptDetail?.prompt;
+      if (prompt?.task != null) app.promptText.set(taskId, prompt.task);
       app.pinnedDetail = snapshot?.jobId || snapshot?.taskId ? snapshot : null;
+      app.tasks = ensurePinnedTask(app.tasks, app.pinnedDetail);
       app.timeline = deriveTimeline(snapshot?.updates ?? snapshot?.logs ?? []);
       app.timelineFor = taskId;
-      await refreshPinnedCounts(pinnedSessionKey);
+      await refreshPinnedCounts(snapshot?.sessionKey ?? pinnedSessionKey ?? app.mounted?.sessionKey);
     } else {
       app.pinnedDetail = null;
       app.timeline = [];
@@ -485,17 +536,6 @@ async function toggleExpand(sessionKey) {
   render();
 }
 
-async function revealPrompt(taskId) {
-  try {
-    const result = await bridge.callTool("get_task", { taskId, detail: "prompt" });
-    const prompt = result?.structuredContent?.prompt ?? result?.prompt;
-    app.promptText.set(taskId, prompt?.task ?? "(no prompt available)");
-  } catch {
-    app.promptText.set(taskId, "(failed to load)");
-  }
-  render();
-}
-
 function composeFollowUp(sessionKey, text) {
   // Actions are messages, never mutations — the widget never calls a
   // mutating tool itself; it hands a prompt back to the assistant.
@@ -516,12 +556,22 @@ function el(tag, props, children) {
   return node;
 }
 
+function contentNode(className, value) {
+  const node = el("div", { class: className }, []);
+  const text = String(value ?? "");
+  if (isLikelyMarkdown(text)) node.innerHTML = renderMarkdownHtml(text);
+  else { node.classList.add("cc-plain"); node.textContent = text; }
+  return node;
+}
+
 function renderRow(row, opts = {}) {
   const taskId = row.latestTask.taskId ?? row.latestTask.jobId;
   const pill = deriveStatusPill(row.group);
   const history = app.expanded.get(row.sessionKey);
   const historyOpen = app.historyOpen.has(row.sessionKey);
-  const promptRevealed = canReadPrompt(row.latestTask) && app.promptText.has(taskId);
+  const promptResolved = app.promptText.has(taskId);
+  // The latest timeline item is the live evidence shown below the response.
+  const latestEntry = taskId === app.timelineFor ? app.timeline[0] : undefined;
 
   const children = [
     el("div", { class: "cc-head" }, [
@@ -533,10 +583,52 @@ function renderRow(row, opts = {}) {
     ]),
   ];
 
+  if (app.cardTabFor !== taskId) {
+    app.cardTabFor = taskId;
+    app.cardTab = defaultCardTab(row.latestTask);
+  }
+  const cardTabs = deriveCardTabs(row.latestTask);
+  const tabLabels = { response: "Response", diagnostics: "Diagnostics", request: "Request" };
+  children.push(
+    el("div", { class: "cc-segmented", role: "tablist" }, cardTabs.map((tab) =>
+      el("button", {
+        class: "cc-btn cc-segment" + (app.cardTab === tab ? " cc-segment--selected" : ""),
+        role: "tab",
+        "aria-selected": app.cardTab === tab ? "true" : "false",
+        onclick: (e) => { e.stopPropagation(); app.cardTab = tab; render(); },
+      }, [tabLabels[tab]]),
+    )),
+  );
+
+  if (app.cardTab === "request") {
+    if (promptResolved) {
+      children.push(
+        el("div", { class: "cc-prompt" }, [
+          el("div", { class: "cc-prompt-head" }, ["Original request"]),
+          contentNode("cc-prompt-body", app.promptText.get(taskId)),
+        ]),
+      );
+    } else if (canReadPrompt(row.latestTask)) {
+      children.push(el("div", { class: "cc-prompt cc-prompt-loading" }, ["Loading request…"]));
+    }
+  } else if (app.cardTab === "diagnostics") {
+    const info = row.latestTask.error ?? row.latestTask.errorInfo?.message ?? row.latestTask.errorInfo?.category ?? "The task failed without additional diagnostics.";
+    children.push(el("div", { class: "cc-diagnostics" }, [String(info)]));
+  } else {
+    if (row.latestTask.summary) {
+      children.push(contentNode("cc-response", row.latestTask.summary));
+    } else if (row.latestTask.status === "completed_no_summary") {
+      children.push(contentNode("cc-response", "Finished - no response summary was returned."));
+    } else if (row.latestTask.status === "running" || row.latestTask.status === "queued") {
+      // The status pill and timeline are the explanation while a task runs.
+      // Keep the response area quiet until there is an actual response.
+      if (!latestEntry) children.push(el("span", { class: "cc-live-loading", role: "status", "aria-label": "Task is running" }, []));
+    }
+  }
+
   // The actual evidence behind "is working" — a real log line, not just a
   // status word. Only present for the one row currently in focus/highlighted
   // (refresh() only fetches it there — see the bounded-reads note in refresh()).
-  const latestEntry = taskId === app.timelineFor ? app.timeline[0] : undefined;
   if (latestEntry) {
     children.push(
       el("div", { class: "cc-update" }, [
@@ -571,39 +663,6 @@ function renderRow(row, opts = {}) {
     }
   }
 
-  if (promptRevealed) {
-    children.push(
-      el("div", { class: "cc-prompt" }, [
-        el("div", { class: "cc-prompt-head" }, [
-          "Original prompt",
-          el("button", { class: "cc-prompt-close", onclick: (e) => { e.stopPropagation(); app.promptText.delete(taskId); render(); } }, ["✕"]),
-        ]),
-        el("div", { class: "cc-prompt-body" }, [app.promptText.get(taskId)]),
-      ]),
-    );
-  }
-
-  const actions = [];
-  if (canReadPrompt(row.latestTask) && !promptRevealed) {
-    actions.push(
-      el("button", { class: "cc-btn", onclick: (e) => { e.stopPropagation(); revealPrompt(taskId); } }, [
-        "Show original request",
-      ]),
-    );
-  }
-  actions.push(
-    // Label names the effect explicitly (it sends a chat message asking the
-    // assistant to continue — never a direct/in-widget action, per "actions
-    // are messages, never mutations") rather than a bare "Continue" that
-    // reads as if the button itself does something.
-    el(
-      "button",
-      { class: "cc-btn cc-btn--primary", onclick: (e) => { e.stopPropagation(); composeFollowUp(row.sessionKey, "Continue this task"); } },
-      ["Continue in chat"],
-    ),
-  );
-  children.push(el("div", { class: "cc-actions" }, actions));
-
   const classes = opts.pinned ? "cc-row cc-row--pinned" : "cc-row";
   return el("div", { class: classes, onclick: () => toggleExpand(row.sessionKey) }, children);
 }
@@ -623,14 +682,30 @@ function render() {
 function renderInline(root) {
   const view = deriveViewMode(app.mounted, app.tasks);
   const pinnedSessionKey = view.highlightSessionKey ?? app.mounted?.sessionKey;
-  const rows = buildSessionRows(mergePinnedDetail(app.tasks, app.pinnedDetail), { highlightSessionKey: pinnedSessionKey });
+  const rows = buildSessionRows(ensurePinnedTask(app.tasks, app.pinnedDetail), { highlightSessionKey: pinnedSessionKey });
   // The pinned (focused/mounted) session always shows, finished or not —
   // a task completing is exactly when its result matters most. The Active
   // filter only ever declutters everything else.
   const visibleRows = filterRows(rows, app.view, pinnedSessionKey);
 
   if (visibleRows.length === 0) {
-    root.append(el("div", { class: "cc-meta" }, [app.tasks.length === 0 ? "No active tasks." : "Nothing needs attention right now."]));
+    if (app.tasks.length === 0) {
+      root.append(el("div", { class: "cc-empty", role: "status" }, [
+        el("span", { class: "cc-empty-icon", "aria-hidden": "true" }, ["○"]),
+        el("div", {}, [
+          el("div", { class: "cc-empty-title" }, ["No active tasks"]),
+          el("div", { class: "cc-empty-copy" }, ["New delegated tasks will appear here while they run."]),
+        ]),
+      ]));
+    } else {
+      root.append(el("div", { class: "cc-empty", role: "status" }, [
+        el("span", { class: "cc-empty-icon", "aria-hidden": "true" }, ["○"]),
+        el("div", {}, [
+          el("div", { class: "cc-empty-title" }, ["Nothing needs attention"]),
+          el("div", { class: "cc-empty-copy" }, ["Switch to Recent to view completed tasks."]),
+        ]),
+      ]));
+    }
   } else {
     for (const row of visibleRows) root.append(renderRow(row, { pinned: row.sessionKey === pinnedSessionKey }));
   }
@@ -639,45 +714,18 @@ function renderInline(root) {
     root.append(el("div", { class: "cc-note" }, [app.displayModeNote]));
   }
 
-  const toolbarChildren = [
-    el(
-      "button",
-      {
-        class: "cc-btn cc-control",
-        title: app.view === "active" ? "Show all recent tasks" : "Show active tasks",
-        "aria-label": app.view === "active" ? "Show all recent tasks" : "Show active tasks",
-        onclick: () => {
-          app.view = app.view === "active" ? "recent" : "active";
-          render();
-        },
-      },
-      [el("span", { class: "cc-control-icon", "aria-hidden": "true" }, [app.view === "active" ? "◉" : "●"]), app.view === "active" ? "Recent" : "Active"],
-    ),
-    el(
-      "button",
-      {
-        class: "cc-btn cc-control",
-        title: app.allActivity ? "Limit to this session" : "Show all activity",
-        "aria-label": app.allActivity ? "Limit to this session" : "Show all activity",
-        onclick: () => {
-          app.allActivity = !app.allActivity;
-          refresh();
-        },
-      },
-      [el("span", { class: "cc-control-icon", "aria-hidden": "true" }, [app.allActivity ? "◌" : "◎"]), app.allActivity ? "This session" : "All activity"],
-    ),
-  ];
+  const toolbarChildren = [];
   // Feature-detected, not assumed — see requestDisplayMode's doc comment.
   // Absent entirely (not disabled/greyed) when the host gives no signal it
   // implements display-mode requests at all.
   if (bridge.supportsDisplayModeRequest()) {
     toolbarChildren.push(
       el("button", {
-        class: "cc-btn cc-control cc-btn--primary",
+        class: "cc-btn cc-control",
         title: "Open Task Center",
         "aria-label": "Open Task Center",
         onclick: openTaskCenter,
-      }, [el("span", { class: "cc-control-icon", "aria-hidden": "true" }, ["⛶"]), "Task Center"]),
+      }, [el("span", { class: "cc-control-icon", "aria-hidden": "true" }, ["⛶"])]),
     );
   }
   // Global controls stay above the card so they don't read as actions on the
@@ -687,7 +735,7 @@ function renderInline(root) {
 }
 
 function renderFullscreen(root) {
-  const rows = buildSessionRows(mergePinnedDetail(app.tasks, app.pinnedDetail), { highlightSessionKey: app.selectedSessionKey });
+  const rows = buildSessionRows(ensurePinnedTask(app.tasks, app.pinnedDetail), { highlightSessionKey: app.selectedSessionKey });
   const visibleRows = filterRows(rows, app.view, app.selectedSessionKey);
 
   const header = el("div", { class: "cc-fs-header" }, [
@@ -699,18 +747,6 @@ function renderFullscreen(root) {
     "div",
     { class: "cc-fs-sidebar" },
     [
-      el("div", { class: "cc-fs-sidebar-controls" }, [
-        el(
-          "button",
-          { class: "cc-btn", onclick: () => { app.view = app.view === "active" ? "recent" : "active"; render(); } },
-          [app.view === "active" ? "Recent" : "Active"],
-        ),
-        el(
-          "button",
-          { class: "cc-btn", onclick: () => { app.allActivity = !app.allActivity; refresh(); } },
-          [app.allActivity ? "This session" : "All activity"],
-        ),
-      ]),
       ...(visibleRows.length === 0
         ? [el("div", { class: "cc-meta" }, ["Nothing here yet."])]
         : visibleRows.map((row) => {
@@ -806,7 +842,7 @@ function renderDetailPane(task) {
         ),
       );
     }
-    if (task.summary) body.push(el("div", {}, [task.summary]));
+    if (task.summary) body.push(contentNode("cc-response", task.summary));
     if (task.error) body.push(el("div", {}, [`Error: ${task.error}`]));
   } else if (app.detailTab === "artifacts") {
     const a = task.artifacts ?? {};
@@ -817,9 +853,9 @@ function renderDetailPane(task) {
     if (a.commandsRun?.length) body.push(el("div", {}, [`Commands run: ${a.commandsRun.length}`]));
   } else if (app.detailTab === "prompt") {
     if (app.promptText.has(taskId)) {
-      body.push(el("div", { class: "cc-prompt-body" }, [app.promptText.get(taskId)]));
+      body.push(contentNode("cc-prompt-body", app.promptText.get(taskId)));
     } else {
-      body.push(el("button", { class: "cc-btn cc-btn--primary", onclick: () => revealPrompt(taskId) }, ["Show original request"]));
+      body.push(el("div", { class: "cc-prompt-loading" }, ["Loading request…"]));
     }
   }
 
