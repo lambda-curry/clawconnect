@@ -40,5 +40,12 @@ describe("Task Center visual regressions", () => {
     expect(shell).toContain("cc-live-loading");
     expect(shell).not.toContain("Waiting for the final response...");
   });
-});
 
+  it("reconciles after background-tab resume signals and preserves live rows through empty reads", () => {
+    expect(shell).toContain("visibilitychange");
+    expect(shell).toContain('window.addEventListener("focus"');
+    expect(shell).toContain('window.addEventListener("pageshow"');
+    expect(shell).toContain("reconcileTaskList");
+    expect(shell).toContain("app.reconcileRequested");
+  });
+});

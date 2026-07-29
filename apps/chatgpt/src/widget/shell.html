@@ -338,6 +338,8 @@ const app = {
   knownSessionKeys: new Set(),
   pollInFlight: false,
   pollFailures: 0,
+  refreshTimer: null,
+  reconcileRequested: false,
   expanded: new Map(), // sessionKey -> history[] (task summaries) — for the pinned session this is kept fresh automatically every refresh(); for any other row it's fetched once on click
   historyOpen: new Set(), // sessionKeys where the itemized history list should render, vs. just the compact counts line
   promptText: new Map(), // taskId -> preloaded prompt text
@@ -438,7 +440,8 @@ async function refreshPinnedCounts(sessionKey) {
 }
 
 async function refresh() {
-  if (!shouldPoll({ pollInFlight: app.pollInFlight, tasks: app.tasks })) return;
+  if (!app.reconcileRequested && !shouldPoll({ pollInFlight: app.pollInFlight, tasks: app.tasks })) return;
+  app.reconcileRequested = false;
   app.pollInFlight = true;
   const fullscreen = app.displayMode === "fullscreen";
   try {
@@ -458,7 +461,7 @@ async function refresh() {
     const result = await bridge.callTool("list_tasks", { view: listView });
     const tasks = result?.structuredContent?.tasks ?? result?.tasks ?? [];
     const scope = resolveScope([...app.knownSessionKeys], app.allActivity || fullscreen);
-    app.tasks = filterTasksByScope(tasks, scope);
+    app.tasks = reconcileTaskList(app.tasks, filterTasksByScope(tasks, scope));
 
     const view = deriveViewMode(app.mounted, app.tasks);
     const pinnedSessionKey = fullscreen
@@ -517,8 +520,27 @@ function scheduleNext() {
       : "active";
   const delay = pollIntervalMs(group, app.pollFailures);
   if (delay === null) return; // terminal — stop polling entirely
-  setTimeout(refresh, delay);
+  if (app.refreshTimer) clearTimeout(app.refreshTimer);
+  app.refreshTimer = setTimeout(refresh, delay);
 }
+
+// Browsers throttle timers aggressively for backgrounded/suspended tabs. The
+// first timer after resume can therefore run against stale/empty host state;
+// explicitly reconcile on every host resume signal and keep the prior live
+// rows until the read proves otherwise.
+let resumeRefreshQueued = false;
+function reconcileOnResume() {
+  if (document.visibilityState === "hidden" || resumeRefreshQueued) return;
+  resumeRefreshQueued = true;
+  queueMicrotask(() => {
+    resumeRefreshQueued = false;
+    app.reconcileRequested = true;
+    refresh();
+  });
+}
+document.addEventListener("visibilitychange", reconcileOnResume);
+window.addEventListener("focus", reconcileOnResume);
+window.addEventListener("pageshow", reconcileOnResume);
 
 async function toggleExpand(sessionKey) {
   if (app.historyOpen.has(sessionKey)) {

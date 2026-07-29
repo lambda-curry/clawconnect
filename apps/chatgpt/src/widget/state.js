@@ -585,6 +585,16 @@ export function filterTasksByScope(tasks, scope) {
   return tasks.filter((t) => allowed.has(t.sessionKey));
 }
 
+/** Keep known live work visible when a suspended/backgrounded host resumes
+ * with a transient empty list response. A later snapshot can still replace
+ * it; this only prevents a false empty state during reconciliation. */
+export function reconcileTaskList(previous, next) {
+  const prior = previous ?? [];
+  const incoming = next ?? [];
+  const hadLiveWork = prior.some((task) => !isTerminalGroup(groupStatus(task.status)));
+  return incoming.length === 0 && hadLiveWork ? prior : incoming;
+}
+
 /**
  * A status label like "clawdy is working…" is not evidence — it's a claim.
  * Without a timestamp behind it, there's no way to tell "still going" from

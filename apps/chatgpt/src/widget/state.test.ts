@@ -20,6 +20,7 @@ import {
   preferSnapshot,
   resolveScope,
   filterTasksByScope,
+  reconcileTaskList,
   formatElapsed,
   isStale,
   deriveActivityLabel,
@@ -515,6 +516,17 @@ describe("conversation scope fallback", () => {
     expect(scope).toEqual({ scoped: false, sessionKeys: null });
     const tasks = [task({ sessionKey: "s1" }), task({ sessionKey: "unrelated" })];
     expect(filterTasksByScope(tasks, scope)).toHaveLength(2);
+  });
+});
+
+describe("resume reconciliation", () => {
+  it("keeps known live work during a transient empty list response", () => {
+    const live = task({ status: "running" });
+    expect(reconcileTaskList([live], [])).toEqual([live]);
+  });
+
+  it("accepts an empty list after all known work is terminal", () => {
+    expect(reconcileTaskList([task({ status: "done" })], [])).toEqual([]);
   });
 });
 
