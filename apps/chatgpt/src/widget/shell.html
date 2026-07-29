@@ -96,14 +96,11 @@
   .cc-history { margin-top: 8px; padding-left: 12px; border-left: 2px solid var(--cc-border); }
   .cc-history-item { font-size: 12px; padding: 3px 0; color: var(--cc-fg-muted); }
   .cc-actions { margin-top: 10px; display: flex; gap: 6px; flex-wrap: wrap; }
-  .cc-segmented { display: inline-flex; gap: 14px; margin-top: 10px; border-bottom: 1px solid var(--cc-border); }
-  /* Qualified with .cc-btn deliberately: a segment IS a .cc-btn that opts out
-     of button chrome, and .cc-btn is declared further down this stylesheet —
-     an unqualified .cc-segment loses the cascade to it on equal specificity
-     and the tabs render as bordered pill buttons instead of an underline
-     control. Specificity, not source order, so it survives reordering. */
-  .cc-btn.cc-segment { border: 0; border-radius: 0; padding: 4px 0 5px; font-size: 11px; color: var(--cc-fg-muted); }
-  .cc-btn.cc-segment--selected { background: var(--cc-action-selected); color: var(--cc-fg); font-weight: 600; border-bottom: 2px solid var(--cc-fg-muted); margin-bottom: -1px; }
+  .cc-card-tabs { display: flex; gap: 2px; margin: -12px -14px 10px; padding: 0 12px; border-bottom: 1px solid var(--cc-border); background: var(--cc-bg-subtle); }
+  .cc-card-tab { flex: 0 1 auto; min-width: 0; padding: 6px 10px 5px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--cc-fg-muted); font: inherit; font-size: 11px; cursor: pointer; }
+  .cc-card-tab:hover { color: var(--cc-fg); background: var(--cc-action-hover); }
+  .cc-card-tab[aria-selected="true"] { border-bottom-color: var(--cc-fg); color: var(--cc-fg); font-weight: 600; }
+  .cc-card-tab:focus-visible { outline: 2px solid var(--cc-fg-muted); outline-offset: -2px; }
   .cc-response { margin-top: 8px; font-size: 12.5px; }
   .cc-response.cc-plain, .cc-prompt-body.cc-plain { white-space: pre-wrap; }
   .cc-response h1, .cc-response h2, .cc-response h3, .cc-prompt-body h1, .cc-prompt-body h2, .cc-prompt-body h3 { margin: 10px 0 4px; line-height: 1.25; }
@@ -573,6 +570,7 @@ function el(tag, props, children) {
   const node = document.createElement(tag);
   for (const [k, v] of Object.entries(props ?? {})) {
     if (k === "onclick") node.addEventListener("click", v);
+    else if (k === "onkeydown") node.addEventListener("keydown", v);
     else if (k === "class") node.className = v;
     else node.setAttribute(k, v);
   }
@@ -616,42 +614,52 @@ function renderRow(row, opts = {}) {
   }
   const cardTabs = deriveCardTabs(row.latestTask);
   const tabLabels = { response: "Response", diagnostics: "Diagnostics", request: "Request" };
+  const tablistId = `cc-tabs-${String(taskId).replace(/[^a-zA-Z0-9_-]/g, "-")}`;
   children.push(
-    el("div", { class: "cc-segmented", role: "tablist" }, cardTabs.map((tab) =>
+    el("div", { class: "cc-card-tabs", role: "tablist", "aria-label": "Task details", id: tablistId }, cardTabs.map((tab, index) =>
       el("button", {
-        class: "cc-btn cc-segment" + (app.cardTab === tab ? " cc-segment--selected" : ""),
+        class: "cc-card-tab",
         role: "tab",
+        id: `${tablistId}-${tab}`,
         "aria-selected": app.cardTab === tab ? "true" : "false",
+        "aria-controls": `${tablistId}-panel`,
+        tabindex: app.cardTab === tab ? "0" : "-1",
         onclick: (e) => { e.stopPropagation(); app.cardTab = tab; render(); },
+        onkeydown: (e) => {
+          const next = nextCardTab(cardTabs, app.cardTab, e.key);
+          if (next !== app.cardTab) { e.preventDefault(); app.cardTab = next; render(); document.getElementById(`${tablistId}-${next}`)?.focus(); }
+        },
       }, [tabLabels[tab]]),
     )),
   );
 
+  const panelChildren = [];
   if (app.cardTab === "request") {
     if (promptResolved) {
-      children.push(
+      panelChildren.push(
         el("div", { class: "cc-prompt" }, [
           el("div", { class: "cc-prompt-head" }, ["Original request"]),
           contentNode("cc-prompt-body", app.promptText.get(taskId)),
         ]),
       );
     } else if (canReadPrompt(row.latestTask)) {
-      children.push(el("div", { class: "cc-prompt cc-prompt-loading" }, ["Loading request…"]));
+      panelChildren.push(el("div", { class: "cc-prompt cc-prompt-loading" }, ["Loading request…"]));
     }
   } else if (app.cardTab === "diagnostics") {
     const info = row.latestTask.error ?? row.latestTask.errorInfo?.message ?? row.latestTask.errorInfo?.category ?? "The task failed without additional diagnostics.";
-    children.push(el("div", { class: "cc-diagnostics" }, [String(info)]));
+    panelChildren.push(el("div", { class: "cc-diagnostics" }, [String(info)]));
   } else {
     if (row.latestTask.summary) {
-      children.push(contentNode("cc-response", row.latestTask.summary));
+      panelChildren.push(contentNode("cc-response", row.latestTask.summary));
     } else if (row.latestTask.status === "completed_no_summary") {
-      children.push(contentNode("cc-response", "Finished - no response summary was returned."));
+      panelChildren.push(contentNode("cc-response", "Finished - no response summary was returned."));
     } else if (row.latestTask.status === "running" || row.latestTask.status === "queued") {
       // The status pill and timeline are the explanation while a task runs.
       // Keep the response area quiet until there is an actual response.
-      if (!latestEntry) children.push(el("span", { class: "cc-live-loading", role: "status", "aria-label": "Task is running" }, []));
+      if (!latestEntry) panelChildren.push(el("span", { class: "cc-live-loading", role: "status", "aria-label": "Task is running" }, []));
     }
   }
+  children.push(el("div", { role: "tabpanel", id: `${tablistId}-panel`, "aria-labelledby": `${tablistId}-${app.cardTab}` }, panelChildren));
 
   // The actual evidence behind "is working" — a real log line, not just a
   // status word. Only present for the one row currently in focus/highlighted

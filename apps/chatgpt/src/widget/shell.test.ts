@@ -48,4 +48,17 @@ describe("Task Center visual regressions", () => {
     expect(shell).toContain("reconcileTaskList");
     expect(shell).toContain("app.reconcileRequested");
   });
+
+  it("renders the Request/Response forehead as an accessible keyboard-navigable tab strip", () => {
+    expect(shell).toContain('class: "cc-card-tabs"');
+    expect(shell).toContain('role: "tablist"');
+    expect(shell).toContain('role: "tab"');
+    expect(shell).toContain('"aria-selected": app.cardTab === tab');
+    expect(shell).toContain('"aria-controls": `${tablistId}-panel`');
+    expect(shell).toContain('onkeydown: (e)');
+    expect(shell).toContain('nextCardTab(cardTabs, app.cardTab, e.key)');
+    expect(shell).toContain(".cc-card-tabs");
+    expect(shell).toContain("@media (max-width: 640px)");
+    expect(shell).not.toContain('class: "cc-btn cc-segment"');
+  });
 });

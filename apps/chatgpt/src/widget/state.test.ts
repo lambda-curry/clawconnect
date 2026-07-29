@@ -29,6 +29,9 @@ import {
   deriveStatusPill,
   deriveCounts,
   formatCounts,
+  deriveCardTabs,
+  defaultCardTab,
+  nextCardTab,
 } from "./state.js";
 
 function task(overrides = {}) {
@@ -527,6 +530,22 @@ describe("resume reconciliation", () => {
 
   it("accepts an empty list after all known work is terminal", () => {
     expect(reconcileTaskList([task({ status: "done" })], [])).toEqual([]);
+  });
+});
+
+describe("inline card tabs", () => {
+  it("keeps Response and Request stable, adding Diagnostics only for attention states", () => {
+    expect(deriveCardTabs(task({ status: "done" }))).toEqual(["response", "request"]);
+    expect(deriveCardTabs(task({ status: "failed" }))).toEqual(["response", "diagnostics", "request"]);
+  });
+
+  it("defaults successful terminal runs to Response and supports roving keyboard navigation", () => {
+    expect(defaultCardTab(task({ status: "done" }))).toBe("response");
+    const tabs = ["response", "request"];
+    expect(nextCardTab(tabs, "response", "ArrowRight")).toBe("request");
+    expect(nextCardTab(tabs, "request", "ArrowLeft")).toBe("response");
+    expect(nextCardTab(tabs, "response", "End")).toBe("request");
+    expect(nextCardTab(tabs, "request", "Home")).toBe("response");
   });
 });
 

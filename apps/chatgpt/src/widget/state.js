@@ -658,3 +658,27 @@ export function deriveLatestUpdate(logs) {
   if (!logs || logs.length === 0) return null;
   return logs[logs.length - 1];
 }
+
+/** The inline card always offers the response and original request. Failed
+ * runs also expose diagnostics without changing the stable tab order. */
+export function deriveCardTabs(task) {
+  const tabs = ["response"];
+  if (task?.status === "failed" || task?.status === "blocked" || task?.status === "needs-human") tabs.push("diagnostics");
+  tabs.push("request");
+  return tabs;
+}
+
+/** Successful terminal runs open on the useful result; the request is one
+ * keystroke/click away and remains available for every task. */
+export function defaultCardTab(task) {
+  return "response";
+}
+
+export function nextCardTab(tabs, current, key) {
+  const index = Math.max(0, tabs.indexOf(current));
+  if (key === "ArrowRight" || key === "ArrowDown") return tabs[(index + 1) % tabs.length];
+  if (key === "ArrowLeft" || key === "ArrowUp") return tabs[(index - 1 + tabs.length) % tabs.length];
+  if (key === "Home") return tabs[0];
+  if (key === "End") return tabs[tabs.length - 1];
+  return current;
+}
