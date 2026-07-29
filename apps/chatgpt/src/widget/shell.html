@@ -101,6 +101,7 @@
   .cc-card-tab:hover { color: var(--cc-fg); background: var(--cc-action-hover); }
   .cc-card-tab[aria-selected="true"] { border-bottom-color: var(--cc-fg); color: var(--cc-fg); font-weight: 600; }
   .cc-card-tab:focus-visible { outline: 2px solid var(--cc-fg-muted); outline-offset: -2px; }
+  .cc-card-tab--expand { margin-left: auto; padding-inline: 9px; font-size: 14px; line-height: 1; }
   .cc-response { margin-top: 8px; font-size: 12.5px; }
   .cc-response.cc-plain, .cc-prompt-body.cc-plain { white-space: pre-wrap; }
   .cc-response h1, .cc-response h2, .cc-response h3, .cc-prompt-body h1, .cc-prompt-body h2, .cc-prompt-body h3 { margin: 10px 0 4px; line-height: 1.25; }
@@ -616,7 +617,8 @@ function renderRow(row, opts = {}) {
   const tabLabels = { response: "Response", diagnostics: "Diagnostics", request: "Request" };
   const tablistId = `cc-tabs-${String(taskId).replace(/[^a-zA-Z0-9_-]/g, "-")}`;
   children.push(
-    el("div", { class: "cc-card-tabs", role: "tablist", "aria-label": "Task details", id: tablistId }, cardTabs.map((tab, index) =>
+    el("div", { class: "cc-card-tabs", role: "tablist", "aria-label": "Task details", id: tablistId }, [
+      ...cardTabs.map((tab) =>
       el("button", {
         class: "cc-card-tab",
         role: "tab",
@@ -630,7 +632,17 @@ function renderRow(row, opts = {}) {
           if (next !== app.cardTab) { e.preventDefault(); app.cardTab = next; render(); document.getElementById(`${tablistId}-${next}`)?.focus(); }
         },
       }, [tabLabels[tab]]),
-    )),
+      ),
+      ...(bridge.supportsDisplayModeRequest()
+        ? [el("button", {
+            class: "cc-card-tab cc-card-tab--expand",
+            type: "button",
+            title: "Open Task Center",
+            "aria-label": "Open Task Center",
+            onclick: (e) => { e.stopPropagation(); openTaskCenter(); },
+          }, [el("span", { "aria-hidden": "true" }, ["⛶"])])]
+        : []),
+    ]),
   );
 
   const panelChildren = [];
@@ -749,24 +761,6 @@ function renderInline(root) {
     root.append(el("div", { class: "cc-note" }, [app.displayModeNote]));
   }
 
-  const toolbarChildren = [];
-  // Feature-detected, not assumed — see requestDisplayMode's doc comment.
-  // Absent entirely (not disabled/greyed) when the host gives no signal it
-  // implements display-mode requests at all.
-  if (bridge.supportsDisplayModeRequest()) {
-    toolbarChildren.push(
-      el("button", {
-        class: "cc-btn cc-control",
-        title: "Open Task Center",
-        "aria-label": "Open Task Center",
-        onclick: openTaskCenter,
-      }, [el("span", { class: "cc-control-icon", "aria-hidden": "true" }, ["⛶"])]),
-    );
-  }
-  // Global controls stay above the card so they don't read as actions on the
-  // task below. Labels remain visible at compact size; title/aria-labels make
-  // the icon mapping discoverable to hover and assistive-tech users.
-  root.insertBefore(el("div", { class: "cc-toolbar" }, toolbarChildren), root.firstChild);
 }
 
 function renderFullscreen(root) {

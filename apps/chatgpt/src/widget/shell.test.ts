@@ -9,7 +9,7 @@ describe("Task Center visual regressions", () => {
     expect(shell).toContain("--cc-action-selected");
     expect(shell).not.toMatch(/#(?:d97e2c|eb9c4f)/i);
     expect(shell).not.toContain("cc-btn cc-control cc-btn--primary");
-    expect(shell).toContain("class: \"cc-btn cc-control\"");
+    expect(shell).toContain("class: \"cc-card-tab cc-card-tab--expand\"");
   });
 
   it("renders a compact intentional empty state with an accessible center action", () => {
@@ -60,5 +60,10 @@ describe("Task Center visual regressions", () => {
     expect(shell).toContain(".cc-card-tabs");
     expect(shell).toContain("@media (max-width: 640px)");
     expect(shell).not.toContain('class: "cc-btn cc-segment"');
+    expect(shell).toContain('class: "cc-card-tab cc-card-tab--expand"');
+    expect(shell).toContain('title: "Open Task Center"');
+    expect(shell).toContain('"aria-label": "Open Task Center"');
+    expect(shell).toContain("margin-left: auto");
+    expect(shell).not.toContain('class: "cc-toolbar"');
   });
 });
