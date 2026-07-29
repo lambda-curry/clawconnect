@@ -34,7 +34,7 @@ export type ErrorInfo = {
 
 // ── Jobs & Sessions ────────��──────────────────────────��─────────────────────
 
-export type LogEntry = { ts: number; type: string; text: string };
+export type LogEntry = { ts: number; type: string; text: string; isError?: boolean };
 
 export type JobStatus = "running" | "completed" | "completed_no_summary" | "error";
 export type TaskStatus = "queued" | "running" | "blocked" | "needs-human" | "done" | "failed";

@@ -45,7 +45,20 @@ describe("groupStatus — display bucketing preserves exact status", () => {
     expect(groupStatus("blocked")).toBe("needs_attention");
     expect(groupStatus("needs-human")).toBe("needs_attention");
     expect(groupStatus("done")).toBe("completed");
+    expect(groupStatus("completed")).toBe("completed");
+    expect(groupStatus("completed_no_summary")).toBe("completed");
     expect(groupStatus("failed")).toBe("failed");
+  });
+
+  it("keeps the exact completed get_task shape successful even after lifecycle:end", () => {
+    const completed = task({
+      status: "completed",
+      isError: false,
+      isTerminal: true,
+      logs: [{ type: "lifecycle", text: "Agent lifecycle: end", ts: 2000 }],
+    });
+    expect(groupStatus(completed.status)).toBe("completed");
+    expect(deriveStatusPill(groupStatus(completed.status))).toEqual({ icon: "✓", label: "Completed" });
   });
 
   it("grouping is a pure derived view — the underlying task object is never mutated", () => {
@@ -408,6 +421,15 @@ describe("deriveTimeline / deriveLatestUpdate — the actual evidence, not just 
     const timeline = deriveTimeline(logs, 2);
     expect(timeline).toHaveLength(2);
     expect(timeline[0].text).toBe("Running command: pnpm test");
+  });
+
+  it("keeps lifecycle rows neutral and marks only explicit tool errors", () => {
+    const timeline = deriveTimeline([
+      { ts: 1000, type: "lifecycle", text: "Agent lifecycle: end" },
+      { ts: 1100, type: "tool-result", text: "Bash failed", isError: true },
+    ], 10);
+    expect(timeline[1].isError).toBe(false);
+    expect(timeline[0].isError).toBe(true);
   });
 
   it("returns an empty array for missing/empty logs rather than throwing", () => {

@@ -204,7 +204,12 @@ export class SessionManager {
       .chat(sessionKey, message, TIMEOUT_MS, (event) => {
         job.lastEventAt = Date.now();
         if (job.logs.length < MAX_LOG_ENTRIES) {
-          job.logs.push({ ts: Date.now(), type: event.type, text: event.text });
+          job.logs.push({
+            ts: Date.now(),
+            type: event.type,
+            text: event.text,
+            ...(event.type === "tool-result" && event.isError ? { isError: true } : {}),
+          });
         }
         logDebug(
           `[job ${jobId.slice(0, 8)}] event #${job.logs.length}: ${event.type} - ${event.text.slice(0, 80)}`,

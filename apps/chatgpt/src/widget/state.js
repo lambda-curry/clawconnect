@@ -12,7 +12,10 @@
 export function groupStatus(status) {
   if (status === "running" || status === "queued") return "active";
   if (status === "blocked" || status === "needs-human") return "needs_attention";
-  if (status === "done") return "completed";
+  // TaskSummary uses `done`, while a mounted get_task snapshot preserves the
+  // backend JobStatus (`completed` / `completed_no_summary`). Both are
+  // successful terminal states and must never fall through to failed.
+  if (status === "done" || status === "completed" || status === "completed_no_summary") return "completed";
   return "failed";
 }
 
@@ -332,8 +335,9 @@ export function deriveTimeline(logs, maxRows = 4) {
     if (last && last.type === entry.type && last.text === entry.text) {
       last.count += 1;
       last.ts = entry.ts;
+      last.isError = last.isError || entry.isError === true;
     } else {
-      collapsed.push({ type: entry.type, text: entry.text, ts: entry.ts, count: 1 });
+      collapsed.push({ type: entry.type, text: entry.text, ts: entry.ts, count: 1, isError: entry.isError === true });
     }
   }
   return collapsed.slice(-maxRows).reverse();
