@@ -34,7 +34,10 @@ const RECOVERY_TIMEOUT_MS = readEnvMs("CLAWCONNECT_RECOVERY_TIMEOUT_MS", 90 * 60
 const DEFAULT_WAIT_MS = readEnvMs("CLAWCONNECT_CHECK_WAIT_MS", 45_000);
 const MIN_WAIT_MS = 1_000;
 const MAX_WAIT_MS = readEnvMs("CLAWCONNECT_CHECK_MAX_WAIT_MS", 120_000);
-const MAX_LOG_ENTRIES = 200;
+// Per-job in-memory log cap. Env-overridable for the same reason as the
+// windows above — a deployment watching long, chatty runs may want more
+// retained history than the default.
+const MAX_LOG_ENTRIES = readEnvMs("CLAWCONNECT_MAX_LOG_ENTRIES", 200);
 
 function resolveWaitMs(requested: number | undefined): number {
   if (requested === undefined || !Number.isFinite(requested)) return DEFAULT_WAIT_MS;
