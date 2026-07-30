@@ -333,7 +333,12 @@ export function deriveDetailTabs(task) {
 /** @param {Partial<WidgetTask>} task @returns {("response" | "diagnostics" | "request")[]} */
 export function deriveCardTabs(task) {
   const tabs = ["response"];
-  if (task?.error || task?.errorInfo) tabs.push("diagnostics");
+  // Status first, error-detail second. Keying off .error alone misses a failed
+  // task whose message never landed, and core sets .error to a session-busy
+  // string for status="blocked" — so status is the reliable signal and the
+  // error fields are the fallback for anything it does not cover.
+  const problem = task?.status === "failed" || task?.status === "blocked" || task?.status === "needs-human";
+  if (problem || task?.error || task?.errorInfo) tabs.push("diagnostics");
   if (canReadPrompt(task)) tabs.push("request");
   return tabs;
 }
@@ -657,21 +662,6 @@ export function deriveTimeline(logs, maxRows = 4) {
 export function deriveLatestUpdate(logs) {
   if (!logs || logs.length === 0) return null;
   return logs[logs.length - 1];
-}
-
-/** The inline card always offers the response and original request. Failed
- * runs also expose diagnostics without changing the stable tab order. */
-export function deriveCardTabs(task) {
-  const tabs = ["response"];
-  if (task?.status === "failed" || task?.status === "blocked" || task?.status === "needs-human") tabs.push("diagnostics");
-  tabs.push("request");
-  return tabs;
-}
-
-/** Successful terminal runs open on the useful result; the request is one
- * keystroke/click away and remains available for every task. */
-export function defaultCardTab(task) {
-  return "response";
 }
 
 export function nextCardTab(tabs, current, key) {

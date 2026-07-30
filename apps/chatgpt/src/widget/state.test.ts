@@ -29,8 +29,6 @@ import {
   deriveStatusPill,
   deriveCounts,
   formatCounts,
-  deriveCardTabs,
-  defaultCardTab,
   nextCardTab,
 } from "./state.js";
 
@@ -348,10 +346,15 @@ describe("deriveCardTabs / defaultCardTab — inline card tabs, presence-driven"
     expect(defaultCardTab(blocked)).toBe("response");
   });
 
+  it("offers diagnostics on a failed status even when no error message landed, and still gates request on a resolvable id", () => {
+    expect(deriveCardTabs({ status: "failed" })).toEqual(["response", "diagnostics"]);
+    expect(defaultCardTab({ status: "failed" })).toBe("diagnostics");
+  });
+
   it("never defaults to a tab it doesn't offer", () => {
-    const failedNoId = { status: "failed" };
-    expect(deriveCardTabs(failedNoId)).toEqual(["response"]);
-    expect(defaultCardTab(failedNoId)).toBe("response");
+    const doneNoId = { status: "done" };
+    expect(deriveCardTabs(doneNoId)).toEqual(["response"]);
+    expect(defaultCardTab(doneNoId)).toBe("response");
   });
 });
 

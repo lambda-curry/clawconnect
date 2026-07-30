@@ -22,17 +22,22 @@ describe("Task Center visual regressions", () => {
     expect(shell).toContain("min-height: 58px");
   });
 
-  it("qualifies the segment rules with .cc-btn so they win the cascade against it", () => {
-    // The tab buttons carry class="cc-btn cc-segment". .cc-btn is declared
-    // LATER in this stylesheet, so on equal specificity its border/
-    // border-radius/padding beat an unqualified .cc-segment and the underline
-    // tabs render as bordered pill buttons — caught in a browser screenshot,
-    // invisible to a string-contains assertion on the class attribute.
-    expect(shell).toContain(".cc-btn.cc-segment {");
-    expect(shell).toContain(".cc-btn.cc-segment--selected {");
-    expect(shell).not.toMatch(/^\s*\.cc-segment(--selected)?\s*\{/m);
-    // The qualified rules must still be able to zero out .cc-btn's chrome.
-    expect(shell).toMatch(/\.cc-btn\.cc-segment \{[^}]*border: 0/);
+  it("keeps the card tabs off .cc-btn, so their own rules can't lose the cascade to it", () => {
+    // The predecessor of this control carried class="cc-btn cc-segment", and
+    // .cc-btn is declared LATER in this stylesheet — so on equal specificity
+    // .cc-btn's border/border-radius/padding beat the unqualified .cc-segment
+    // rules and the underline tabs rendered as bordered pill buttons. Caught
+    // only by screenshotting the built widget; a string-contains assertion on
+    // the class attribute saw nothing wrong.
+    //
+    // The current .cc-card-tab design sidesteps it structurally by not reusing
+    // .cc-btn at all. This asserts that structural choice, which is what makes
+    // the tab rules authoritative without needing specificity tricks.
+    expect(shell).toContain(".cc-card-tab {");
+    expect(shell).toMatch(/\.cc-card-tab \{[^}]*border: 0/);
+    expect(shell).toMatch(/class: "cc-card-tab/);
+    expect(shell).not.toMatch(/class: "cc-btn[^"]*cc-card-tab/);
+    expect(shell).not.toContain("cc-segment"); // superseded — no dead rules left behind
   });
 
   it("keeps narrow embeds compact and removes the waiting placeholder from active runs", () => {

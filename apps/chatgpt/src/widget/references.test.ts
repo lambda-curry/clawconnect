@@ -80,7 +80,8 @@ const KEYWORDS = new Set([
 // Genuine platform globals this widget legitimately calls.
 const GLOBALS = new Set([
   "Array", "Boolean", "Date", "Error", "JSON", "Map", "Math", "Number", "Object", "Promise", "Set", "String",
-  "clearTimeout", "matchMedia", "parseFloat", "parseInt", "setInterval", "setTimeout", "structuredClone",
+  "clearTimeout", "matchMedia", "parseFloat", "parseInt", "queueMicrotask", "setInterval", "setTimeout",
+  "structuredClone",
 ]);
 
 /**
