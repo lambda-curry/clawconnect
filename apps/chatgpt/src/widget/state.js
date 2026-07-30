@@ -36,6 +36,32 @@ export function deriveStatusPill(group) {
   return { icon: "✕", label: "Failed" };
 }
 
+/** Strips the inline markdown syntax a one-line title can't render, keeping the text: emphasis, inline code, link labels, and leading list/quote markers. */
+function stripInlineMarkdown(text) {
+  return text
+    .replace(/`([^`]*)`/g, "$1")
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/(\*\*|__)(.*?)\1/g, "$2")
+    .replace(/(^|[^*_\w])[*_]([^*_]+)[*_](?=[^*_\w]|$)/g, "$1$2")
+    .replace(/^\s{0,3}(?:[-*+]|\d{1,9}[.)])\s+/, "")
+    .replace(/^\s{0,3}>\s?/, "");
+}
+
+/**
+ * A markdown summary's own heading is its title — otherwise the card's first
+ * line renders as literal "## What changed **stale jobId**…" syntax once the
+ * body below it is rendered as real markdown (caught in a browser screenshot).
+ * Without a leading heading, fall back to the whole summary flattened, so a
+ * hard-wrapped plain-prose summary isn't silently cut at its first newline.
+ */
+function titleFromSummary(summary) {
+  const lines = String(summary).split(/\n/);
+  const firstContentful = lines.find((l) => l.trim());
+  const heading = firstContentful ? /^\s{0,3}#{1,6}\s+(.*\S)\s*$/.exec(firstContentful) : null;
+  const source = heading ? heading[1] : summary;
+  return stripInlineMarkdown(String(source).replace(/\s+/g, " ").trim()).trim();
+}
+
 /**
  * Generated title, derived only from fields already present in a normal
  * (non-"prompt") task/snapshot — artifacts, summary, status, agent. Never
@@ -48,7 +74,7 @@ export function deriveTitle(task) {
     return task.artifacts.branchName ? `PR: ${task.artifacts.branchName}` : "Pull request ready";
   }
   if (task.summary) {
-    const oneLine = task.summary.replace(/\s+/g, " ").trim();
+    const oneLine = titleFromSummary(task.summary);
     return oneLine.length > 64 ? `${oneLine.slice(0, 63)}…` : oneLine;
   }
   if (task.status === "running" || task.status === "queued") {
@@ -160,6 +186,28 @@ export function mergePinnedDetail(tasks, pinnedDetail) {
   return tasks.map((t) => ((t.taskId ?? t.jobId) === pinnedId ? { ...t, ...pinnedDetail } : t));
 }
 
+/**
+ * mergePinnedDetail, plus: adds the pinned task when it isn't in `tasks` at
+ * all. list_tasks(view:"active") intentionally omits terminal work, so the
+ * instant the focused task completes it drops out of the very list the card
+ * polls — a card that only ever *merged* would render the task the user just
+ * dispatched as having vanished at the exact moment its result matters most
+ * (the same failure ad3cab1 fixed at the row-filter level, which only holds
+ * if the task is still in the list to be filtered). The pinned snapshot comes
+ * from a direct get_task read and is authoritative either way.
+ *
+ * A get_task detail:"full" payload is a superset of TaskSummary, so an added
+ * entry carries everything buildSessionRows/deriveTitle need. Append position
+ * is irrelevant — buildSessionRows sorts by lastEventAt.
+ */
+export function ensurePinnedTask(tasks, pinnedDetail) {
+  if (!pinnedDetail) return tasks;
+  const pinnedId = pinnedDetail.taskId ?? pinnedDetail.jobId;
+  if (pinnedId == null) return tasks;
+  const present = tasks.some((t) => (t.taskId ?? t.jobId) === pinnedId);
+  return present ? mergePinnedDetail(tasks, pinnedDetail) : [...tasks, pinnedDetail];
+}
+
 /** Merges a get_session(mode:"tasks") read into a row's expanded task history, keyed by taskId. Exact per-task status is preserved — group is display-only, computed fresh per history entry. */
 export function expandSessionRow(row, historyTasks) {
   return {
@@ -226,6 +274,206 @@ export function deriveDetailTabs(task) {
   if (sections.includes("artifacts")) tabs.push("artifacts");
   if (canReadPrompt(task)) tabs.push("prompt");
   return tabs;
+}
+
+/**
+ * The inline card's tab set — "response" always, "diagnostics" only when the
+ * task actually carries error detail, "request" only when the id is
+ * resolvable (canReadPrompt). Same presence-driven convention as
+ * deriveDetailTabs: never offer a tab that would open onto nothing.
+ */
+export function deriveCardTabs(task) {
+  const tabs = ["response"];
+  if (task?.error || task?.errorInfo) tabs.push("diagnostics");
+  if (canReadPrompt(task)) tabs.push("request");
+  return tabs;
+}
+
+/**
+ * Which tab a card opens on when focus moves to a different task. A failed
+ * task opens on its diagnostics — that's the answer the user is looking for,
+ * and making them click for it buries the one thing that went wrong. Anything
+ * else opens on the response.
+ *
+ * Guarded by deriveCardTabs so this can never select a tab that isn't
+ * offered: core sets `.error` to a session-busy message for status="blocked"
+ * (deriveTaskStatus in packages/core/src/tools.ts), so keying off `.error`
+ * alone would open a merely-blocked task on "diagnostics" — the same
+ * truthy-`.error` trap deriveTitle already had to be fixed for.
+ */
+export function defaultCardTab(task) {
+  const tabs = deriveCardTabs(task);
+  const preferred = groupStatus(task?.status) === "failed" ? "diagnostics" : "response";
+  return tabs.includes(preferred) ? preferred : "response";
+}
+
+/**
+ * Whether a body of text is worth rendering as markdown rather than as
+ * preformatted plain text. Agent summaries are usually markdown but are under
+ * no obligation to be — a plain paragraph run through a markdown renderer
+ * gains nothing and risks mangling stray punctuation, so the plain path
+ * (white-space: pre-wrap via .cc-plain) stays the default until there's an
+ * actual structural marker.
+ */
+export function isLikelyMarkdown(text) {
+  if (typeof text !== "string" || !text.trim()) return false;
+  return (
+    /^\s{0,3}#{1,6}\s+\S/m.test(text) || // heading
+    /^\s{0,3}(?:[-*+]|\d{1,9}[.)])\s+\S/m.test(text) || // list item
+    /^\s{0,3}>\s?\S/m.test(text) || // blockquote
+    /```/.test(text) || // fenced code
+    /`[^`\n]+`/.test(text) || // inline code
+    /\[[^\]\n]+\]\([^)\s]+\)/.test(text) || // link
+    /\*\*[^*\n]+\*\*/.test(text) || // bold
+    /^\s*\|.+\|\s*$/m.test(text) // table row
+  );
+}
+
+const MD_ESCAPES = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
+
+/** Escapes every HTML-significant character. Runs before any markdown transform, so nothing in the source text can ever reach innerHTML as markup. */
+function escapeHtml(text) {
+  return String(text).replace(/[&<>"']/g, (c) => MD_ESCAPES[c]);
+}
+
+/**
+ * Only http/https/mailto survive as links. A summary is agent-authored text
+ * flowing into innerHTML, so `javascript:`/`data:` hrefs are dropped back to
+ * plain text rather than sanitized-in-place.
+ */
+function safeHref(url) {
+  return /^(?:https?:\/\/|mailto:)[^\s]+$/i.test(url) ? url : null;
+}
+
+function renderInlineMd(escaped) {
+  let out = escaped;
+  // Inline code first, and via a placeholder pass, so **/*/[]() inside a code
+  // span renders literally instead of being treated as emphasis. The
+  // placeholder is bracketed in raw < / >, which cannot occur in the
+  // already-escaped input, so it can never collide with the source text.
+  const codeSpans = [];
+  out = out.replace(/`([^`\n]+)`/g, (_, code) => {
+    codeSpans.push(`<code>${code}</code>`);
+    return `<!c${codeSpans.length - 1}!>`;
+  });
+  out = out.replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, (whole, label, url) => {
+    const href = safeHref(url);
+    return href ? `<a href="${href}" target="_blank" rel="noopener noreferrer">${label}</a>` : whole;
+  });
+  out = out.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
+  out = out.replace(/(^|[^*\w])\*([^*\n]+)\*(?=[^*\w]|$)/g, "$1<em>$2</em>");
+  return out.replace(/<!c(\d+)!>/g, (whole, i) => codeSpans[Number(i)] ?? whole);
+}
+
+function renderTableRows(rows) {
+  const cells = (line) =>
+    line
+      .trim()
+      .replace(/^\||\|$/g, "")
+      .split("|")
+      .map((c) => renderInlineMd(escapeHtml(c.trim())));
+  const isDivider = (line) => /^\s*\|?[\s:|-]+\|?\s*$/.test(line) && line.includes("-");
+  const head = cells(rows[0]);
+  const bodyRows = rows.slice(isDivider(rows[1] ?? "") ? 2 : 1);
+  const thead = `<thead><tr>${head.map((c) => `<th>${c}</th>`).join("")}</tr></thead>`;
+  const tbody = bodyRows.map((r) => `<tr>${cells(r).map((c) => `<td>${c}</td>`).join("")}</tr>`).join("");
+  return `<table>${thead}${tbody ? `<tbody>${tbody}</tbody>` : ""}</table>`;
+}
+
+/**
+ * Minimal block-level markdown → HTML for agent-authored summaries and
+ * prompts. Emits only the tag set shell.html already styles (h1-h3, p, ul/ol,
+ * li, blockquote, pre/code, table, strong, em, a) — deliberately not a full
+ * CommonMark implementation, because the widget must stay a single
+ * self-contained resource with no bundler and no third-party library.
+ *
+ * The output goes to innerHTML, so the ordering here is load-bearing:
+ * escapeHtml runs over the entire source first, and every tag emitted
+ * afterwards is one this function wrote itself. Raw HTML in the source is
+ * therefore always displayed as text, never interpreted.
+ */
+export function renderMarkdownHtml(text) {
+  const source = String(text ?? "").replace(/\r\n?/g, "\n");
+  const blocks = [];
+  const lines = source.split("\n");
+  let i = 0;
+
+  const flushParagraph = (buf) => {
+    if (buf.length) blocks.push(`<p>${renderInlineMd(escapeHtml(buf.join(" ")))}</p>`);
+    buf.length = 0;
+  };
+  const paragraph = [];
+
+  while (i < lines.length) {
+    const line = lines[i];
+
+    const fence = /^\s{0,3}```\s*([\w+-]*)\s*$/.exec(line);
+    if (fence) {
+      flushParagraph(paragraph);
+      const body = [];
+      i += 1;
+      while (i < lines.length && !/^\s{0,3}```\s*$/.test(lines[i])) body.push(lines[i++]);
+      i += 1; // closing fence (or EOF — an unterminated block still renders)
+      blocks.push(`<pre><code>${escapeHtml(body.join("\n"))}</code></pre>`);
+      continue;
+    }
+
+    const heading = /^\s{0,3}(#{1,6})\s+(.*)$/.exec(line);
+    if (heading) {
+      flushParagraph(paragraph);
+      const level = Math.min(heading[1].length, 3); // only h1-h3 are styled
+      blocks.push(`<h${level}>${renderInlineMd(escapeHtml(heading[2].trim()))}</h${level}>`);
+      i += 1;
+      continue;
+    }
+
+    if (/^\s{0,3}>\s?/.test(line)) {
+      flushParagraph(paragraph);
+      const quoted = [];
+      while (i < lines.length && /^\s{0,3}>\s?/.test(lines[i])) {
+        quoted.push(lines[i].replace(/^\s{0,3}>\s?/, ""));
+        i += 1;
+      }
+      blocks.push(`<blockquote>${renderInlineMd(escapeHtml(quoted.join(" ")))}</blockquote>`);
+      continue;
+    }
+
+    const bullet = /^\s{0,3}[-*+]\s+(.*)$/.exec(line);
+    const numbered = /^\s{0,3}\d{1,9}[.)]\s+(.*)$/.exec(line);
+    if (bullet || numbered) {
+      flushParagraph(paragraph);
+      const ordered = Boolean(numbered);
+      const items = [];
+      while (i < lines.length) {
+        const m = ordered ? /^\s{0,3}\d{1,9}[.)]\s+(.*)$/.exec(lines[i]) : /^\s{0,3}[-*+]\s+(.*)$/.exec(lines[i]);
+        if (!m) break;
+        items.push(`<li>${renderInlineMd(escapeHtml(m[1].trim()))}</li>`);
+        i += 1;
+      }
+      const tag = ordered ? "ol" : "ul";
+      blocks.push(`<${tag}>${items.join("")}</${tag}>`);
+      continue;
+    }
+
+    if (/^\s*\|.*\|\s*$/.test(line)) {
+      flushParagraph(paragraph);
+      const rows = [];
+      while (i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i])) rows.push(lines[i++]);
+      blocks.push(renderTableRows(rows));
+      continue;
+    }
+
+    if (!line.trim()) {
+      flushParagraph(paragraph);
+      i += 1;
+      continue;
+    }
+
+    paragraph.push(line.trim());
+    i += 1;
+  }
+  flushParagraph(paragraph);
+  return blocks.join("");
 }
 
 /**

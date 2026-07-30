@@ -22,6 +22,19 @@ describe("Task Center visual regressions", () => {
     expect(shell).toContain("min-height: 58px");
   });
 
+  it("qualifies the segment rules with .cc-btn so they win the cascade against it", () => {
+    // The tab buttons carry class="cc-btn cc-segment". .cc-btn is declared
+    // LATER in this stylesheet, so on equal specificity its border/
+    // border-radius/padding beat an unqualified .cc-segment and the underline
+    // tabs render as bordered pill buttons — caught in a browser screenshot,
+    // invisible to a string-contains assertion on the class attribute.
+    expect(shell).toContain(".cc-btn.cc-segment {");
+    expect(shell).toContain(".cc-btn.cc-segment--selected {");
+    expect(shell).not.toMatch(/^\s*\.cc-segment(--selected)?\s*\{/m);
+    // The qualified rules must still be able to zero out .cc-btn's chrome.
+    expect(shell).toMatch(/\.cc-btn\.cc-segment \{[^}]*border: 0/);
+  });
+
   it("keeps narrow embeds compact and removes the waiting placeholder from active runs", () => {
     expect(shell).toContain("@media (max-width: 640px)");
     expect(shell).toContain("cc-live-loading");

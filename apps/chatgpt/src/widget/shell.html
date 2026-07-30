@@ -97,8 +97,13 @@
   .cc-history-item { font-size: 12px; padding: 3px 0; color: var(--cc-fg-muted); }
   .cc-actions { margin-top: 10px; display: flex; gap: 6px; flex-wrap: wrap; }
   .cc-segmented { display: inline-flex; gap: 14px; margin-top: 10px; border-bottom: 1px solid var(--cc-border); }
-  .cc-segment { border: 0; border-radius: 0; padding: 4px 0 5px; font-size: 11px; color: var(--cc-fg-muted); }
-  .cc-segment--selected { background: var(--cc-action-selected); color: var(--cc-fg); font-weight: 600; border-bottom: 2px solid var(--cc-fg-muted); margin-bottom: -1px; }
+  /* Qualified with .cc-btn deliberately: a segment IS a .cc-btn that opts out
+     of button chrome, and .cc-btn is declared further down this stylesheet —
+     an unqualified .cc-segment loses the cascade to it on equal specificity
+     and the tabs render as bordered pill buttons instead of an underline
+     control. Specificity, not source order, so it survives reordering. */
+  .cc-btn.cc-segment { border: 0; border-radius: 0; padding: 4px 0 5px; font-size: 11px; color: var(--cc-fg-muted); }
+  .cc-btn.cc-segment--selected { background: var(--cc-action-selected); color: var(--cc-fg); font-weight: 600; border-bottom: 2px solid var(--cc-fg-muted); margin-bottom: -1px; }
   .cc-response { margin-top: 8px; font-size: 12.5px; }
   .cc-response.cc-plain, .cc-prompt-body.cc-plain { white-space: pre-wrap; }
   .cc-response h1, .cc-response h2, .cc-response h3, .cc-prompt-body h1, .cc-prompt-body h2, .cc-prompt-body h3 { margin: 10px 0 4px; line-height: 1.25; }
