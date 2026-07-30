@@ -5,7 +5,10 @@ export default defineConfig({
     dts: {
       tsgo: true,
     },
-    exports: true,
+    // Name the binary explicitly — see the note in packages/mcp/vite.config.ts:
+    // auto-detect derives it from the package name (@clawconnect/cli -> "cli")
+    // and rewrites package.json's `bin` on every build.
+    exports: { bin: { clawconnect: "./src/bin.ts" } },
     entry: {
       index: "src/index.ts",
       bin: "src/bin.ts",
