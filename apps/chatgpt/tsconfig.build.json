@@ -1,0 +1,17 @@
+// Emit config for `pnpm build` (dist/index.js, the HTTP server entry that
+// `pnpm start` runs). Tests are excluded here so they never reach dist;
+// tsconfig.json is the checking config that does cover them.
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": "./dist",
+    // Explicit so tsc doesn't have to infer the layout — inferring it is what
+    // triggered the "rootDir must be explicitly set" tsconfig complaint.
+    "rootDir": "./src",
+    // Illegal alongside emit, and only ever needed by app.test.ts, which this
+    // config excludes. The checking config keeps it on.
+    "allowImportingTsExtensions": false
+  },
+  "exclude": ["node_modules", "**/*.test.ts"]
+}

@@ -1,3 +1,9 @@
+// Checking config — covers everything under src, tests included, and never
+// emits. This is what editors and `vp lint` see. Emit lives in
+// tsconfig.build.json, which drops the tests; before that split, tests were
+// excluded here to keep the build's `tsc` quiet, which had the side effect of
+// type-checking them under defaults (no allowJs, no vitest resolution) and
+// producing errors the package config had already solved for src.
 {
   "compilerOptions": {
     "target": "ESNext",
@@ -7,10 +13,21 @@
     "verbatimModuleSyntax": true,
     "skipLibCheck": true,
     "types": ["node"],
+    // widget/state.js and widget/protocol.js are authored as plain ES modules
+    // (build-widget.mjs strips their `export` keywords to inline them into
+    // shell.html's non-module <script>). allowJs lets TypeScript infer their
+    // signatures from the source instead of reporting "no declaration file",
+    // which also gives the tests' callback parameters real types — no
+    // hand-maintained .d.ts to drift out of sync with the implementation.
+    "allowJs": true,
     "jsx": "react-jsx",
     "jsxImportSource": "hono/jsx",
-    "outDir": "./dist"
+    "noEmit": true,
+    // app.test.ts imports "./app.ts" by its real extension, matching the root
+    // tsconfig and the rest of the workspace. Legal only under noEmit, which
+    // is why it lives here and not in tsconfig.build.json.
+    "allowImportingTsExtensions": true
   },
   "include": ["src"],
-  "exclude": ["node_modules", "**/*.test.ts"]
+  "exclude": ["node_modules"]
 }

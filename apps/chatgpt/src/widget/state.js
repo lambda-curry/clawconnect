@@ -8,6 +8,47 @@
 // JobSnapshot shapes from @clawconnect/core) — no widget-specific payload.
 // See docs/architecture/2026-07-27-chatgpt-ui-reconciliation.md §3.
 
+/**
+ * Shared shapes, as JSDoc so this stays a plain .js module (build-widget.mjs
+ * inlines it verbatim; a .ts file would need a compile step first) while still
+ * type-checking. Annotated on the functions that return collections
+ * specifically: their element type is what flows into a caller's `.map`/
+ * `.filter` callback, so leaving those inferred as `any` is what produces
+ * implicit-any parameters at every call site.
+ *
+ * @typedef {"active" | "needs_attention" | "completed" | "failed"} TaskGroup
+ *
+ * A task as the widget sees it: the TaskSummary shape list_tasks and
+ * get_session(mode:"tasks") return, widened with the extra fields a full
+ * get_task snapshot carries (the pinned task is merged in via ensurePinnedTask,
+ * so any row may or may not have them).
+ * @typedef {object} WidgetTask
+ * @property {string} [taskId]
+ * @property {string} [jobId]
+ * @property {string} sessionKey
+ * @property {string} [agent]
+ * @property {string} status
+ * @property {number} [startedAt]
+ * @property {number} [lastEventAt]
+ * @property {string} [summary]
+ * @property {string} [error]
+ * @property {{ message?: string, category?: string }} [errorInfo]
+ * @property {{ filesChanged?: string[], commandsRun?: string[], branchName?: string, commitSha?: string, prUrl?: string }} [artifacts]
+ * @property {LogEntry[]} [updates]
+ * @property {LogEntry[]} [logs]
+ * @property {unknown} [recovery]
+ *
+ * @typedef {{ ts: number, type: string, text: string, isError?: boolean }} LogEntry
+ *
+ * @typedef {object} SessionRow
+ * @property {string} sessionKey
+ * @property {WidgetTask} latestTask
+ * @property {TaskGroup} group
+ * @property {string} title
+ * @property {boolean} expanded
+ * @property {(WidgetTask & { group: TaskGroup, title: string })[]} [history]
+ */
+
 /** Maps a TaskSummary's exact status to a display bucket. The exact status is never mutated — this is presentation grouping only (Active / Needs attention / Completed / Failed). */
 export function groupStatus(status) {
   if (status === "running" || status === "queued") return "active";
@@ -124,6 +165,7 @@ export function deriveViewMode(mounted, tasks) {
  * fetched on demand via get_session(mode:"tasks"), not eagerly for every
  * row.
  */
+/** @param {WidgetTask[]} tasks @param {{ highlightSessionKey?: string }} [opts] @returns {SessionRow[]} */
 export function buildSessionRows(tasks, opts = {}) {
   const bySession = new Map();
   for (const task of tasks) {
@@ -161,6 +203,7 @@ export function buildSessionRows(tasks, opts = {}) {
  * to hide the one thing that just completed out from under the user who
  * dispatched it.
  */
+/** @param {SessionRow[]} rows @param {"active" | "recent"} view @param {string} [pinnedSessionKey] @returns {SessionRow[]} */
 export function filterRows(rows, view, pinnedSessionKey) {
   if (view === "recent") return rows;
   return rows.filter((r) => r.group === "active" || r.group === "needs_attention" || r.sessionKey === pinnedSessionKey);
@@ -180,6 +223,7 @@ export function filterRows(rows, view, pinnedSessionKey) {
  * (no-artifacts) non-pinned task, the same shape a real list_tasks call
  * returns.
  */
+/** @param {WidgetTask[]} tasks @param {WidgetTask | null} pinnedDetail @returns {WidgetTask[]} */
 export function mergePinnedDetail(tasks, pinnedDetail) {
   if (!pinnedDetail) return tasks;
   const pinnedId = pinnedDetail.taskId ?? pinnedDetail.jobId;
@@ -200,6 +244,7 @@ export function mergePinnedDetail(tasks, pinnedDetail) {
  * entry carries everything buildSessionRows/deriveTitle need. Append position
  * is irrelevant — buildSessionRows sorts by lastEventAt.
  */
+/** @param {WidgetTask[]} tasks @param {WidgetTask | null} pinnedDetail @returns {WidgetTask[]} */
 export function ensurePinnedTask(tasks, pinnedDetail) {
   if (!pinnedDetail) return tasks;
   const pinnedId = pinnedDetail.taskId ?? pinnedDetail.jobId;
@@ -209,6 +254,7 @@ export function ensurePinnedTask(tasks, pinnedDetail) {
 }
 
 /** Merges a get_session(mode:"tasks") read into a row's expanded task history, keyed by taskId. Exact per-task status is preserved — group is display-only, computed fresh per history entry. */
+/** @param {SessionRow} row @param {WidgetTask[]} historyTasks @returns {SessionRow & { history: (WidgetTask & { group: TaskGroup, title: string })[] }} */
 export function expandSessionRow(row, historyTasks) {
   return {
     ...row,
@@ -249,6 +295,7 @@ export function formatCounts(counts) {
  * template that shows empty sections. Read-only: this only selects what to
  * show, never what to do.
  */
+/** @param {WidgetTask} task @returns {string[]} */
 export function deriveDetailSections(task) {
   const sections = ["status"];
   if (task.status === "running" || task.status === "queued") sections.push("liveUpdate");
@@ -268,6 +315,7 @@ export function deriveDetailSections(task) {
  * resolvable (canReadPrompt). Built on deriveDetailSections rather than
  * duplicating its presence checks, so the two stay in lockstep.
  */
+/** @param {WidgetTask} task @returns {string[]} */
 export function deriveDetailTabs(task) {
   const sections = deriveDetailSections(task);
   const tabs = ["overview"];
@@ -282,6 +330,7 @@ export function deriveDetailTabs(task) {
  * resolvable (canReadPrompt). Same presence-driven convention as
  * deriveDetailTabs: never offer a tab that would open onto nothing.
  */
+/** @param {Partial<WidgetTask>} task @returns {("response" | "diagnostics" | "request")[]} */
 export function deriveCardTabs(task) {
   const tabs = ["response"];
   if (task?.error || task?.errorInfo) tabs.push("diagnostics");
@@ -301,6 +350,7 @@ export function deriveCardTabs(task) {
  * alone would open a merely-blocked task on "diagnostics" — the same
  * truthy-`.error` trap deriveTitle already had to be fixed for.
  */
+/** @param {Partial<WidgetTask>} task @returns {"response" | "diagnostics"} */
 export function defaultCardTab(task) {
   const tabs = deriveCardTabs(task);
   const preferred = groupStatus(task?.status) === "failed" ? "diagnostics" : "response";
@@ -528,6 +578,7 @@ export function resolveScope(knownSessionKeys, allActivity) {
   return { scoped: true, sessionKeys: [...new Set(knownSessionKeys ?? [])] };
 }
 
+/** @param {WidgetTask[]} tasks @param {{ scoped: boolean, sessionKeys: string[] | null }} scope @returns {WidgetTask[]} */
 export function filterTasksByScope(tasks, scope) {
   if (!scope.scoped) return tasks;
   const allowed = new Set(scope.sessionKeys ?? []);
@@ -575,6 +626,7 @@ export function deriveActivityLabel(task, now) {
  * into one row with a count (a tool looping doesn't spam N identical
  * rows). Returns at most `maxRows`, most recent first.
  */
+/** @param {LogEntry[] | undefined} logs @param {number} [maxRows] @returns {(LogEntry & { count: number })[]} */
 export function deriveTimeline(logs, maxRows = 4) {
   if (!logs || logs.length === 0) return [];
   const collapsed = [];
