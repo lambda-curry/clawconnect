@@ -583,6 +583,47 @@ export function resolveScope(knownSessionKeys, allActivity) {
   return { scoped: true, sessionKeys: [...new Set(knownSessionKeys ?? [])] };
 }
 
+/**
+ * Compact's own pinned session — deliberately separate from the fullscreen
+ * Task Center's selection, and from the canonical task list both surfaces read.
+ * The Task Center is a *wider view* over the same data (every session, every
+ * group); if opening it could rewrite what the compact card is pinned to, or
+ * what it is allowed to see, then closing it would leave the compact card
+ * rendering the Task Center's contents. So compact keeps its own selection and
+ * re-resolves it here whenever it comes back into view.
+ *
+ * `visibleTasks` is the compact-visible slice (already scope-filtered — see
+ * filterTasksByScope), never the canonical list.
+ *
+ * 1. The previous selection, while it still has work in view — a polling card
+ *    must not re-pin itself out from under the user every cycle.
+ * 2. The mounted run: this card's own subject, authoritative even once it
+ *    finishes and drops out of list_tasks(view:"active") — that's the row
+ *    ensurePinnedTask puts back.
+ * 3. Otherwise re-run the policy from scratch — the most recently active
+ *    non-terminal session. A session that disappeared while the Task Center
+ *    was open therefore hands focus to real live work rather than leaving a
+ *    dangling pin. Terminal-only is deliberately left unpinned: a pin forces
+ *    its row past the Active filter (see filterRows), and an unmounted card
+ *    shouldn't resurrect finished work nobody asked about.
+ *
+ * @param {{ sessionKey?: string } | null} mounted
+ * @param {WidgetTask[]} visibleTasks
+ * @param {string | null} [previousSessionKey]
+ * @returns {string | undefined}
+ */
+export function resolveCompactSelection(mounted, visibleTasks, previousSessionKey) {
+  const tasks = visibleTasks ?? [];
+  if (previousSessionKey && tasks.some((t) => t.sessionKey === previousSessionKey)) return previousSessionKey;
+  if (mounted?.sessionKey) return mounted.sessionKey;
+  let newest;
+  for (const task of tasks) {
+    if (isTerminalGroup(groupStatus(task.status))) continue;
+    if (!newest || (task.lastEventAt ?? 0) > (newest.lastEventAt ?? 0)) newest = task;
+  }
+  return newest?.sessionKey;
+}
+
 /** @param {WidgetTask[]} tasks @param {{ scoped: boolean, sessionKeys: string[] | null }} scope @returns {WidgetTask[]} */
 export function filterTasksByScope(tasks, scope) {
   if (!scope.scoped) return tasks;

@@ -330,9 +330,17 @@ bridge.onThemeChange(applyTheme);
 // imported above; this section never re-implements that logic.
 const app = {
   mounted: null,
+  // Canonical loaded data: exactly what the last list_tasks read returned,
+  // never narrowed in place. Each surface derives what *it* may show from
+  // this (compact via compactVisibleTasks(), fullscreen reads it whole), so
+  // the Task Center's deliberately wider read can't redefine what the compact
+  // card is allowed to see once it closes again.
   tasks: [],
+  // Compact-only visibility. Fullscreen has its own row policy
+  // (FULLSCREEN_ROW_VIEW) and must never write these.
   view: "active",
   allActivity: false,
+  compactSessionKey: null, // compact's pinned session — see resolveCompactSelection()
   knownSessionKeys: new Set(),
   pollInFlight: false,
   pollFailures: 0,
@@ -344,7 +352,7 @@ const app = {
   promptLoading: new Set(),
   timeline: [], // deriveTimeline() output for the one focused/highlighted task — the actual evidence behind "is working"
   timelineFor: null, // taskId the current timeline belongs to, so a stale fetch never renders under the wrong row
-  pinnedDetail: null, // full JobSnapshot (artifacts included) for the one pinned/selected task — see mergePinnedDetail()
+  pinnedDetail: null, // full JobSnapshot (artifacts included) for compact's pinned task — see mergePinnedDetail()
   cardTab: "response",
   cardTabFor: null,
   // Fullscreen — see openTaskCenter(). displayMode reflects what the host
@@ -353,8 +361,32 @@ const app = {
   displayModeNote: null, // set when a fullscreen request was made but not honored — shown once, inline, not a silent failure
   selectedSessionKey: null, // fullscreen sidebar selection
   selectedTaskId: null, // fullscreen task-list selection
+  // Fullscreen's own detail snapshot. Kept apart from pinnedDetail because
+  // ensurePinnedTask *appends* the snapshot when it isn't already in the list:
+  // one shared field means selecting another conversation's session in the
+  // Task Center injects that session's row into the compact card on close.
+  selectedDetail: null,
   detailTab: "overview",
 };
+
+// The Task Center is the "see everything" surface, so its row filter is fixed
+// rather than read from app.view — that's compact's setting, and borrowing it
+// here is what previously required overwriting it on open.
+const FULLSCREEN_ROW_VIEW = "recent";
+
+/**
+ * Canonical data -> what the compact card may see. Scope is applied as a view
+ * over app.tasks, never baked into the stored list, so a wider read (the Task
+ * Center's) leaves compact's boundary intact.
+ */
+function compactVisibleTasks() {
+  return filterTasksByScope(app.tasks, resolveScope([...app.knownSessionKeys], app.allActivity));
+}
+
+/** The task set the surface currently on screen is entitled to render. */
+function surfaceTasks() {
+  return app.displayMode === "fullscreen" ? app.tasks : compactVisibleTasks();
+}
 
 // Fullscreen is a request, never a dependency — every read/action the
 // fullscreen view uses is identical to the inline card's; the only
@@ -375,16 +407,43 @@ async function openTaskCenter() {
   if (granted === "fullscreen") {
     app.displayMode = "fullscreen";
     app.displayModeNote = null;
-    // Fullscreen is the "see everything" surface — widen scope so the
-    // sidebar isn't just the one pinned session, and show every group by
-    // default.
-    app.allActivity = true;
-    app.view = "recent";
-    app.selectedSessionKey = app.selectedSessionKey ?? app.mounted?.sessionKey ?? null;
+    // Fullscreen widens the *read* (refresh() keys its list_tasks view and
+    // scope off displayMode) and nothing else. Compact's scope, row filter and
+    // pinned session are deliberately left alone: this used to set
+    // allActivity/view here, and since closing only flipped displayMode back,
+    // the compact card stayed pinned wide open on every session forever after.
+    app.selectedSessionKey = app.selectedSessionKey ?? app.compactSessionKey ?? app.mounted?.sessionKey ?? null;
+    // A card whose own work has finished has stopped polling; the Task Center
+    // still owes the user a current read of everything else.
+    app.reconcileRequested = true;
     refresh();
   } else {
     app.displayModeNote = "The host didn't grant fullscreen — staying inline.";
   }
+  render();
+}
+
+/**
+ * Back to the compact card. Fullscreen state is dropped rather than carried,
+ * and compact's selection is re-resolved against the canonical list — while
+ * the Task Center was open, the session compact was pinned to may have
+ * finished and dropped out of it.
+ */
+function returnToInline() {
+  // Idempotent: a host that echoes the mode change back (openai:set_globals)
+  // reaches this through the listener *and* through our own Close button, and
+  // restoring twice would fire a duplicate read for the same transition.
+  if (app.displayMode === "inline") return;
+  app.displayMode = "inline";
+  app.selectedSessionKey = null;
+  app.selectedTaskId = null;
+  app.selectedDetail = null;
+  app.compactSessionKey = resolveCompactSelection(app.mounted, compactVisibleTasks(), app.compactSessionKey) ?? null;
+  // Re-read at compact breadth immediately so live updates resume on the
+  // compact card instead of waiting out whatever cadence fullscreen scheduled
+  // (or never resuming at all, if fullscreen's wider list had gone terminal).
+  app.reconcileRequested = true;
+  refresh();
   render();
 }
 
@@ -394,16 +453,20 @@ function closeTaskCenter() {
   // never confirms — same "never load-bearing" principle as everywhere
   // else the card fetches something.
   bridge.requestDisplayMode("inline").catch(() => {});
-  app.displayMode = "inline";
-  render();
+  returnToInline();
 }
 
 bridge.onDisplayModeChange((mode) => {
   // The host can also change display mode on its own (e.g. its own chrome
-  // close button) — stay in sync rather than trusting only our own calls.
+  // close button) — stay in sync rather than trusting only our own calls, and
+  // through the same restore path as our own Close button.
   if (mode !== app.displayMode) {
-    app.displayMode = mode === "fullscreen" ? "fullscreen" : "inline";
-    render();
+    if (mode === "fullscreen") {
+      app.displayMode = "fullscreen";
+      render();
+    } else {
+      returnToInline();
+    }
   }
 });
 
@@ -416,6 +479,7 @@ function rehydrate() {
   const saved = bridge.readWidgetState();
   if (saved?.knownSessionKeys) for (const k of saved.knownSessionKeys) app.knownSessionKeys.add(k);
   if (!app.mounted && saved?.mounted) app.mounted = saved.mounted;
+  app.compactSessionKey = app.mounted?.sessionKey ?? null;
 }
 
 function persist() {
@@ -438,7 +502,9 @@ async function refreshPinnedCounts(sessionKey) {
 }
 
 async function refresh() {
-  if (!app.reconcileRequested && !shouldPoll({ pollInFlight: app.pollInFlight, tasks: app.tasks })) return;
+  // Bounded against what the surface on screen actually shows: a compact card
+  // must not keep polling on behalf of sessions it isn't allowed to render.
+  if (!app.reconcileRequested && !shouldPoll({ pollInFlight: app.pollInFlight, tasks: surfaceTasks() })) return;
   app.reconcileRequested = false;
   app.pollInFlight = true;
   const fullscreen = app.displayMode === "fullscreen";
@@ -458,24 +524,41 @@ async function refresh() {
     const listView = fullscreen || app.allActivity ? "all" : "active";
     const result = await bridge.callTool("list_tasks", { view: listView });
     const tasks = result?.structuredContent?.tasks ?? result?.tasks ?? [];
-    const scope = resolveScope([...app.knownSessionKeys], app.allActivity || fullscreen);
-    app.tasks = reconcileTaskList(app.tasks, filterTasksByScope(tasks, scope));
+    // Stored as fetched — the canonical set. Compact scope is a render-time
+    // view (compactVisibleTasks), not a narrowing of the store, because the
+    // store is shared with the Task Center's deliberately wider read.
+    app.tasks = reconcileTaskList(app.tasks, tasks);
 
-    const view = deriveViewMode(app.mounted, app.tasks);
-    const pinnedSessionKey = fullscreen
-      ? (app.selectedSessionKey ?? view.highlightSessionKey)
-      : (view.mode === "focused" ? view.sessionKey : view.highlightSessionKey);
+    const visible = fullscreen ? app.tasks : compactVisibleTasks();
+    let pinnedSessionKey;
+    if (fullscreen) {
+      pinnedSessionKey = app.selectedSessionKey ?? deriveViewMode(app.mounted, visible).highlightSessionKey;
+    } else {
+      app.compactSessionKey = resolveCompactSelection(app.mounted, visible, app.compactSessionKey) ?? null;
+      pinnedSessionKey = app.compactSessionKey ?? undefined;
+    }
 
     // Bounded: exactly one extra read, only for the one session the user is
     // actually looking at (pinned inline, or selected in the fullscreen
     // sidebar) — never fan-out across every row in the command center.
-    const sessionTasks = pinnedSessionKey ? app.tasks.filter((t) => t.sessionKey === pinnedSessionKey) : [];
-    const selected =
-      (app.selectedTaskId && sessionTasks.find((t) => (t.taskId ?? t.jobId) === app.selectedTaskId)) ??
-      sessionTasks[0] ??
-      // list_tasks(view:"active") intentionally omits completed work. The
-      // mounted run is still authoritative and must be fetched directly.
-      (app.mounted?.taskId ? { taskId: app.mounted.taskId, jobId: app.mounted.taskId, sessionKey: app.mounted.sessionKey } : undefined);
+    const sessionTasks = pinnedSessionKey ? visible.filter((t) => t.sessionKey === pinnedSessionKey) : [];
+    // The Task Center's explicit task-list pick, when there is one. Written as
+    // a conditional rather than folded into the `??` chain below: `false ?? x`
+    // is `false`, so an `&&` guard inside a `??` chain silently swallows every
+    // later fallback.
+    const chosen =
+      fullscreen && app.selectedTaskId
+        ? sessionTasks.find((t) => (t.taskId ?? t.jobId) === app.selectedTaskId)
+        : undefined;
+    // list_tasks(view:"active") intentionally omits completed work. The mounted
+    // run is still authoritative and must be fetched directly — but only while
+    // focus is actually on it, or the Task Center would fetch the mounted
+    // task's detail for some other session's row.
+    const mountedFallback =
+      app.mounted?.taskId && (!pinnedSessionKey || pinnedSessionKey === app.mounted.sessionKey)
+        ? { taskId: app.mounted.taskId, jobId: app.mounted.taskId, sessionKey: app.mounted.sessionKey }
+        : undefined;
+    const selected = chosen ?? sessionTasks[0] ?? mountedFallback;
     if (selected) {
       const taskId = selected.taskId ?? selected.jobId;
       // detail:"full" (not "updates") — list_tasks' TaskSummary has no
@@ -490,13 +573,19 @@ async function refresh() {
       const snapshot = detail?.structuredContent ?? detail;
       const prompt = promptDetail?.structuredContent?.prompt ?? promptDetail?.prompt;
       if (prompt?.task != null) app.promptText.set(taskId, prompt.task);
-      app.pinnedDetail = snapshot?.jobId || snapshot?.taskId ? snapshot : null;
-      app.tasks = ensurePinnedTask(app.tasks, app.pinnedDetail);
+      const resolved = snapshot?.jobId || snapshot?.taskId ? snapshot : null;
+      // Each surface keeps its own detail snapshot. ensurePinnedTask *adds* a
+      // detail that isn't in the list yet, so a shared field would inject the
+      // Task Center's selection into the compact card as a row of its own.
+      if (fullscreen) app.selectedDetail = resolved;
+      else app.pinnedDetail = resolved;
+      app.tasks = ensurePinnedTask(app.tasks, resolved);
       app.timeline = deriveTimeline(snapshot?.updates ?? snapshot?.logs ?? []);
       app.timelineFor = taskId;
       await refreshPinnedCounts(snapshot?.sessionKey ?? pinnedSessionKey ?? app.mounted?.sessionKey);
     } else {
-      app.pinnedDetail = null;
+      if (fullscreen) app.selectedDetail = null;
+      else app.pinnedDetail = null;
       app.timeline = [];
       app.timelineFor = null;
     }
@@ -511,10 +600,13 @@ async function refresh() {
 }
 
 function scheduleNext() {
-  const view = deriveViewMode(app.mounted, app.tasks);
+  // Cadence follows the surface on screen, for the same reason refresh()'s
+  // poll guard does: compact's cadence is about compact's own work.
+  const tasks = surfaceTasks();
+  const view = deriveViewMode(app.mounted, tasks);
   const group =
     view.mode === "focused"
-      ? groupStatus(app.tasks.find((t) => t.taskId === view.taskId || t.jobId === view.taskId)?.status ?? "running")
+      ? groupStatus(tasks.find((t) => t.taskId === view.taskId || t.jobId === view.taskId)?.status ?? "running")
       : "active";
   const delay = pollIntervalMs(group, app.pollFailures);
   if (delay === null) return; // terminal — stop polling entirely
@@ -727,16 +819,20 @@ function render() {
 }
 
 function renderInline(root) {
-  const view = deriveViewMode(app.mounted, app.tasks);
-  const pinnedSessionKey = view.highlightSessionKey ?? app.mounted?.sessionKey;
-  const rows = buildSessionRows(ensurePinnedTask(app.tasks, app.pinnedDetail), { highlightSessionKey: pinnedSessionKey });
+  // Compact renders its own slice of the canonical list, resolved here rather
+  // than read from whatever the last fetch happened to store — that store is
+  // shared with the Task Center, which reads every session.
+  const tasks = compactVisibleTasks();
+  const pinnedSessionKey =
+    app.compactSessionKey ?? deriveViewMode(app.mounted, tasks).highlightSessionKey ?? app.mounted?.sessionKey;
+  const rows = buildSessionRows(ensurePinnedTask(tasks, app.pinnedDetail), { highlightSessionKey: pinnedSessionKey });
   // The pinned (focused/mounted) session always shows, finished or not —
   // a task completing is exactly when its result matters most. The Active
   // filter only ever declutters everything else.
   const visibleRows = filterRows(rows, app.view, pinnedSessionKey);
 
   if (visibleRows.length === 0) {
-    if (app.tasks.length === 0) {
+    if (tasks.length === 0) {
       root.append(el("div", { class: "cc-empty", role: "status" }, [
         el("span", { class: "cc-empty-icon", "aria-hidden": "true" }, ["○"]),
         el("div", {}, [
@@ -764,8 +860,8 @@ function renderInline(root) {
 }
 
 function renderFullscreen(root) {
-  const rows = buildSessionRows(ensurePinnedTask(app.tasks, app.pinnedDetail), { highlightSessionKey: app.selectedSessionKey });
-  const visibleRows = filterRows(rows, app.view, app.selectedSessionKey);
+  const rows = buildSessionRows(ensurePinnedTask(app.tasks, app.selectedDetail), { highlightSessionKey: app.selectedSessionKey });
+  const visibleRows = filterRows(rows, FULLSCREEN_ROW_VIEW, app.selectedSessionKey);
 
   const header = el("div", { class: "cc-fs-header" }, [
     el("div", { class: "cc-fs-title" }, ["Task Center"]),
@@ -807,7 +903,7 @@ function renderFullscreen(root) {
   // get_session(mode:"tasks") also returns plain TaskSummary (no
   // artifacts) — swap in the full snapshot when the selection matches the
   // one pinned/detail-fetched task, same as mergePinnedDetail() does for rows.
-  const selectedTask = selectedSummary ? mergePinnedDetail([selectedSummary], app.pinnedDetail)[0] : selectedSummary;
+  const selectedTask = selectedSummary ? mergePinnedDetail([selectedSummary], app.selectedDetail)[0] : selectedSummary;
 
   const taskList = el(
     "div",

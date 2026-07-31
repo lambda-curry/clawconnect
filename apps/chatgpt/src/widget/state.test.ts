@@ -20,6 +20,7 @@ import {
   preferSnapshot,
   resolveScope,
   filterTasksByScope,
+  resolveCompactSelection,
   reconcileTaskList,
   formatElapsed,
   isStale,
@@ -522,6 +523,33 @@ describe("conversation scope fallback", () => {
     expect(scope).toEqual({ scoped: false, sessionKeys: null });
     const tasks = [task({ sessionKey: "s1" }), task({ sessionKey: "unrelated" })];
     expect(filterTasksByScope(tasks, scope)).toHaveLength(2);
+  });
+});
+
+describe("compact selection policy", () => {
+  it("holds the current selection while it still has work in view", () => {
+    const tasks = [task({ sessionKey: "s1" }), task({ sessionKey: "s2", lastEventAt: 9000 })];
+    expect(resolveCompactSelection(null, tasks, "s1")).toBe("s1");
+  });
+
+  it("keeps the mounted session pinned even once it drops out of list_tasks(view:\"active\")", () => {
+    const tasks = [task({ sessionKey: "other", lastEventAt: 9000 })];
+    expect(resolveCompactSelection({ sessionKey: "mine" }, tasks, "mine")).toBe("mine");
+  });
+
+  it("re-runs from scratch when the pinned session is gone — the Task Center round trip", () => {
+    // s1 vanished while the Task Center was open; the pin must move to real
+    // live work rather than pointing at a session with no rows behind it.
+    const tasks = [task({ sessionKey: "s2", lastEventAt: 2000 }), task({ sessionKey: "s3", lastEventAt: 3000 })];
+    expect(resolveCompactSelection(null, tasks, "s1")).toBe("s3");
+  });
+
+  it("leaves a terminal-only card unpinned rather than resurrecting finished work", () => {
+    // A pin forces its row past the Active filter (filterRows), so pinning
+    // here would show completed work on a card nobody pointed at it.
+    const tasks = [task({ sessionKey: "s2", status: "done", lastEventAt: 3000 })];
+    expect(resolveCompactSelection(null, tasks, "s1")).toBeUndefined();
+    expect(resolveCompactSelection(null, [], null)).toBeUndefined();
   });
 });
 
