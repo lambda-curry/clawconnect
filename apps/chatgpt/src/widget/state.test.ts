@@ -9,6 +9,7 @@ import {
   expandSessionRow,
   mergePinnedDetail,
   ensurePinnedTask,
+  isTaskSnapshot,
   deriveCardTabs,
   defaultCardTab,
   isLikelyMarkdown,
@@ -553,6 +554,31 @@ describe("compact selection policy", () => {
   });
 });
 
+describe("get_task payload discrimination", () => {
+  it("accepts a real snapshot and rejects the not-found envelope that carries the same id", () => {
+    expect(isTaskSnapshot(task())).toBe(true);
+    // app.ts's reply for a pruned or unauthorized id.
+    expect(isTaskSnapshot({ taskId: "task-1", status: "error", error: "Task not found." })).toBe(false);
+    expect(isTaskSnapshot(null)).toBe(false);
+    expect(isTaskSnapshot({ sessionKey: "s1", status: "running" })).toBe(false);
+  });
+
+  it("keeps a genuinely errored job, because \"error\" is a real JobStatus", () => {
+    // Discriminating on status would throw away the failed run whose
+    // diagnostics the card exists to show.
+    expect(isTaskSnapshot(task({ status: "error", error: "boom" }))).toBe(true);
+  });
+
+  it("a rejected envelope leaves the retained row untouched", () => {
+    const known = task({ taskId: "a", jobId: "a", status: "done", summary: "All finished" });
+    // Deliberately not a WidgetTask — no sessionKey — which is exactly what
+    // isTaskSnapshot detects, so the cast is the point of the fixture.
+    const envelope = { taskId: "a", status: "error", error: "Task not found." } as unknown as Parameters<typeof ensurePinnedTask>[1];
+    const detail = isTaskSnapshot(envelope) ? envelope : null;
+    expect(ensurePinnedTask([known], detail)).toEqual([known]);
+  });
+});
+
 describe("resume reconciliation", () => {
   it("keeps known live work during a transient empty list response", () => {
     const live = task({ status: "running" });
@@ -561,6 +587,47 @@ describe("resume reconciliation", () => {
 
   it("accepts an empty list after all known work is terminal", () => {
     expect(reconcileTaskList([task({ status: "done" })], [])).toEqual([]);
+  });
+
+  it("retains a task the incoming read omits, so finishing work stays visible", () => {
+    // list_tasks drops a task the instant it finishes (and the server can prune
+    // one outright). With other work still active the read is non-empty, so
+    // replacing wholesale dropped the finished run entirely and the card lost
+    // the summary the user was waiting for.
+    const finished = task({ taskId: "a", jobId: "a", status: "done" });
+    const stillRunning = task({ taskId: "b", jobId: "b", status: "running" });
+    const merged = reconcileTaskList([finished, stillRunning], [stillRunning]);
+    expect(merged.map((t) => t.taskId).sort((x, y) => String(x).localeCompare(String(y)))).toEqual(["a", "b"]);
+  });
+
+  it("lets the incoming read win for a task it does contain", () => {
+    const before = task({ taskId: "a", jobId: "a", status: "running" });
+    const after = task({ taskId: "a", jobId: "a", status: "done" });
+    expect(reconcileTaskList([before], [after])).toEqual([after]);
+  });
+
+  it("does not duplicate a task present in both lists", () => {
+    const t = task({ taskId: "a", jobId: "a", status: "running" });
+    expect(reconcileTaskList([t], [t])).toHaveLength(1);
+  });
+
+  it("bounds retention to the sessions the card knows about", () => {
+    // The read is unscoped (view:"all", so state is complete and the view
+    // filters). Without a bound, retention would accumulate every conversation's
+    // tasks for the life of the card and shouldPoll would never settle. Foreign
+    // sessions are re-supplied whole by each read, which is all the Task Center
+    // needs.
+    const mine = task({ taskId: "a", jobId: "a", sessionKey: "mine", status: "done" });
+    const foreign = task({ taskId: "z", jobId: "z", sessionKey: "theirs", status: "running" });
+    const incoming = [task({ taskId: "b", jobId: "b", sessionKey: "mine", status: "running" })];
+    const merged = reconcileTaskList([mine, foreign], incoming, ["mine"]);
+    expect(merged.map((t) => t.taskId).sort((x, y) => String(x).localeCompare(String(y)))).toEqual(["a", "b"]);
+  });
+
+  it("retains everything when no bound is given", () => {
+    const foreign = task({ taskId: "z", jobId: "z", sessionKey: "theirs", status: "running" });
+    const incoming = [task({ taskId: "b", jobId: "b", sessionKey: "mine", status: "running" })];
+    expect(reconcileTaskList([foreign], incoming).map((t) => t.taskId).sort((x, y) => String(x).localeCompare(String(y)))).toEqual(["b", "z"]);
   });
 });
 

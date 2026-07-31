@@ -231,6 +231,30 @@ export function mergePinnedDetail(tasks, pinnedDetail) {
 }
 
 /**
+ * Whether a get_task payload is an actual task snapshot rather than an error
+ * envelope. app.ts answers a pruned/unauthorized id with
+ * `{ taskId, status: "error", error: "Task not found." }` — which carries an id,
+ * so an id check alone accepts it, and mergePinnedDetail then overwrites a
+ * perfectly good row with it. That directly undoes the retention guarantee: the
+ * card holds a task the read omitted, then replaces it with the not-found reply
+ * to the very same id.
+ *
+ * `sessionKey` is the discriminator, not `status`: "error" is a real JobStatus
+ * (see packages/core/src/types.ts) for a job that genuinely failed, and
+ * discarding those would lose the diagnostics the card exists to show. Every
+ * real snapshot carries sessionKey; the error envelope never does. It is also
+ * what a row is keyed by — buildSessionRows would file a sessionKey-less
+ * payload under `undefined` and invent a bogus session row.
+ *
+ * @param {Partial<WidgetTask> | null | undefined} snapshot @returns {boolean}
+ */
+export function isTaskSnapshot(snapshot) {
+  if (!snapshot) return false;
+  const id = snapshot.taskId ?? snapshot.jobId;
+  return typeof id === "string" && id.length > 0 && typeof snapshot.sessionKey === "string" && snapshot.sessionKey.length > 0;
+}
+
+/**
  * mergePinnedDetail, plus: adds the pinned task when it isn't in `tasks` at
  * all. list_tasks(view:"active") intentionally omits terminal work, so the
  * instant the focused task completes it drops out of the very list the card
@@ -631,14 +655,46 @@ export function filterTasksByScope(tasks, scope) {
   return tasks.filter((t) => allowed.has(t.sessionKey));
 }
 
-/** Keep known live work visible when a suspended/backgrounded host resumes
- * with a transient empty list response. A later snapshot can still replace
- * it; this only prevents a false empty state during reconciliation. */
-export function reconcileTaskList(previous, next) {
+/**
+ * Folds a fresh read into the canonical store, preserving three things at once:
+ *
+ * 1. A transient empty response (suspended/backgrounded host resuming) must not
+ *    blank out known live work. A later snapshot can still replace it.
+ * 2. A read can legitimately omit a task we already know about — a task can be
+ *    pruned server-side, and list_tasks(view:"active") drops one the instant it
+ *    finishes, which is exactly the transition the card exists to show.
+ *    Replacing wholesale meant a run that completed while other work was still
+ *    active vanished instead of showing its summary. So: merge by taskId,
+ *    incoming always wins for a task it contains, omitted prior entries stay.
+ * 3. That retention has to be *bounded*, or an unscoped read (the card reads
+ *    view:"all" so state is complete and the view filters — see refresh()) would
+ *    accumulate every task of every conversation for the life of the card, and
+ *    shouldPoll would never settle. `retainSessionKeys` is that bound: the
+ *    sessions this card actually knows about. Everything else is re-supplied
+ *    whole by the next read, which is all the Task Center needs.
+ *
+ * Passing no bound retains everything, which is what a caller that has already
+ * narrowed `previous` wants.
+ *
+ * @param {WidgetTask[]} previous @param {WidgetTask[]} next
+ * @param {Iterable<string>} [retainSessionKeys]
+ * @returns {WidgetTask[]}
+ */
+export function reconcileTaskList(previous, next, retainSessionKeys) {
   const prior = previous ?? [];
   const incoming = next ?? [];
   const hadLiveWork = prior.some((task) => !isTerminalGroup(groupStatus(task.status)));
-  return incoming.length === 0 && hadLiveWork ? prior : incoming;
+  if (incoming.length === 0) return hadLiveWork ? prior : incoming;
+
+  const retain = retainSessionKeys ? new Set(retainSessionKeys) : null;
+  const byId = new Map();
+  const keyOf = (t) => t.taskId ?? t.jobId;
+  for (const task of prior) {
+    if (retain && !retain.has(task.sessionKey)) continue;
+    byId.set(keyOf(task), task);
+  }
+  for (const task of incoming) byId.set(keyOf(task), task);
+  return [...byId.values()];
 }
 
 /**

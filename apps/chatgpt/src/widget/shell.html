@@ -85,8 +85,12 @@
   .cc-pill--completed { color: var(--cc-completed); }
   .cc-pill--failed { color: var(--cc-failed); }
   .cc-meta { color: var(--cc-fg-muted); font-size: 11.5px; margin-top: 3px; }
-  .cc-update { display: flex; align-items: baseline; gap: 6px; margin-top: 8px; padding-top: 7px; border-top: 1px solid var(--cc-border); color: var(--cc-fg-muted); font-size: 11px; }
+  /* One line, always. A long tool invocation used to wrap to two or three and
+     the card's height jumped on every poll — the row is a glanceable "still
+     alive" signal, not something to read in full. */
+  .cc-update { display: flex; align-items: baseline; gap: 6px; margin-top: 8px; padding-top: 7px; border-top: 1px solid var(--cc-border); color: var(--cc-fg-muted); font-size: 11px; overflow: hidden; }
   .cc-update-icon { flex: none; }
+  .cc-update-text { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .cc-counts { color: var(--cc-fg-muted); font-size: 11.5px; margin-top: 6px; }
   .cc-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 5px; }
   .cc-dot--active { background: var(--cc-active); }
@@ -96,7 +100,12 @@
   .cc-history { margin-top: 8px; padding-left: 12px; border-left: 2px solid var(--cc-border); }
   .cc-history-item { font-size: 12px; padding: 3px 0; color: var(--cc-fg-muted); }
   .cc-actions { margin-top: 10px; display: flex; gap: 6px; flex-wrap: wrap; }
-  .cc-card-tabs { display: flex; gap: 2px; margin: -12px -14px 10px; padding: 0 12px; border-bottom: 1px solid var(--cc-border); background: var(--cc-bg-subtle); }
+  /* Full-bleed: -14px sides and -12px top cancel .cc-row's 12px 14px padding
+     so the strip's background and border reach the card edges. Both negatives
+     are only correct because this strip is the card's FIRST child — if it ever
+     moves back below the title/meta rows, the top margin must become positive
+     or it will overlap them (it did, by exactly 12px, until 9929076). */
+  .cc-card-tabs { display: flex; gap: 2px; margin: -12px -14px 10px; padding: 0 12px; border-bottom: 1px solid var(--cc-border); background: var(--cc-bg-subtle); border-radius: 9px 9px 0 0; }
   .cc-card-tab { flex: 0 1 auto; min-width: 0; padding: 6px 10px 5px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--cc-fg-muted); font: inherit; font-size: 11px; cursor: pointer; }
   .cc-card-tab:hover { color: var(--cc-fg); background: var(--cc-action-hover); }
   .cc-card-tab[aria-selected="true"] { border-bottom-color: var(--cc-fg); color: var(--cc-fg); font-weight: 600; }
@@ -289,6 +298,33 @@ const bridge = (() => {
     return output?.structuredContent ?? output ?? null;
   }
 
+  /**
+   * Fires whenever the mount payload may have become readable.
+   *
+   * Reading window.openai.toolOutput once at boot is a race: ChatGPT populates
+   * its globals asynchronously and announces them with openai:set_globals, so
+   * the payload is frequently NOT there when this script first runs. Losing
+   * that read is unrecoverable — `mounted` stays null and knownSessionKeys
+   * stays empty for the life of the card, so it has no session to poll and
+   * renders the "No active tasks" empty state while the task runs fine
+   * server-side. Observed live: backend healthy, fresh events recorded, valid
+   * session key, and a card that never registered it.
+   */
+  function onMountData(cb) {
+    window.addEventListener("openai:set_globals", () => cb(readMountData()));
+    // Standard MCP Apps path: the host pushes the tool result as a
+    // notification. initMcpAppsFallback's router only resolves *responses*
+    // (it returns early when msg.id is undefined), so notifications need
+    // their own listener or the spec-compliant mount path never lands.
+    window.addEventListener("message", (event) => {
+      const msg = event.data;
+      if (!msg || typeof msg !== "object" || msg.jsonrpc !== "2.0") return;
+      if (msg.method !== "ui/notifications/tool-result") return;
+      const params = msg.params ?? {};
+      cb(params.structuredContent ?? params ?? null);
+    });
+  }
+
   function readWidgetState() {
     return viaWindowOpenAI()?.widgetState ?? null;
   }
@@ -308,6 +344,7 @@ const bridge = (() => {
   return {
     callTool,
     readMountData,
+    onMountData,
     readWidgetState,
     saveWidgetState,
     currentTheme,
@@ -353,8 +390,11 @@ const app = {
   timeline: [], // deriveTimeline() output for the one focused/highlighted task — the actual evidence behind "is working"
   timelineFor: null, // taskId the current timeline belongs to, so a stale fetch never renders under the wrong row
   pinnedDetail: null, // full JobSnapshot (artifacts included) for compact's pinned task — see mergePinnedDetail()
-  cardTab: "response",
-  cardTabFor: null,
+  // Per task, not global: renderRow runs once per card, so a single shared
+  // cardTab/cardTabFor pair made the *last* rendered row reset the selection
+  // for every other row. With two cards open, tapping "Request" re-rendered,
+  // the reset fired, and the tap silently undid itself.
+  cardTabByTask: new Map(),
   // Fullscreen — see openTaskCenter(). displayMode reflects what the host
   // actually confirmed, never what was merely requested.
   displayMode: "inline",
@@ -470,17 +510,44 @@ bridge.onDisplayModeChange((mode) => {
   }
 });
 
+/**
+ * Register the session this card was mounted for. Idempotent, and safe to call
+ * again when a later payload arrives — returns true only when something new was
+ * learned, so callers can avoid a pointless re-render.
+ *
+ * Also seeds compact's pinned session: adopting a mount payload is exactly when
+ * the compact card learns what it is about, and resolveCompactSelection's rule 2
+ * would pick the same key on the next poll anyway. Seeding here means the very
+ * first render after a late mount is already pinned correctly.
+ */
+function adoptMountData(mountData) {
+  if (!mountData?.jobId && !mountData?.taskId) return false;
+  const taskId = mountData.taskId ?? mountData.jobId;
+  const sessionKey = mountData.sessionKey;
+  const isNew = app.mounted?.taskId !== taskId || (sessionKey && !app.knownSessionKeys.has(sessionKey));
+  app.mounted = { taskId, sessionKey };
+  if (sessionKey) app.knownSessionKeys.add(sessionKey);
+  if (sessionKey && !app.compactSessionKey) app.compactSessionKey = sessionKey;
+  return isNew;
+}
+
 function rehydrate() {
-  const mountData = bridge.readMountData();
-  if (mountData?.jobId || mountData?.taskId) {
-    app.mounted = { taskId: mountData.taskId ?? mountData.jobId, sessionKey: mountData.sessionKey };
-    app.knownSessionKeys.add(app.mounted.sessionKey);
-  }
+  adoptMountData(bridge.readMountData());
   const saved = bridge.readWidgetState();
   if (saved?.knownSessionKeys) for (const k of saved.knownSessionKeys) app.knownSessionKeys.add(k);
   if (!app.mounted && saved?.mounted) app.mounted = saved.mounted;
-  app.compactSessionKey = app.mounted?.sessionKey ?? null;
+  app.compactSessionKey = app.compactSessionKey ?? app.mounted?.sessionKey ?? null;
 }
+
+// The mount payload can land after boot (see bridge.onMountData). Without this
+// the card never learns its own session and polls nothing.
+bridge.onMountData((mountData) => {
+  if (!adoptMountData(mountData)) return;
+  persist();
+  app.reconcileRequested = true;
+  render();
+  refresh();
+});
 
 function persist() {
   bridge.saveWidgetState({ mounted: app.mounted, knownSessionKeys: [...app.knownSessionKeys] });
@@ -521,13 +588,23 @@ async function refresh() {
     // because the branch that would use it never ran. One list_tasks call
     // per cycle is a small, already-bounded cost; the alternative is a
     // card that can get stuck narrow forever.
-    const listView = fullscreen || app.allActivity ? "all" : "active";
+    // Always read the complete list, never the server's "active" filter, and
+    // never a breadth that depends on which surface is open. view:"active"
+    // omits terminal work, so the moment a task finished it fell out of the
+    // read and the card lost the very thing the user was waiting for. State
+    // should be complete and the *view* should filter — which is the same
+    // principle that keeps compact scope out of the store below, so one read
+    // now serves both surfaces.
+    const listView = "all";
     const result = await bridge.callTool("list_tasks", { view: listView });
     const tasks = result?.structuredContent?.tasks ?? result?.tasks ?? [];
     // Stored as fetched — the canonical set. Compact scope is a render-time
     // view (compactVisibleTasks), not a narrowing of the store, because the
-    // store is shared with the Task Center's deliberately wider read.
-    app.tasks = reconcileTaskList(app.tasks, tasks);
+    // store is shared with the Task Center, which renders every session.
+    // Retention is bounded to this card's own sessions: that bound used to be
+    // the fetch-time scope filter, which a render-time view can no longer
+    // provide. See reconcileTaskList.
+    app.tasks = reconcileTaskList(app.tasks, tasks, app.knownSessionKeys);
 
     const visible = fullscreen ? app.tasks : compactVisibleTasks();
     let pinnedSessionKey;
@@ -573,7 +650,11 @@ async function refresh() {
       const snapshot = detail?.structuredContent ?? detail;
       const prompt = promptDetail?.structuredContent?.prompt ?? promptDetail?.prompt;
       if (prompt?.task != null) app.promptText.set(taskId, prompt.task);
-      const resolved = snapshot?.jobId || snapshot?.taskId ? snapshot : null;
+      // isTaskSnapshot, not a bare id check: a not-found reply carries the id
+      // it was asked about, and merging it would overwrite a retained row with
+      // an error envelope — cancelling the retention guarantee for exactly the
+      // task the card is pinned to.
+      const resolved = isTaskSnapshot(snapshot) ? snapshot : null;
       // Each surface keeps its own detail snapshot. ensurePinnedTask *adds* a
       // detail that isn't in the list yet, so a shared field would inject the
       // Task Center's selection into the compact card as a row of its own.
@@ -631,6 +712,54 @@ function reconcileOnResume() {
 document.addEventListener("visibilitychange", reconcileOnResume);
 window.addEventListener("focus", reconcileOnResume);
 window.addEventListener("pageshow", reconcileOnResume);
+
+// visibilitychange/focus only fire when the whole page backgrounds. Switching
+// between chats inside the ChatGPT app doesn't background anything, so a card
+// the user just scrolled back to can be a full poll interval stale with no
+// resume signal to hang a refresh on. Touching or hovering the card is the
+// clearest "I am looking at this now" signal available, so treat it as one —
+// throttled, and it only ever reads (get_task never waits server-side).
+//
+// `click`, never `pointerdown`: render() replaces the whole tree, so a refresh
+// fired on pointerdown tears the button out from under the finger that is
+// pressing it and the click never lands on the original node. Caught by driving
+// a real mouse — the Task Center button silently did nothing, while a
+// programmatic .click() (which skips pointerdown entirely) worked fine. `click`
+// fires after the target's own handler has run, so the gesture always completes
+// first. pointerenter keeps the desktop hover signal, and hovering moves no
+// nodes.
+let lastInteractionRefresh = 0;
+function refreshOnInteraction() {
+  const now = Date.now();
+  if (now - lastInteractionRefresh < 2000) return;
+  lastInteractionRefresh = now;
+  reconcileOnResume();
+}
+window.addEventListener("click", refreshOnInteraction, { passive: true });
+window.addEventListener("pointerenter", refreshOnInteraction, { passive: true });
+
+/**
+ * Remember the tab per task and, for "request", fetch that task's prompt now.
+ *
+ * refresh() only fetches the prompt for the pinned session (bounded reads), so a
+ * non-pinned card's Request tab would otherwise sit on "Loading request…"
+ * forever. This is user-initiated and exactly one call.
+ */
+async function selectCardTab(taskId, tab, task) {
+  app.cardTabByTask.set(taskId, tab);
+  render();
+  if (tab !== "request" || app.promptText.has(taskId) || !canReadPrompt(task)) return;
+  try {
+    const result = await bridge.callTool("get_task", { taskId, detail: "prompt" });
+    const prompt = result?.structuredContent?.prompt ?? result?.prompt;
+    if (prompt?.task != null) {
+      app.promptText.set(taskId, prompt.task);
+      render();
+    }
+  } catch {
+    // Leave the loading state; the next refresh of a pinned row may still fill it.
+  }
+}
 
 async function toggleExpand(sessionKey) {
   if (app.historyOpen.has(sessionKey)) {
@@ -691,7 +820,8 @@ function renderRow(row, opts = {}) {
   // The latest timeline item is the live evidence shown below the response.
   const latestEntry = taskId === app.timelineFor ? app.timeline[0] : undefined;
 
-  const children = [
+  const children = [];
+  const headChildren = [
     el("div", { class: "cc-head" }, [
       el("div", { class: "cc-title" }, [row.title]),
       el("span", { class: `cc-pill cc-pill--${row.group}` }, [`${pill.icon} ${pill.label}`]),
@@ -701,11 +831,8 @@ function renderRow(row, opts = {}) {
     ]),
   ];
 
-  if (app.cardTabFor !== taskId) {
-    app.cardTabFor = taskId;
-    app.cardTab = defaultCardTab(row.latestTask);
-  }
   const cardTabs = deriveCardTabs(row.latestTask);
+  const activeTab = app.cardTabByTask.get(taskId) ?? defaultCardTab(row.latestTask);
   const tabLabels = { response: "Response", diagnostics: "Diagnostics", request: "Request" };
   const tablistId = `cc-tabs-${String(taskId).replace(/[^a-zA-Z0-9_-]/g, "-")}`;
   children.push(
@@ -715,13 +842,13 @@ function renderRow(row, opts = {}) {
         class: "cc-card-tab",
         role: "tab",
         id: `${tablistId}-${tab}`,
-        "aria-selected": app.cardTab === tab ? "true" : "false",
+        "aria-selected": activeTab === tab ? "true" : "false",
         "aria-controls": `${tablistId}-panel`,
-        tabindex: app.cardTab === tab ? "0" : "-1",
-        onclick: (e) => { e.stopPropagation(); app.cardTab = tab; render(); },
+        tabindex: activeTab === tab ? "0" : "-1",
+        onclick: (e) => { e.stopPropagation(); selectCardTab(taskId, tab, row.latestTask); },
         onkeydown: (e) => {
-          const next = nextCardTab(cardTabs, app.cardTab, e.key);
-          if (next !== app.cardTab) { e.preventDefault(); app.cardTab = next; render(); document.getElementById(`${tablistId}-${next}`)?.focus(); }
+          const next = nextCardTab(cardTabs, activeTab, e.key);
+          if (next !== activeTab) { e.preventDefault(); selectCardTab(taskId, next, row.latestTask); document.getElementById(`${tablistId}-${next}`)?.focus(); }
         },
       }, [tabLabels[tab]]),
       ),
@@ -737,8 +864,11 @@ function renderRow(row, opts = {}) {
     ]),
   );
 
+  // Tabs lead the card, then the title row and meta line beneath them.
+  children.push(...headChildren);
+
   const panelChildren = [];
-  if (app.cardTab === "request") {
+  if (activeTab === "request") {
     if (promptResolved) {
       panelChildren.push(
         el("div", { class: "cc-prompt" }, [
@@ -749,7 +879,7 @@ function renderRow(row, opts = {}) {
     } else if (canReadPrompt(row.latestTask)) {
       panelChildren.push(el("div", { class: "cc-prompt cc-prompt-loading" }, ["Loading request…"]));
     }
-  } else if (app.cardTab === "diagnostics") {
+  } else if (activeTab === "diagnostics") {
     const info = row.latestTask.error ?? row.latestTask.errorInfo?.message ?? row.latestTask.errorInfo?.category ?? "The task failed without additional diagnostics.";
     panelChildren.push(el("div", { class: "cc-diagnostics" }, [String(info)]));
   } else {
@@ -763,7 +893,7 @@ function renderRow(row, opts = {}) {
       if (!latestEntry) panelChildren.push(el("span", { class: "cc-live-loading", role: "status", "aria-label": "Task is running" }, []));
     }
   }
-  children.push(el("div", { role: "tabpanel", id: `${tablistId}-panel`, "aria-labelledby": `${tablistId}-${app.cardTab}` }, panelChildren));
+  children.push(el("div", { role: "tabpanel", id: `${tablistId}-panel`, "aria-labelledby": `${tablistId}-${activeTab}` }, panelChildren));
 
   // The actual evidence behind "is working" — a real log line, not just a
   // status word. Only present for the one row currently in focus/highlighted
@@ -774,7 +904,7 @@ function renderRow(row, opts = {}) {
         // Lifecycle/tool rows are evidence, not task status. Keep them
         // neutral unless the event itself carried an error bit.
         el("span", { class: "cc-update-icon" }, [latestEntry.isError ? "✕" : "•"]),
-        el("span", {}, [latestEntry.count > 1 ? `${latestEntry.text} ×${latestEntry.count}` : latestEntry.text]),
+        el("span", { class: "cc-update-text" }, [latestEntry.count > 1 ? `${latestEntry.text} ×${latestEntry.count}` : latestEntry.text]),
       ]),
     );
   }

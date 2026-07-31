@@ -218,8 +218,6 @@ async function settle(): Promise<void> {
 
 const rowTitles = (root: El) => withClass(root, "cc-row").map((row) => textOf(withClass(row, "cc-title")[0]));
 const sidebarTitles = (root: El) => withClass(root, "cc-fs-session").map((row) => textOf(withClass(row, "cc-title")[0]));
-const lastListTasksView = (host: ReturnType<typeof createHost>) =>
-  [...host.calls].reverse().find((c) => c.name === "list_tasks")?.args.view;
 
 describe("compact -> Task Center -> compact", () => {
   it("restores the compact card's own sessions after the Task Center closes", async () => {
@@ -228,27 +226,44 @@ describe("compact -> Task Center -> compact", () => {
     const root = mount(host);
     await settle();
 
-    // Compact: scoped to this card's own session, even though list_tasks
-    // returns every conversation's active work.
+    // Compact: scoped to this card's own session, even though the read returns
+    // every conversation's work. The scope is a *view*, never the read.
     expect(rowTitles(root)).toEqual(["clawdy is working…"]);
-    expect(lastListTasksView(host)).toBe("active");
 
     click(findButton(root, "Open Task Center"));
     await settle();
 
     // Task Center: every session, every group — that is the point of it.
     expect(sidebarTitles(root)).toEqual(["clawdy is working…", "scout is working…", "Old work"]);
-    expect(lastListTasksView(host)).toBe("all");
 
     click(findButton(root, "Close"));
     await settle();
 
     // ...and closing it hands the compact card back exactly what it had.
     expect(rowTitles(root)).toEqual(["clawdy is working…"]);
-    expect(lastListTasksView(host)).toBe("active");
   });
 
-  it("keeps polling at compact breadth after the Task Center closes", async () => {
+  it("reads the complete list on every surface, so opening the Task Center changes no fetch parameter", async () => {
+    // Two reconciled rules meet here. The read is always view:"all" (a task
+    // dropped out of view:"active" the instant it finished — the transition the
+    // card exists to show), and the surface never varies the read (varying it,
+    // then not restoring it, is what leaked the Task Center's contents into the
+    // compact card). So the parameter is constant across the whole round trip.
+    const world = { tasks: [A1, B1, C1] };
+    const host = createHost({ mounted: A1, world });
+    const root = mount(host);
+    await settle();
+    click(findButton(root, "Open Task Center"));
+    await settle();
+    click(findButton(root, "Close"));
+    await settle();
+
+    const views = host.calls.filter((c) => c.name === "list_tasks").map((c) => c.args.view);
+    expect(views.length).toBeGreaterThan(2);
+    expect([...new Set(views)]).toEqual(["all"]);
+  });
+
+  it("keeps polling after the Task Center closes, still showing only its own session", async () => {
     const world = { tasks: [A1, B1, C1] };
     const host = createHost({ mounted: A1, world });
     const root = mount(host);
@@ -265,32 +280,82 @@ describe("compact -> Task Center -> compact", () => {
     const after = host.calls.filter((c) => c.name === "list_tasks").length;
 
     expect(after).toBeGreaterThan(before);
-    expect(lastListTasksView(host)).toBe("active");
     expect(rowTitles(root)).toEqual(["clawdy is working…"]);
   });
 
-  it("re-runs the compact selection policy when the pinned session vanished while expanded", async () => {
-    // No mounted run: this card's scope is the sessions it remembers, and its
-    // pinned session is whichever of them is doing live work.
+  it("pins the newest live session when there is no mounted run to anchor to", async () => {
+    // resolveCompactSelection rule 3, the reachable one: a card with remembered
+    // sessions but no mount payload has no anchor, so it focuses real live work.
     const world = { tasks: [A1, B1] };
     const host = createHost({ knownSessionKeys: ["sess-a", "sess-b"], world });
     const root = mount(host);
     await settle();
 
-    // sess-b is newer, so compact pins it — pinned rows sort first.
+    // sess-b is newer; the pinned row sorts first.
     expect(rowTitles(root)[0]).toBe("scout is working…");
+    expect(host.calls.some((c) => c.name === "get_task" && c.args.taskId === "b1")).toBe(true);
+  });
+
+  it("keeps the compact pin across the round trip even when the Task Center selects elsewhere", async () => {
+    const world = { tasks: [A1, B1, C1] };
+    const host = createHost({ mounted: A1, world });
+    const root = mount(host);
+    await settle();
 
     click(findButton(root, "Open Task Center"));
     await settle();
-
-    // sess-b's task ages out of the store entirely while the Task Center is up.
-    world.tasks = [A1, C1];
+    const scout = withClass(root, "cc-fs-session").find((n) => textOf(n).includes("scout"));
+    if (!scout) throw new Error("no scout session in the sidebar");
+    click(scout);
+    await settle();
     click(findButton(root, "Close"));
     await settle();
 
-    // The pin is re-resolved rather than left dangling on a session that is
-    // gone — and sess-c stays out, being outside this card's scope.
+    // The Task Center's selection is its own; compact comes back to its mount.
     expect(rowTitles(root)).toEqual(["clawdy is working…"]);
-    expect(host.calls.some((c) => c.name === "get_task" && c.args.taskId === "a1")).toBe(true);
+    const lastDetail = [...host.calls].reverse().find((c) => c.name === "get_task" && c.args.detail === "full");
+    expect(lastDetail?.args.taskId).toBe("a1");
+  });
+});
+
+describe("canonical store: retention and its bound", () => {
+  it("keeps a known session's task visible after it drops out of the read", async () => {
+    // The finished-task guarantee, end to end: a read that omits a task the card
+    // already knows about must not lose it. Here b1 leaves the read entirely
+    // while sess-b is a session this card knows.
+    const world = { tasks: [A1, B1] };
+    const host = createHost({ knownSessionKeys: ["sess-a", "sess-b"], world });
+    const root = mount(host);
+    await settle();
+    expect(rowTitles(root)).toContain("scout is working…");
+
+    world.tasks = [A1];
+    await new Promise((resolve) => setTimeout(resolve, 3_000));
+    await settle();
+
+    expect(rowTitles(root)).toContain("scout is working…");
+  });
+
+  it("does not retain a session the card does not know about", async () => {
+    // ...and that retention is bounded, or an unscoped read would accumulate
+    // every conversation's tasks for the life of the card and shouldPoll would
+    // never settle. sess-c is never in scope, so it is re-supplied by each read
+    // and never held.
+    const world = { tasks: [A1, C1] };
+    const host = createHost({ mounted: A1, world });
+    const root = mount(host);
+    await settle();
+
+    click(findButton(root, "Open Task Center"));
+    await settle();
+    expect(sidebarTitles(root)).toEqual(["clawdy is working…", "Old work"]);
+
+    world.tasks = [A1];
+    click(findButton(root, "Close"));
+    await settle();
+    click(findButton(root, "Open Task Center"));
+    await settle();
+
+    expect(sidebarTitles(root)).toEqual(["clawdy is working…"]);
   });
 });
