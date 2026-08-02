@@ -12,6 +12,16 @@ import type {
   TaskInput,
 } from "./types.ts";
 
+/**
+ * Wire-payload size estimate for telemetry only — never logged content, just
+ * a byte count. Close enough to the real structuredContent size (which adds
+ * `isTerminal`/`isError`, ~20 bytes) without needing to import the
+ * structured-content builder here.
+ */
+function measurePayloadBytes(snapshot: unknown): number {
+  return Buffer.byteLength(JSON.stringify(snapshot), "utf8");
+}
+
 export function runTask(pool: GatewayPool, input: TaskInput): RunTaskResult {
   const start = Date.now();
   const entry = pool.forAgent(input.agent);
@@ -130,8 +140,9 @@ export async function checkTask(pool: GatewayPool, opts: CheckTaskOpts): Promise
     return notFound();
   }
 
-  const snapshot = entry.sessions.buildSnapshot(job);
+  const snapshot = entry.sessions.buildSnapshot(job, opts.knownLogCount);
   const isTerminal = job.status !== "running";
+  const withAgent = { ...snapshot, agent: entry.agent.id };
   recordTelemetry({
     tool: "check_task",
     jobId: job.jobId,
@@ -143,10 +154,13 @@ export async function checkTask(pool: GatewayPool, opts: CheckTaskOpts): Promise
     status: job.status,
     durationMs: Date.now() - start,
     terminalRetrieval: isTerminal,
+    payloadBytes: measurePayloadBytes(withAgent),
+    logEventsReturned: snapshot.logs.length,
+    logCursor: snapshot.logCursor,
   });
   return {
     found: true,
-    snapshot: { ...snapshot, agent: entry.agent.id },
+    snapshot: withAgent,
     isTerminal,
     isError: job.status === "error",
     continuePolling: !isTerminal,
@@ -158,7 +172,10 @@ export async function checkTask(pool: GatewayPool, opts: CheckTaskOpts): Promise
  * exists right now — including status="running" if that's the truth. This is
  * what distinguishes it from check_task (contract decision 6).
  */
-export function getTask(pool: GatewayPool, opts: { jobId?: string; sessionKey?: string; agent?: string }): CheckTaskResult {
+export function getTask(
+  pool: GatewayPool,
+  opts: { jobId?: string; sessionKey?: string; agent?: string; knownLogCount?: number },
+): CheckTaskResult {
   const start = Date.now();
   const entry = resolvePoolEntry(pool, opts);
   if (!entry) {
@@ -171,8 +188,9 @@ export function getTask(pool: GatewayPool, opts: { jobId?: string; sessionKey?: 
     return notFound();
   }
 
-  const snapshot = entry.sessions.buildSnapshot(job);
+  const snapshot = entry.sessions.buildSnapshot(job, opts.knownLogCount);
   const isTerminal = job.status !== "running";
+  const withAgent = { ...snapshot, agent: entry.agent.id };
   recordTelemetry({
     tool: "get_task",
     jobId: job.jobId,
@@ -183,10 +201,13 @@ export function getTask(pool: GatewayPool, opts: { jobId?: string; sessionKey?: 
     status: job.status,
     durationMs: Date.now() - start,
     terminalRetrieval: isTerminal,
+    payloadBytes: measurePayloadBytes(withAgent),
+    logEventsReturned: snapshot.logs.length,
+    logCursor: snapshot.logCursor,
   });
   return {
     found: true,
-    snapshot: { ...snapshot, agent: entry.agent.id },
+    snapshot: withAgent,
     isTerminal,
     isError: job.status === "error",
     continuePolling: !isTerminal,

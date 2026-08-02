@@ -8,7 +8,8 @@ import {
 import { classifyError } from "./errors.ts";
 import { OpenClawGateway } from "./gateway.ts";
 import type { JobStore, PersistedJob } from "./job-store.ts";
-import type { CheckMode, ContinuationState, Job, JobSnapshot, JobStatus, NextAction, TaskInput } from "./types.ts";
+import { projectLogWindow } from "./log-projection.ts";
+import type { CheckMode, ContinuationState, Job, JobSnapshot, JobStatus, LogEntry, NextAction, TaskInput } from "./types.ts";
 
 function readEnvMs(name: string, fallbackMs: number): number {
   const raw = process.env[name];
@@ -38,6 +39,21 @@ const MAX_WAIT_MS = readEnvMs("CLAWCONNECT_CHECK_MAX_WAIT_MS", 120_000);
 // windows above — a deployment watching long, chatty runs may want more
 // retained history than the default.
 const MAX_LOG_ENTRIES = readEnvMs("CLAWCONNECT_MAX_LOG_ENTRIES", 200);
+// "poll" mode's early-return wait: a lifecycle/recovery event always wakes
+// the wait immediately (it's a real state transition, never just cosmetic
+// tool chatter). A run of tool/tool-result-only activity instead has to
+// stay fresh for this long before it's worth ending the wait early — short
+// bursts of tool calls (an agent looping through several tool uses in a
+// couple hundred ms) collapse into one wake instead of one per event.
+const COSMETIC_POLL_DEBOUNCE_MS = readEnvMs("CLAWCONNECT_COSMETIC_POLL_DEBOUNCE_MS", 400);
+
+function pushLog(job: Pick<Job, "logs">, entry: { ts: number; type: string; text: string; isError?: boolean }): void {
+  if (job.logs.length >= MAX_LOG_ENTRIES) return;
+  // seq is 1-based and equal to the post-push array length — see LogEntry's
+  // doc comment in types.ts for why this is treated as an opaque cursor
+  // rather than "just" the index.
+  job.logs.push({ ...entry, seq: job.logs.length + 1 });
+}
 
 function resolveWaitMs(requested: number | undefined): number {
   if (requested === undefined || !Number.isFinite(requested)) return DEFAULT_WAIT_MS;
@@ -228,29 +244,24 @@ export class SessionManager {
     const jobId = randomUUID();
     const artifacts = emptyArtifacts();
     const now = Date.now();
-    const logs: Array<{ ts: number; type: string; text: string }> = [];
-
-    if (!input.sessionKey) {
-      logs.push({ ts: now, type: "lifecycle", text: `Started new thread session: ${sessionKey}` });
-    } else if (migratedFromLegacy) {
-      logs.push({
-        ts: now,
-        type: "lifecycle",
-        text: `Migrated legacy ChatGPT session to new thread: ${sessionKey}`,
-      });
-    }
+    const hasInitialLog = !input.sessionKey || migratedFromLegacy;
 
     const job: Job = {
       jobId,
       sessionKey,
       status: "running",
       startedAt: now,
-      lastEventAt: logs.length > 0 ? now : 0,
-      logs,
+      lastEventAt: hasInitialLog ? now : 0,
+      logs: [],
       artifacts,
       pollCount: 0,
       prompt: { task: input.task, context: input.context, senderName: input.senderName },
     };
+    if (!input.sessionKey) {
+      pushLog(job, { ts: now, type: "lifecycle", text: `Started new thread session: ${sessionKey}` });
+    } else if (migratedFromLegacy) {
+      pushLog(job, { ts: now, type: "lifecycle", text: `Migrated legacy ChatGPT session to new thread: ${sessionKey}` });
+    }
     this.jobs.set(jobId, job);
     this.latestJobBySession.set(sessionKey, jobId);
     const history = this.jobHistoryBySession.get(sessionKey) ?? [];
@@ -267,14 +278,12 @@ export class SessionManager {
     this.gateway
       .chat(sessionKey, message, TIMEOUT_MS, (event) => {
         job.lastEventAt = Date.now();
-        if (job.logs.length < MAX_LOG_ENTRIES) {
-          job.logs.push({
-            ts: Date.now(),
-            type: event.type,
-            text: event.text,
-            ...(event.type === "tool-result" && event.isError ? { isError: true } : {}),
-          });
-        }
+        pushLog(job, {
+          ts: Date.now(),
+          type: event.type,
+          text: event.text,
+          ...(event.type === "tool-result" && event.isError ? { isError: true } : {}),
+        });
         logDebug(
           `[job ${jobId.slice(0, 8)}] event #${job.logs.length}: ${event.type} - ${event.text.slice(0, 80)}`,
         );
@@ -360,14 +369,11 @@ export class SessionManager {
       idleTimeoutMs,
       hardCapMs,
     };
-    if (job.logs.length < MAX_LOG_ENTRIES) {
-      job.logs.push({
-        ts: Date.now(),
-        type: "recovery",
-        text:
-          "Recovering late transcript final text after live stream ended without visible final text",
-      });
-    }
+    pushLog(job, {
+      ts: Date.now(),
+      type: "recovery",
+      text: "Recovering late transcript final text after live stream ended without visible final text",
+    });
     logDebug(
       `[job ${jobId}] no live final text — starting transcript long-poll ` +
         `(idle-timeout=${idleTimeoutMs / 1000}s, hard-cap=${hardCapMs / 1000}s)`,
@@ -503,9 +509,17 @@ export class SessionManager {
     );
   }
 
-  buildSnapshot(job: Job): JobSnapshot {
+  /**
+   * `cursor` is the caller's last-seen `logCursor` (their `knownLogCount`).
+   * `logs`/`logCursor`/`logEventCount` come from projectLogWindow — a bounded
+   * projection of `job.logs`, never the raw accumulated array. Every other
+   * field (summary/artifacts/error/…) is unaffected by the cursor: the
+   * terminal/full-response content never depends on a prior delta.
+   */
+  buildSnapshot(job: Job, cursor?: number): JobSnapshot {
     const continuation = this.sessions.get(job.sessionKey);
     const continuePolling = job.status === "running";
+    const window = projectLogWindow(job.logs, cursor);
     return {
       jobId: job.jobId,
       sessionKey: job.sessionKey,
@@ -516,7 +530,9 @@ export class SessionManager {
       summary: job.summary,
       error: job.error,
       errorInfo: job.errorInfo,
-      logs: job.logs,
+      logs: window.events,
+      logCursor: window.cursor,
+      logEventCount: window.totalCount,
       artifacts: job.artifacts,
       recovery: job.recovery,
       pollCount: job.pollCount,
@@ -606,15 +622,29 @@ export class SessionManager {
       `[waitForJob] job ${job.jobId.slice(0, 8)} waiting mode=${mode} waitMs=${effectiveWaitMs} (known=${knownLogCount}, current=${job.logs.length})`,
     );
     const deadline = Date.now() + effectiveWaitMs;
+    // Batches cosmetic-only activity (tool/tool-result chatter) so a burst of
+    // several such entries wakes a "poll" mode wait once, not once per entry;
+    // a lifecycle/recovery entry — an actual state transition, not cosmetic —
+    // always wakes immediately, undebounced. See COSMETIC_POLL_DEBOUNCE_MS.
+    let cosmeticActivitySince: number | undefined;
     while (Date.now() < deadline && job.status === "running") {
       await new Promise((r) => setTimeout(r, 500));
       // In "poll" mode: return early on new logs (live progress for widgets)
       // In "wait" mode: only return on terminal state or timeout (fewer round-trips for agentic use)
       if (mode === "poll" && job.logs.length > knownLogCount) {
-        logDebug(
-          `[waitForJob] job ${job.jobId.slice(0, 8)} has new logs (${job.logs.length} > ${knownLogCount})`,
-        );
-        return job;
+        const freshEntries = job.logs.slice(knownLogCount);
+        const hasLifecycleTransition = freshEntries.some((e) => e.type === "lifecycle" || e.type === "recovery");
+        if (hasLifecycleTransition) {
+          logDebug(`[waitForJob] job ${job.jobId.slice(0, 8)} lifecycle activity — waking immediately`);
+          return job;
+        }
+        if (cosmeticActivitySince === undefined) cosmeticActivitySince = Date.now();
+        if (Date.now() - cosmeticActivitySince >= COSMETIC_POLL_DEBOUNCE_MS) {
+          logDebug(
+            `[waitForJob] job ${job.jobId.slice(0, 8)} has new logs (${job.logs.length} > ${knownLogCount}), cosmetic debounce elapsed`,
+          );
+          return job;
+        }
       }
     }
     logDebug(

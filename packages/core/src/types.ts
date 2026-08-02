@@ -34,7 +34,17 @@ export type ErrorInfo = {
 
 // ── Jobs & Sessions ────────��──────────────────────────��─────────────────────
 
-export type LogEntry = { ts: number; type: string; text: string; isError?: boolean };
+/**
+ * `seq` is a 1-based, monotonically increasing, per-job event id — the
+ * explicit cursor unit for the log-projection window (see
+ * log-projection.ts). It happens to equal the entry's position in
+ * `Job.logs` today (append-only, never trimmed from the front), but callers
+ * must treat it as an opaque cursor, not an array index: that's what lets
+ * storage strategy change later without moving the client contract. Absent
+ * only on entries constructed before this field existed (defensive; every
+ * current write path stamps it).
+ */
+export type LogEntry = { ts: number; type: string; text: string; isError?: boolean; seq?: number };
 
 export type JobStatus = "running" | "completed" | "completed_no_summary" | "error";
 export type TaskStatus = "queued" | "running" | "blocked" | "needs-human" | "done" | "failed";
@@ -99,10 +109,32 @@ export type JobSnapshot = {
   summary?: string;
   error?: string;
   errorInfo?: ErrorInfo;
+  /**
+   * A BOUNDED PROJECTION, not the full accumulated history — at most 8
+   * entries when the caller passed no cursor (or 0), at most 5 when it
+   * passed a cursor with new activity beyond it. Consecutive tool/tool-result
+   * pairs may be collapsed and entry text is truncated (see log-projection.ts).
+   * The server retains the full history internally; nothing here ever
+   * reflects that history's true size — read `logEventCount` for that.
+   */
   logs: LogEntry[];
   artifacts: Artifacts;
   recovery?: JobRecoveryState;
   continuationState?: ContinuationState;
+  /**
+   * The cursor to pass back as `knownLogCount` on the next check_task/
+   * get_task call to resume exactly where this snapshot left off — never a
+   * duplicate, possibly a gap (see `logs`' bounding above; the gap is
+   * intentional: cosmetic activity, not the terminal summary/artifacts,
+   * which are always delivered in full regardless of cursor). 0 when the job
+   * has no logged events yet.
+   */
+  logCursor: number;
+  /** Total events ever recorded for this job server-side — the full,
+   *  uncapped authoritative count (Job.logs is never trimmed) — for
+   *  telemetry/UI awareness of how much was omitted from the bounded `logs`
+   *  projection above. */
+  logEventCount: number;
   /** ClawConnect agent alias this job ran against. Present from multi-agent gateway onward. */
   agent?: string;
   /** Number of check_task waits served for this job so far. */
@@ -198,6 +230,13 @@ export type SessionInspectResult =
 export type CheckTaskOpts = {
   jobId?: string;
   sessionKey?: string;
+  /**
+   * Log cursor — pass back the `logCursor` a previous check_task/get_task
+   * snapshot returned to receive only events after it. Omit or pass 0 for
+   * the initial bounded window (see JobSnapshot.logs). In "poll" mode this
+   * also gates the early-return wait loop (poll returns as soon as anything
+   * newer than this cursor exists).
+   */
   knownLogCount?: number;
   mode?: CheckMode;
   /** Optional explicit agent. If omitted, resolved from jobId/sessionKey. */

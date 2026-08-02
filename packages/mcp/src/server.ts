@@ -232,7 +232,7 @@ Pass the jobId returned by run_task. Available agents: ${agentList}.`,
       jobId: z.string().optional().describe("The jobId from run_task"),
       sessionKey: z.string().optional().describe("The sessionKey from run_task (alternative to jobId)"),
       agent: agentEnum.optional().describe(`${agentDescription} Usually inferred from jobId; only set if you started run_task in a different process.`),
-      knownLogCount: z.number().optional().describe("Number of log entries already seen — in poll mode, server returns early on new activity"),
+      knownLogCount: z.number().optional().describe("Log cursor from a previous response's logCursor (0/omit for the initial window). Server returns only events after it — a bounded delta, not the full log — and in poll mode returns early on new activity."),
       mode: z.enum(["poll", "wait"]).optional().describe('Polling mode: "wait" (default) blocks up to waitMs and only returns early on a terminal status — a timeout return is non-terminal, just call again. "poll" returns on any new log activity — use for live progress UIs.'),
       waitMs: z.number().optional().describe("Max time to block, in ms. Default 45000. Clamped to [1000, 120000] — out-of-range values clamp rather than error."),
     },
@@ -270,7 +270,9 @@ Pass the jobId returned by run_task. Available agents: ${agentList}.`,
 
   server.tool(
     "get_task",
-    `Inspect a task by taskId/jobId with a detail preset controlling which fields are returned. Unlike check_task, this NEVER waits — it's an immediate snapshot of whatever state exists right now (including status="running"), for diagnostics, manual reads, or UI refresh. Use check_task to actually wait for a result.`,
+    `Inspect a task by taskId/jobId with a detail preset controlling which fields are returned. Unlike check_task, this NEVER waits — it's an immediate snapshot of whatever state exists right now (including status="running"), for diagnostics, manual reads, or UI refresh. Use check_task to actually wait for a result.
+
+With detail="updates"/"full"/"fullWithDiagnostics", the returned \`updates\` array is a bounded recent-activity window, not the full accumulated log — pass \`knownLogCount\` (the \`logCursor\` a previous response returned) to get only newer entries; omit it for the initial window. The final \`summary\`/\`artifacts\` are never bounded by this — always complete once terminal, regardless of cursor.`,
     {
       taskId: z.string().describe("Task identifier (same as jobId in v1)"),
       detail: z
@@ -279,9 +281,10 @@ Pass the jobId returned by run_task. Available agents: ${agentList}.`,
         .describe(
           "Detail preset. Omit for summary. core=ids+status only; summary=+summary; updates=+logs; artifacts=+artifacts; diagnostics=+error info; prompt=the original submitted task/context (not included by any other preset); full=core+summary+updates+artifacts; fullWithDiagnostics=full+diagnostics",
         ),
+      knownLogCount: z.number().optional().describe("Log cursor from a previous response's logCursor. Server returns only events after it (bounded); omit for the initial recent-activity window."),
     },
     { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
-    async ({ taskId, detail }) => {
+    async ({ taskId, detail, knownLogCount }) => {
       const d = detail ?? "summary";
       if (d === "prompt") {
         const result = getTaskPrompt(pool, { jobId: taskId });
@@ -290,7 +293,7 @@ Pass the jobId returned by run_task. Available agents: ${agentList}.`,
         }
         return { content: [{ type: "text", text: JSON.stringify({ taskId, prompt: result.prompt }) }], structuredContent: { taskId, prompt: result.prompt } };
       }
-      const result = getTask(pool, { jobId: taskId });
+      const result = getTask(pool, { jobId: taskId, knownLogCount });
       if (!result.found) return defaultFormatCheckTask(result);
       const payload = buildGetTaskStructuredContent(result, detail);
       return {

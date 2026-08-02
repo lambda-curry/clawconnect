@@ -1,21 +1,32 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { buildWidgetHtml } from "../../scripts/build-widget.mjs";
 
 /**
- * Compact -> Task Center -> compact, driven through the *assembled* widget.
+ * Assembled-widget flow tests (shell.html + inlined state.js). state.test.ts
+ * covers the pure decisions in isolation and references.test.ts covers the
+ * seam where state.js is inlined; neither runs the shell's actual glue,
+ * which is where the bugs below lived.
  *
- * state.test.ts covers the pure decisions and references.test.ts covers the
- * seam where state.js is inlined; neither runs the shell's actual glue, which
- * is where this bug lived. Opening the Task Center used to widen the compact
- * card's own scope (allActivity) and row filter (view) in order to widen the
- * *read*, and closing only flipped displayMode back — so the compact card came
- * back rendering every session the Task Center had loaded, and kept polling
- * unscoped forever after.
+ * This file replaces the pre-simplification version, which drove a
+ * compact -> Task Center -> compact round trip. The fullscreen Task Center
+ * surface was removed as part of the task-update reliability work (bounded
+ * log windows / cursor semantics / client ring buffer); two of its fixes
+ * were not Task-Center-specific and are ported forward here instead:
  *
- * The host here is a stub, not a real browser: enough DOM to run el()/render()
- * and enough window.openai to answer callTool/requestDisplayMode. What it
- * proves is data flow — which sessions each surface renders, and what
- * list_tasks each surface asks for.
+ *  - Session registration (bridge.onMountData/adoptMountData): the mount
+ *    payload can land after boot (ChatGPT populates window.openai globals
+ *    asynchronously), so reading it once at parse time is a race. Without
+ *    the openai:set_globals listener the card never learns its own session.
+ *  - reconcileTaskList's retainSessionKeys bound: the card always reads
+ *    list_tasks(view:"all") now (a task must not vanish from the read the
+ *    instant it finishes), so retention across reads has to be bounded to
+ *    the sessions this card actually knows about, or it accumulates every
+ *    conversation's tasks for its whole lifetime and shouldPoll never settles.
+ *
+ * The host here is a stub, not a real browser: enough DOM to run el()/
+ * render() and enough window.openai (plus a real addEventListener so
+ * openai:set_globals can actually be dispatched) to answer callTool and
+ * simulate a late mount.
  */
 
 type Json = Record<string, unknown>;
@@ -96,15 +107,38 @@ function click(node: El): void {
   for (const fn of node.listeners.get("click") ?? []) fn({ stopPropagation() {}, preventDefault() {} });
 }
 
-function findButton(root: El, label: string): El {
-  const match = [...withClass(root, "cc-btn"), ...withClass(root, "cc-card-tab")].find(
-    (n) => n.getAttribute("aria-label") === label || textOf(n) === label,
-  );
-  if (!match) throw new Error(`no button labelled "${label}"`);
+function findTabButton(root: El, label: string): El {
+  const match = withClass(root, "cc-card-tab").find((n) => textOf(n) === label);
+  if (!match) throw new Error(`no tab button labelled "${label}"`);
   return match;
 }
 
-// ── Fixture ────────────────────────────────────────────────────────────────
+// ── A window stub with a REAL event registry — needed to simulate
+// openai:set_globals firing after boot (the late-mount-data race). ─────────
+class WindowStub {
+  openai: unknown;
+  parent = undefined;
+  private listeners = new Map<string, ((event: unknown) => void)[]>();
+
+  constructor(openai: unknown) {
+    this.openai = openai;
+  }
+
+  addEventListener(type: string, fn: (event: unknown) => void): void {
+    const existing = this.listeners.get(type) ?? [];
+    existing.push(fn);
+    this.listeners.set(type, existing);
+  }
+
+  dispatch(type: string): void {
+    for (const fn of this.listeners.get(type) ?? []) fn({});
+  }
+}
+
+// ── Fixture world ────────────────────────────────────────────────────────
+const TASK_ID = "t1";
+const SESSION_KEY = "sess-1";
+
 type Task = {
   taskId: string;
   jobId: string;
@@ -115,57 +149,50 @@ type Task = {
   summary?: string;
 };
 
-const A1: Task = { taskId: "a1", jobId: "a1", sessionKey: "sess-a", agent: "clawdy", status: "running", lastEventAt: 1_000 };
-const B1: Task = { taskId: "b1", jobId: "b1", sessionKey: "sess-b", agent: "scout", status: "running", lastEventAt: 2_000 };
-const C1: Task = { taskId: "c1", jobId: "c1", sessionKey: "sess-c", agent: "archivist", status: "done", lastEventAt: 500, summary: "Old work" };
+function createHost(opts: { mountedOnBoot?: boolean; knownSessionKeys?: string[]; world: { tasks: Task[] } } = { world: { tasks: [] } }) {
+  const calls: { name: string; args: Json }[] = [];
+  let cursor = 0;
+  const allEvents: Json[] = [];
+  const mountPayload = { taskId: TASK_ID, jobId: TASK_ID, sessionKey: SESSION_KEY };
 
-/** list_tasks filters by status server-side only — it is never scoped to one card's sessions (see app.ts's list_tasks handler). */
-function listTasks(all: Task[], view: unknown): Task[] {
-  const active = new Set(["queued", "running", "blocked", "needs-human"]);
-  return view === "active" ? all.filter((t) => active.has(t.status)) : all;
-}
-
-interface HostCall {
-  name: string;
-  args: Json;
-}
-
-function createHost(options: { mounted?: Task; knownSessionKeys?: string[]; world: { tasks: Task[] } }) {
-  const calls: HostCall[] = [];
   const host = {
     calls,
     displayMode: "inline",
     theme: "light" as const,
-    toolOutput: options.mounted
-      ? { structuredContent: { taskId: options.mounted.taskId, jobId: options.mounted.jobId, sessionKey: options.mounted.sessionKey } }
-      : null,
-    widgetState: options.knownSessionKeys ? { mounted: null, knownSessionKeys: options.knownSessionKeys } : null,
+    toolOutput: opts.mountedOnBoot ? { structuredContent: mountPayload } : null,
+    widgetState: opts.knownSessionKeys ? { mounted: null, knownSessionKeys: opts.knownSessionKeys } : null,
     setWidgetState(value: unknown) {
-      host.widgetState = value as typeof host.widgetState;
+      host.widgetState = value;
     },
+    // Test control, not part of window.openai's real surface.
+    pushEvent(text: string) {
+      cursor += 1;
+      allEvents.push({ ts: cursor, type: "lifecycle", text, seq: cursor });
+    },
+    completeTask(status: string) {
+      const t = opts.world.tasks.find((t) => t.taskId === TASK_ID);
+      if (t) t.status = status;
+    },
+    mountPayload,
     callTool(name: string, args: Json): Promise<Json> {
       calls.push({ name, args });
       if (name === "list_tasks") {
-        return Promise.resolve({ structuredContent: { tasks: listTasks(options.world.tasks, args.view) } });
+        return Promise.resolve({ structuredContent: { tasks: opts.world.tasks } });
       }
       if (name === "get_task") {
-        const task = options.world.tasks.find((t) => t.taskId === args.taskId);
         if (args.detail === "prompt") {
           return Promise.resolve({ structuredContent: { taskId: args.taskId, prompt: { task: "do the thing" } } });
         }
-        return Promise.resolve({ structuredContent: task ? { ...task, updates: [] } : { taskId: args.taskId, status: "error" } });
+        const task = opts.world.tasks.find((t) => t.taskId === args.taskId);
+        if (!task) return Promise.resolve({ structuredContent: { taskId: args.taskId, status: "error", error: "Task not found." } });
+        const known = typeof args.knownLogCount === "number" ? args.knownLogCount : 0;
+        const updates = task.taskId === TASK_ID ? allEvents.filter((e) => (e.seq as number) > known) : [];
+        return Promise.resolve({ structuredContent: { ...task, updates, logCursor: cursor } });
       }
       if (name === "get_session") {
-        return Promise.resolve({
-          structuredContent: { tasks: options.world.tasks.filter((t) => t.sessionKey === args.sessionId) },
-        });
+        return Promise.resolve({ structuredContent: { tasks: opts.world.tasks.filter((t) => t.sessionKey === args.sessionId) } });
       }
       return Promise.resolve({});
-    },
-    requestDisplayMode({ mode }: { mode: string }): Promise<{ mode: string }> {
-      calls.push({ name: "requestDisplayMode", args: { mode } });
-      host.displayMode = mode;
-      return Promise.resolve({ mode });
     },
   };
   return host;
@@ -193,169 +220,270 @@ function mount(host: ReturnType<typeof createHost>) {
     },
     addEventListener: () => {},
   };
-  const windowStub = { openai: host, addEventListener: () => {}, parent: undefined };
+  const windowStub = new WindowStub(host);
 
   // eslint-disable-next-line @typescript-eslint/no-implied-eval
-  const run = new Function("window", "document", "setTimeout", "clearTimeout", "queueMicrotask", "matchMedia", "console", SCRIPT) as (
-    ...args: unknown[]
-  ) => void;
+  const run = new Function(
+    "window",
+    "document",
+    "setTimeout",
+    "clearTimeout",
+    "setInterval",
+    "clearInterval",
+    "queueMicrotask",
+    "matchMedia",
+    "console",
+    SCRIPT,
+  ) as (...args: unknown[]) => void;
   run(
     windowStub,
     documentStub,
     (fn: () => void, ms?: number) => setTimeout(fn, ms),
     (id: unknown) => clearTimeout(id as ReturnType<typeof setTimeout>),
+    (fn: () => void, ms?: number) => setInterval(fn, ms),
+    (id: unknown) => clearInterval(id as ReturnType<typeof setInterval>),
     queueMicrotask,
     () => ({ matches: false }),
     console,
   );
-  return root;
+  return { root, windowStub };
 }
 
-/** Drains the promise chain refresh() runs through (list_tasks -> get_task x2 -> get_session -> render). */
 async function settle(): Promise<void> {
   for (let i = 0; i < 100; i += 1) await Promise.resolve();
 }
 
 const rowTitles = (root: El) => withClass(root, "cc-row").map((row) => textOf(withClass(row, "cc-title")[0]));
-const sidebarTitles = (root: El) => withClass(root, "cc-fs-session").map((row) => textOf(withClass(row, "cc-title")[0]));
+const rowUpdateLines = (root: El) => withClass(root, "cc-update").map(textOf);
+const lastGetTaskArgs = (host: ReturnType<typeof createHost>) =>
+  [...host.calls].reverse().find((c) => c.name === "get_task" && c.args.detail === "full")?.args;
 
-describe("compact -> Task Center -> compact", () => {
-  it("restores the compact card's own sessions after the Task Center closes", async () => {
-    const world = { tasks: [A1, B1, C1] };
-    const host = createHost({ mounted: A1, world });
-    const root = mount(host);
+describe("session registration: the mount payload can land after boot", () => {
+  it("registers the session and starts polling once openai:set_globals delivers the mount payload", async () => {
+    const world = { tasks: [{ taskId: TASK_ID, jobId: TASK_ID, sessionKey: SESSION_KEY, agent: "clawdy", status: "running", lastEventAt: 0 }] };
+    const host = createHost({ mountedOnBoot: false, world }); // toolOutput is null at boot — the race
+    const { root, windowStub } = mount(host);
     await settle();
 
-    // Compact: scoped to this card's own session, even though the read returns
-    // every conversation's work. The scope is a *view*, never the read.
+    // Nothing to show yet — the card never learned its session.
+    expect(rowTitles(root)).toEqual([]);
+
+    // ChatGPT populates its globals asynchronously; the payload becomes
+    // readable and announces itself.
+    host.toolOutput = { structuredContent: host.mountPayload };
+    windowStub.dispatch("openai:set_globals");
+    await settle();
+
     expect(rowTitles(root)).toEqual(["clawdy is working…"]);
-
-    click(findButton(root, "Open Task Center"));
-    await settle();
-
-    // Task Center: every session, every group — that is the point of it.
-    expect(sidebarTitles(root)).toEqual(["clawdy is working…", "scout is working…", "Old work"]);
-
-    click(findButton(root, "Close"));
-    await settle();
-
-    // ...and closing it hands the compact card back exactly what it had.
-    expect(rowTitles(root)).toEqual(["clawdy is working…"]);
-  });
-
-  it("reads the complete list on every surface, so opening the Task Center changes no fetch parameter", async () => {
-    // Two reconciled rules meet here. The read is always view:"all" (a task
-    // dropped out of view:"active" the instant it finished — the transition the
-    // card exists to show), and the surface never varies the read (varying it,
-    // then not restoring it, is what leaked the Task Center's contents into the
-    // compact card). So the parameter is constant across the whole round trip.
-    const world = { tasks: [A1, B1, C1] };
-    const host = createHost({ mounted: A1, world });
-    const root = mount(host);
-    await settle();
-    click(findButton(root, "Open Task Center"));
-    await settle();
-    click(findButton(root, "Close"));
-    await settle();
-
-    const views = host.calls.filter((c) => c.name === "list_tasks").map((c) => c.args.view);
-    expect(views.length).toBeGreaterThan(2);
-    expect([...new Set(views)]).toEqual(["all"]);
-  });
-
-  it("keeps polling after the Task Center closes, still showing only its own session", async () => {
-    const world = { tasks: [A1, B1, C1] };
-    const host = createHost({ mounted: A1, world });
-    const root = mount(host);
-    await settle();
-
-    click(findButton(root, "Open Task Center"));
-    await settle();
-    click(findButton(root, "Close"));
-    await settle();
-
-    const before = host.calls.filter((c) => c.name === "list_tasks").length;
-    await new Promise((resolve) => setTimeout(resolve, 3_000)); // > pollIntervalMs("active")
-    await settle();
-    const after = host.calls.filter((c) => c.name === "list_tasks").length;
-
-    expect(after).toBeGreaterThan(before);
-    expect(rowTitles(root)).toEqual(["clawdy is working…"]);
-  });
-
-  it("pins the newest live session when there is no mounted run to anchor to", async () => {
-    // resolveCompactSelection rule 3, the reachable one: a card with remembered
-    // sessions but no mount payload has no anchor, so it focuses real live work.
-    const world = { tasks: [A1, B1] };
-    const host = createHost({ knownSessionKeys: ["sess-a", "sess-b"], world });
-    const root = mount(host);
-    await settle();
-
-    // sess-b is newer; the pinned row sorts first.
-    expect(rowTitles(root)[0]).toBe("scout is working…");
-    expect(host.calls.some((c) => c.name === "get_task" && c.args.taskId === "b1")).toBe(true);
-  });
-
-  it("keeps the compact pin across the round trip even when the Task Center selects elsewhere", async () => {
-    const world = { tasks: [A1, B1, C1] };
-    const host = createHost({ mounted: A1, world });
-    const root = mount(host);
-    await settle();
-
-    click(findButton(root, "Open Task Center"));
-    await settle();
-    const scout = withClass(root, "cc-fs-session").find((n) => textOf(n).includes("scout"));
-    if (!scout) throw new Error("no scout session in the sidebar");
-    click(scout);
-    await settle();
-    click(findButton(root, "Close"));
-    await settle();
-
-    // The Task Center's selection is its own; compact comes back to its mount.
-    expect(rowTitles(root)).toEqual(["clawdy is working…"]);
-    const lastDetail = [...host.calls].reverse().find((c) => c.name === "get_task" && c.args.detail === "full");
-    expect(lastDetail?.args.taskId).toBe("a1");
+    expect(host.calls.some((c) => c.name === "get_task" && c.args.taskId === TASK_ID)).toBe(true);
   });
 });
 
 describe("canonical store: retention and its bound", () => {
   it("keeps a known session's task visible after it drops out of the read", async () => {
-    // The finished-task guarantee, end to end: a read that omits a task the card
-    // already knows about must not lose it. Here b1 leaves the read entirely
-    // while sess-b is a session this card knows.
+    const A1 = { taskId: "a1", jobId: "a1", sessionKey: "sess-a", agent: "clawdy", status: "running", lastEventAt: 1_000 };
+    const B1 = { taskId: "b1", jobId: "b1", sessionKey: "sess-b", agent: "scout", status: "running", lastEventAt: 2_000 };
     const world = { tasks: [A1, B1] };
     const host = createHost({ knownSessionKeys: ["sess-a", "sess-b"], world });
-    const root = mount(host);
-    await settle();
-    expect(rowTitles(root)).toContain("scout is working…");
+    vi.useFakeTimers();
+    try {
+      const { root } = mount(host);
+      await settle();
+      expect(rowTitles(root)).toContain("scout is working…");
 
-    world.tasks = [A1];
-    await new Promise((resolve) => setTimeout(resolve, 3_000));
-    await settle();
+      world.tasks = [A1]; // b1 disappears from the read entirely
+      await vi.advanceTimersByTimeAsync(3_000);
+      await settle();
 
-    expect(rowTitles(root)).toContain("scout is working…");
+      expect(rowTitles(root)).toContain("scout is working…");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("does not retain a session the card does not know about", async () => {
-    // ...and that retention is bounded, or an unscoped read would accumulate
-    // every conversation's tasks for the life of the card and shouldPoll would
-    // never settle. sess-c is never in scope, so it is re-supplied by each read
-    // and never held.
+    const A1 = { taskId: "a1", jobId: "a1", sessionKey: "sess-a", agent: "clawdy", status: "running", lastEventAt: 1_000 };
+    const C1 = { taskId: "c1", jobId: "c1", sessionKey: "sess-c", agent: "archivist", status: "done", lastEventAt: 500, summary: "Old work" };
     const world = { tasks: [A1, C1] };
-    const host = createHost({ mounted: A1, world });
-    const root = mount(host);
+    // Only sess-a is known; sess-c is out of scope from the start.
+    const host = createHost({ knownSessionKeys: ["sess-a"], world });
+    vi.useFakeTimers();
+    try {
+      const { root } = mount(host);
+      await settle();
+      expect(rowTitles(root)).toEqual(["clawdy is working…"]);
+
+      world.tasks = [A1];
+      await vi.advanceTimersByTimeAsync(3_000);
+      await settle();
+
+      // sess-c was never retained — nothing to leak once it's gone from the read.
+      expect(rowTitles(root)).toEqual(["clawdy is working…"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("ring buffer accumulates check_task/get_task's bounded per-poll delta", () => {
+  it("shows accumulated recent activity across polls, not just the latest poll's delta", async () => {
+    vi.useFakeTimers();
+    try {
+      const world = { tasks: [{ taskId: TASK_ID, jobId: TASK_ID, sessionKey: SESSION_KEY, agent: "clawdy", status: "running", lastEventAt: 0 }] };
+      const host = createHost({ mountedOnBoot: true, world });
+      host.pushEvent("step one");
+      const { root } = mount(host);
+      await settle();
+
+      expect(rowUpdateLines(root)).toEqual(["•step one"]);
+
+      // Next poll's delta is just one NEW event — the server no longer resends
+      // "step one". A naive "derive fresh from this snapshot" implementation
+      // would lose it; the ring buffer must not.
+      host.pushEvent("step two");
+      // > pollIntervalMs("active") to trigger the next poll, plus the cosmetic
+      // render-debounce window (same status group both times) before the DOM
+      // actually updates.
+      await vi.advanceTimersByTimeAsync(4_000);
+      await settle();
+
+      // deriveTimeline renders most-recent-first.
+      expect(rowUpdateLines(root)).toEqual(["•step two", "•step one"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("passes the prior logCursor back as knownLogCount on the next get_task call — no re-fetch of already-seen events", async () => {
+    vi.useFakeTimers();
+    try {
+      const world = { tasks: [{ taskId: TASK_ID, jobId: TASK_ID, sessionKey: SESSION_KEY, agent: "clawdy", status: "running", lastEventAt: 0 }] };
+      const host = createHost({ mountedOnBoot: true, world });
+      host.pushEvent("step one");
+      mount(host);
+      await settle();
+      expect(lastGetTaskArgs(host)?.knownLogCount).toBe(0); // initial read
+
+      host.pushEvent("step two");
+      await vi.advanceTimersByTimeAsync(3_000);
+      await settle();
+      expect(lastGetTaskArgs(host)?.knownLogCount).toBe(1); // resumes from the cursor the prior read returned
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("render cadence: lifecycle/terminal changes are immediate, cosmetic-only activity debounces", () => {
+  it("a cosmetic-only poll (same status group) does not repaint until the debounce window elapses", async () => {
+    vi.useFakeTimers();
+    try {
+      const world = { tasks: [{ taskId: TASK_ID, jobId: TASK_ID, sessionKey: SESSION_KEY, agent: "clawdy", status: "running", lastEventAt: 0 }] };
+      const host = createHost({ mountedOnBoot: true, world });
+      host.pushEvent("step one");
+      const { root } = mount(host);
+      await settle();
+      expect(rowUpdateLines(root)).toEqual(["•step one"]);
+
+      host.pushEvent("step two");
+      // Advance only far enough to trigger the poll itself, not the render debounce after it.
+      await vi.advanceTimersByTimeAsync(2_600);
+      await settle();
+      expect(rowUpdateLines(root)).toEqual(["•step one"]); // not yet — debounced
+
+      await vi.advanceTimersByTimeAsync(1_100); // clears the debounce window
+      await settle();
+      expect(rowUpdateLines(root)).toEqual(["•step two", "•step one"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a terminal transition is reflected right away, without waiting out the cosmetic debounce window", async () => {
+    vi.useFakeTimers();
+    try {
+      const world = { tasks: [{ taskId: TASK_ID, jobId: TASK_ID, sessionKey: SESSION_KEY, agent: "clawdy", status: "running", lastEventAt: 0 }] };
+      const host = createHost({ mountedOnBoot: true, world });
+      host.pushEvent("working");
+      const { root } = mount(host);
+      await settle();
+      expect(withClass(root, "cc-pill--active")).toHaveLength(1);
+
+      host.completeTask("completed");
+      await vi.advanceTimersByTimeAsync(3_000); // next poll cycle picks up the terminal status
+      await settle();
+
+      // No extra wait for the (1s) cosmetic debounce — a status-group change renders immediately.
+      expect(withClass(root, "cc-pill--completed")).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("original request stays out of recurring heartbeats — fetched lazily on demand", () => {
+  it("the initial mount and subsequent poll cycles never call get_task(detail:\"prompt\")", async () => {
+    vi.useFakeTimers();
+    try {
+      const world = { tasks: [{ taskId: TASK_ID, jobId: TASK_ID, sessionKey: SESSION_KEY, agent: "clawdy", status: "running", lastEventAt: 0 }] };
+      const host = createHost({ mountedOnBoot: true, world });
+      host.pushEvent("step one");
+      mount(host);
+      await settle();
+
+      host.pushEvent("step two");
+      await vi.advanceTimersByTimeAsync(4_000);
+      await settle();
+
+      const promptCalls = host.calls.filter((c) => c.name === "get_task" && c.args.detail === "prompt");
+      expect(promptCalls).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("selecting the Request tab fetches the prompt exactly once, even when re-selected before the first fetch resolves", async () => {
+    const world = { tasks: [{ taskId: TASK_ID, jobId: TASK_ID, sessionKey: SESSION_KEY, agent: "clawdy", status: "running", lastEventAt: 0 }] };
+    const host = createHost({ mountedOnBoot: true, world });
+    const { root } = mount(host);
+    await settle();
+    expect(host.calls.filter((c) => c.name === "get_task" && c.args.detail === "prompt")).toHaveLength(0);
+
+    const requestTab = findTabButton(root, "Request");
+    click(requestTab);
+    click(requestTab); // rapid re-click before the first fetch resolves — must not double-fetch
     await settle();
 
-    click(findButton(root, "Open Task Center"));
-    await settle();
-    expect(sidebarTitles(root)).toEqual(["clawdy is working…", "Old work"]);
+    const promptCalls = host.calls.filter((c) => c.name === "get_task" && c.args.detail === "prompt");
+    expect(promptCalls).toHaveLength(1);
+    expect(withClass(root, "cc-prompt-body").length).toBeGreaterThan(0);
+    expect(textOf(withClass(root, "cc-prompt-body")[0])).toContain("do the thing");
+  });
 
-    world.tasks = [A1];
-    click(findButton(root, "Close"));
-    await settle();
-    click(findButton(root, "Open Task Center"));
+  it("switching away and back to Request does not re-fetch an already-loaded prompt", async () => {
+    const world = { tasks: [{ taskId: TASK_ID, jobId: TASK_ID, sessionKey: SESSION_KEY, agent: "clawdy", status: "running", lastEventAt: 0 }] };
+    const host = createHost({ mountedOnBoot: true, world });
+    const { root } = mount(host);
     await settle();
 
-    expect(sidebarTitles(root)).toEqual(["clawdy is working…"]);
+    click(findTabButton(root, "Request"));
+    await settle();
+    click(findTabButton(root, "Response"));
+    click(findTabButton(root, "Request"));
+    await settle();
+
+    expect(host.calls.filter((c) => c.name === "get_task" && c.args.detail === "prompt")).toHaveLength(1);
+  });
+});
+
+describe("no fullscreen/Task Center affordance in the assembled widget", () => {
+  it("never renders an 'Open Task Center' control, and the widget stays functional without one", async () => {
+    const world = { tasks: [{ taskId: TASK_ID, jobId: TASK_ID, sessionKey: SESSION_KEY, agent: "clawdy", status: "running", lastEventAt: 0 }] };
+    const host = createHost({ mountedOnBoot: true, world });
+    const { root } = mount(host);
+    await settle();
+    const found = withClass(root, "cc-card-tab").some((n) => textOf(n).includes("⛶") || n.getAttribute("aria-label") === "Open Task Center");
+    expect(found).toBe(false);
+    expect(rowTitles(root)).toEqual(["clawdy is working…"]);
   });
 });

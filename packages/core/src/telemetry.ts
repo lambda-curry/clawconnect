@@ -30,6 +30,12 @@ export type TelemetryEvent = {
   terminalRetrieval?: boolean;
   /** list_tasks: number of tasks returned. */
   taskCount?: number;
+  /** check_task/get_task: estimated wire size of the returned snapshot, in bytes. Never derived from prompt/log/summary content beyond its length. */
+  payloadBytes?: number;
+  /** check_task/get_task: number of log entries in the bounded window this response returned (see JobSnapshot.logs). */
+  logEventsReturned?: number;
+  /** check_task/get_task: the logCursor returned, for correlating a caller's next knownLogCount. */
+  logCursor?: number;
 };
 
 export type TelemetrySink = (event: TelemetryEvent) => void;

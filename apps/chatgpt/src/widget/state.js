@@ -314,45 +314,9 @@ export function formatCounts(counts) {
 }
 
 /**
- * Context-aware detail: which sections a focused task's detail view
- * renders, based on what's actually present on the task — never a fixed
- * template that shows empty sections. Read-only: this only selects what to
- * show, never what to do.
- */
-/** @param {WidgetTask} task @returns {string[]} */
-export function deriveDetailSections(task) {
-  const sections = ["status"];
-  if (task.status === "running" || task.status === "queued") sections.push("liveUpdate");
-  const artifacts = task.artifacts;
-  if (artifacts && (artifacts.filesChanged?.length || artifacts.prUrl || artifacts.commandsRun?.length)) {
-    sections.push("artifacts");
-  }
-  if (task.summary) sections.push("summary");
-  if (task.error || task.errorInfo) sections.push("error");
-  if (task.recovery) sections.push("recovery");
-  return sections;
-}
-
-/**
- * The fullscreen detail pane's tab set — "overview" always, "artifacts"
- * only when there's something to show, "prompt" only when the id is
- * resolvable (canReadPrompt). Built on deriveDetailSections rather than
- * duplicating its presence checks, so the two stay in lockstep.
- */
-/** @param {WidgetTask} task @returns {string[]} */
-export function deriveDetailTabs(task) {
-  const sections = deriveDetailSections(task);
-  const tabs = ["overview"];
-  if (sections.includes("artifacts")) tabs.push("artifacts");
-  if (canReadPrompt(task)) tabs.push("prompt");
-  return tabs;
-}
-
-/**
  * The inline card's tab set — "response" always, "diagnostics" only when the
  * task actually carries error detail, "request" only when the id is
- * resolvable (canReadPrompt). Same presence-driven convention as
- * deriveDetailTabs: never offer a tab that would open onto nothing.
+ * resolvable (canReadPrompt). Never offer a tab that would open onto nothing.
  */
 /** @param {Partial<WidgetTask>} task @returns {("response" | "diagnostics" | "request")[]} */
 export function deriveCardTabs(task) {
@@ -759,6 +723,41 @@ export function deriveTimeline(logs, maxRows = 4) {
 export function deriveLatestUpdate(logs) {
   if (!logs || logs.length === 0) return null;
   return logs[logs.length - 1];
+}
+
+/** Client-side ring buffer cap — check_task/get_task now return a bounded
+ *  per-poll delta (see packages/core/src/log-projection.ts), so the client
+ *  is what accumulates a short recent-activity history across polls. */
+export const RING_BUFFER_MAX = 20;
+
+/**
+ * Appends a poll's delta events onto a per-task ring buffer, capped at
+ * RING_BUFFER_MAX (oldest dropped first), deduplicated by `seq` — a
+ * defensive guard, not a correctness dependency: the server-side cursor
+ * already guarantees no entry is resent, but a client that raced two
+ * overlapping reads for the same task should still never render a
+ * duplicate row.
+ */
+/** @param {LogEntry[] | undefined} existing @param {LogEntry[] | undefined} delta @param {number} [max] @returns {LogEntry[]} */
+export function mergeRingBuffer(existing, delta, max = RING_BUFFER_MAX) {
+  const prior = existing ?? [];
+  const fresh = delta ?? [];
+  if (fresh.length === 0) return prior;
+  const seenSeqs = new Set(prior.map((e) => e.seq).filter((s) => s !== undefined));
+  const merged = [...prior, ...fresh.filter((e) => e.seq === undefined || !seenSeqs.has(e.seq))];
+  return merged.length > max ? merged.slice(merged.length - max) : merged;
+}
+
+/**
+ * Render-cadence decision: a status-group transition (including the very
+ * first render) is always immediate — that's a real lifecycle/terminal
+ * change, the user is owed an up-to-date view right away. Cosmetic activity
+ * (same group, just new ring-buffer entries) is worth debouncing so a
+ * quick run of polls doesn't thrash the DOM once per cycle.
+ */
+/** @param {string | null} prevGroup @param {string} nextGroup @returns {boolean} */
+export function shouldRenderImmediately(prevGroup, nextGroup) {
+  return prevGroup == null || prevGroup !== nextGroup;
 }
 
 export function nextCardTab(tabs, current, key) {

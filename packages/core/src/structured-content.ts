@@ -53,7 +53,14 @@ export function buildGetTaskStructuredContent(result: FoundCheckTaskResult, deta
     isError,
   };
   if (d === "summary" || has("summary")) payload.summary = snapshot.summary;
-  if (has("updates")) payload.updates = snapshot.logs;
+  if (has("updates")) {
+    payload.updates = snapshot.logs;
+    // The cursor to pass back as knownLogCount next time — only meaningful
+    // alongside `updates`, so it rides the same preset gate rather than
+    // every detail level.
+    payload.logCursor = snapshot.logCursor;
+    payload.logEventCount = snapshot.logEventCount;
+  }
   if (has("artifacts")) payload.artifacts = snapshot.artifacts;
   if (d === "diagnostics" || d === "fullWithDiagnostics") {
     payload.diagnostics = {

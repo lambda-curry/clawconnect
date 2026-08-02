@@ -290,7 +290,7 @@ Pass the jobId returned by run_task. Available agents: ${list}.`,
             },
             knownLogCount: {
               type: "number",
-              description: "Number of log entries already seen. Server returns as soon as new entries appear.",
+              description: "Log cursor from a previous response's logCursor (0/omit for the initial window). Server returns only events after it — a bounded delta, not the full log — and in poll mode returns as soon as new entries appear.",
             },
             mode: {
               type: "string",
@@ -390,7 +390,9 @@ Pass the jobId returned by run_task. Available agents: ${list}.`,
       },
       {
         name: "get_task",
-        description: `Inspect a task by taskId/jobId with a detail preset controlling which fields are returned. Unlike check_task, this NEVER waits — it's an immediate snapshot of whatever state exists right now (including status="running"), for diagnostics, manual reads, or UI refresh. Use check_task to actually wait for a result.`,
+        description: `Inspect a task by taskId/jobId with a detail preset controlling which fields are returned. Unlike check_task, this NEVER waits — it's an immediate snapshot of whatever state exists right now (including status="running"), for diagnostics, manual reads, or UI refresh. Use check_task to actually wait for a result.
+
+With detail="updates"/"full"/"fullWithDiagnostics", the returned \`updates\` array is a BOUNDED WINDOW (recent activity), not the full accumulated log — pass \`knownLogCount\` (the \`logCursor\` a previous response returned) to get only newer entries; omit it for the initial recent-activity window. The final \`summary\`/\`artifacts\` are never bounded by this — they're always complete once the task is terminal, regardless of cursor.`,
         inputSchema: {
           type: "object",
           properties: {
@@ -400,6 +402,10 @@ Pass the jobId returned by run_task. Available agents: ${list}.`,
               enum: ["core", "summary", "updates", "artifacts", "diagnostics", "prompt", "full", "fullWithDiagnostics"],
               description:
                 'Detail preset. Omit for summary. core=ids+status only; summary=+summary; updates=+logs; artifacts=+artifacts; diagnostics=+error info; prompt=the original submitted task/context (not included by any other preset); full=core+summary+updates+artifacts; fullWithDiagnostics=full+diagnostics',
+            },
+            knownLogCount: {
+              type: "number",
+              description: "Log cursor from a previous response's logCursor. Server returns only events after it (bounded); omit for the initial recent-activity window.",
             },
           },
           required: ["taskId"],
@@ -838,7 +844,8 @@ Pass the jobId returned by run_task. Available agents: ${list}.`,
           // immediate, synchronous read, unlike check_task's checkTask().
           const taskId = typeof args.taskId === "string" ? args.taskId : "";
           const detail = typeof args.detail === "string" ? args.detail : undefined;
-          const result = getTask(pool, { jobId: taskId });
+          const knownLogCount = args.knownLogCount !== undefined ? Number(args.knownLogCount) || 0 : undefined;
+          const result = getTask(pool, { jobId: taskId, knownLogCount });
 
           if (!result.found) {
             respond({

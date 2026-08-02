@@ -86,9 +86,10 @@
   .cc-pill--failed { color: var(--cc-failed); }
   .cc-meta { color: var(--cc-fg-muted); font-size: 11.5px; margin-top: 3px; }
   /* One line, always. A long tool invocation used to wrap to two or three and
-     the card's height jumped on every poll — the row is a glanceable "still
+     the card's height jumped on every poll — each row is a glanceable "still
      alive" signal, not something to read in full. */
   .cc-update { display: flex; align-items: baseline; gap: 6px; margin-top: 8px; padding-top: 7px; border-top: 1px solid var(--cc-border); color: var(--cc-fg-muted); font-size: 11px; overflow: hidden; }
+  .cc-update:not(:first-of-type) { margin-top: 3px; padding-top: 0; border-top: none; }
   .cc-update-icon { flex: none; }
   .cc-update-text { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .cc-counts { color: var(--cc-fg-muted); font-size: 11.5px; margin-top: 6px; }
@@ -110,7 +111,6 @@
   .cc-card-tab:hover { color: var(--cc-fg); background: var(--cc-action-hover); }
   .cc-card-tab[aria-selected="true"] { border-bottom-color: var(--cc-fg); color: var(--cc-fg); font-weight: 600; }
   .cc-card-tab:focus-visible { outline: 2px solid var(--cc-fg-muted); outline-offset: -2px; }
-  .cc-card-tab--expand { margin-left: auto; padding-inline: 9px; font-size: 14px; line-height: 1; }
   .cc-response { margin-top: 8px; font-size: 12.5px; }
   .cc-response.cc-plain, .cc-prompt-body.cc-plain { white-space: pre-wrap; }
   .cc-response h1, .cc-response h2, .cc-response h3, .cc-prompt-body h1, .cc-prompt-body h2, .cc-prompt-body h3 { margin: 10px 0 4px; line-height: 1.25; }
@@ -158,32 +158,6 @@
   .cc-empty-copy { color: var(--cc-fg-muted); font-size: 11.5px; line-height: 1.4; margin-top: 2px; }
   .cc-live-loading { display: inline-block; width: 10px; height: 10px; margin-top: 10px; border: 1.5px solid var(--cc-border); border-top-color: var(--cc-fg-muted); border-radius: 50%; animation: cc-spin .8s linear infinite; }
   @keyframes cc-spin { to { transform: rotate(360deg); } }
-
-  /* ── Fullscreen ("Task Center") — same tested pure functions as inline,
-     a different layout only. Never load-bearing: see openTaskCenter(). */
-  #root.cc-fullscreen { padding: 0; height: 100vh; display: flex; flex-direction: column; }
-  .cc-fs-header {
-    flex: none; display: flex; align-items: center; justify-content: space-between;
-    padding: 12px 16px; border-bottom: 1px solid var(--cc-border);
-  }
-  .cc-fs-title { font-weight: 700; font-size: 15px; }
-  .cc-fs-body { flex: 1; display: flex; overflow: hidden; }
-  .cc-fs-sidebar { width: 220px; flex: none; border-right: 1px solid var(--cc-border); overflow-y: auto; padding: 10px; }
-  .cc-fs-session { padding: 8px 10px; border-radius: 8px; cursor: pointer; margin-bottom: 4px; border-left: 3px solid transparent; }
-  .cc-fs-session--selected { background: var(--cc-bg-subtle); border-left-color: var(--cc-border); }
-  .cc-fs-main { flex: 1; display: flex; overflow: hidden; }
-  .cc-fs-tasklist { width: 260px; flex: none; border-right: 1px solid var(--cc-border); overflow-y: auto; padding: 10px; }
-  .cc-fs-task { display: flex; align-items: center; padding: 7px 8px; border-radius: 6px; cursor: pointer; font-size: 12.5px; }
-  .cc-fs-task--selected { background: var(--cc-bg-subtle); }
-  .cc-fs-detail { flex: 1; overflow-y: auto; padding: 16px 18px; }
-  .cc-fs-tabs { display: flex; gap: 6px; margin: 12px 0; }
-  .cc-fs-detail-body { font-size: 13px; }
-  .cc-fs-detail-body > * { margin-bottom: 8px; }
-  @media (max-width: 640px) {
-    .cc-fs-body { flex-direction: column; overflow-y: auto; }
-    .cc-fs-sidebar, .cc-fs-tasklist { width: 100%; border-right: none; border-bottom: 1px solid var(--cc-border); max-height: 180px; }
-    .cc-fs-main { flex-direction: column; }
-  }
 </style>
 </head>
 <body>
@@ -252,46 +226,6 @@ const bridge = (() => {
     return sendMcpAppsRequest("tools/call", { name, arguments: args }, 15000);
   }
 
-  /**
-   * Display mode is a *request*, not a contract — per
-   * developers.openai.com/plugins/reference.md ("no explicit guarantees
-   * that hosts will honor display mode requests... hosts retain
-   * discretion") and the ext-apps spec's own doc comment on
-   * McpUiRequestDisplayModeRequest ("the host will respond with the actual
-   * display mode that was set, which may differ from the requested mode
-   * if not supported"). There is also no reliable way to ask a host in
-   * advance whether it supports a mode at all — window.openai exposes no
-   * such query. The only correct pattern is: request, then read back
-   * whatever the host says actually happened (the resolved value if the
-   * call succeeds, `displayMode` afterward either way) — never assume the
-   * request took effect.
-   */
-  function supportsDisplayModeRequest() {
-    const openai = viaWindowOpenAI();
-    return typeof openai?.requestDisplayMode === "function";
-  }
-
-  async function requestDisplayMode(mode) {
-    const openai = viaWindowOpenAI();
-    if (openai?.requestDisplayMode) {
-      const result = await openai.requestDisplayMode({ mode });
-      return result?.mode ?? openai.displayMode ?? mode;
-    }
-    // Minimal MCP-Apps fallback — same request shape as the App class's
-    // requestDisplayMode, same "response may differ from what was asked"
-    // caveat applies.
-    const result = await sendMcpAppsRequest("ui/request-display-mode", { mode }, 5000).catch(() => null);
-    return result?.mode ?? "inline";
-  }
-
-  function currentDisplayMode() {
-    return viaWindowOpenAI()?.displayMode ?? "inline";
-  }
-
-  function onDisplayModeChange(cb) {
-    window.addEventListener("openai:set_globals", () => cb(currentDisplayMode()));
-  }
-
   function readMountData() {
     const openai = viaWindowOpenAI();
     const output = openai?.toolOutput ?? null;
@@ -349,10 +283,6 @@ const bridge = (() => {
     saveWidgetState,
     currentTheme,
     onThemeChange,
-    supportsDisplayModeRequest,
-    requestDisplayMode,
-    currentDisplayMode,
-    onDisplayModeChange,
   };
 })();
 
@@ -368,13 +298,8 @@ bridge.onThemeChange(applyTheme);
 const app = {
   mounted: null,
   // Canonical loaded data: exactly what the last list_tasks read returned,
-  // never narrowed in place. Each surface derives what *it* may show from
-  // this (compact via compactVisibleTasks(), fullscreen reads it whole), so
-  // the Task Center's deliberately wider read can't redefine what the compact
-  // card is allowed to see once it closes again.
+  // never narrowed in place — compactVisibleTasks() derives what may render.
   tasks: [],
-  // Compact-only visibility. Fullscreen has its own row policy
-  // (FULLSCREEN_ROW_VIEW) and must never write these.
   view: "active",
   allActivity: false,
   compactSessionKey: null, // compact's pinned session — see resolveCompactSelection()
@@ -382,12 +307,20 @@ const app = {
   pollInFlight: false,
   pollFailures: 0,
   refreshTimer: null,
+  elapsedTicker: null, // local render-only tick, no network — see syncElapsedTicker()
   reconcileRequested: false,
   expanded: new Map(), // sessionKey -> history[] (task summaries) — for the pinned session this is kept fresh automatically every refresh(); for any other row it's fetched once on click
   historyOpen: new Set(), // sessionKeys where the itemized history list should render, vs. just the compact counts line
   promptText: new Map(), // taskId -> preloaded prompt text
-  promptLoading: new Set(),
-  timeline: [], // deriveTimeline() output for the one focused/highlighted task — the actual evidence behind "is working"
+  promptLoading: new Set(), // taskId currently mid-fetch — de-dupes a rapid re-select of the Request tab
+  // Client-side ring buffer (<=RING_BUFFER_MAX) per taskId — check_task/
+  // get_task now return a bounded per-poll delta, not the full log, so the
+  // client accumulates recent activity across polls instead of deriving it
+  // fresh from one snapshot. eventCursor tracks each task's logCursor so the
+  // next poll resumes from exactly where the last one left off.
+  recentEvents: new Map(), // taskId -> LogEntry[]
+  eventCursor: new Map(), // taskId -> logCursor
+  timeline: [], // deriveTimeline(app.recentEvents.get(taskId)) — the actual evidence behind "is working"
   timelineFor: null, // taskId the current timeline belongs to, so a stale fetch never renders under the wrong row
   pinnedDetail: null, // full JobSnapshot (artifacts included) for compact's pinned task — see mergePinnedDetail()
   // Per task, not global: renderRow runs once per card, so a single shared
@@ -395,120 +328,17 @@ const app = {
   // for every other row. With two cards open, tapping "Request" re-rendered,
   // the reset fired, and the tap silently undid itself.
   cardTabByTask: new Map(),
-  // Fullscreen — see openTaskCenter(). displayMode reflects what the host
-  // actually confirmed, never what was merely requested.
-  displayMode: "inline",
-  displayModeNote: null, // set when a fullscreen request was made but not honored — shown once, inline, not a silent failure
-  selectedSessionKey: null, // fullscreen sidebar selection
-  selectedTaskId: null, // fullscreen task-list selection
-  // Fullscreen's own detail snapshot. Kept apart from pinnedDetail because
-  // ensurePinnedTask *appends* the snapshot when it isn't already in the list:
-  // one shared field means selecting another conversation's session in the
-  // Task Center injects that session's row into the compact card on close.
-  selectedDetail: null,
-  detailTab: "overview",
+  lastRenderedGroup: null, // status group as of the last render — drives shouldRenderImmediately()
+  renderTimer: null, // pending debounced render, for cosmetic-only updates
 };
-
-// The Task Center is the "see everything" surface, so its row filter is fixed
-// rather than read from app.view — that's compact's setting, and borrowing it
-// here is what previously required overwriting it on open.
-const FULLSCREEN_ROW_VIEW = "recent";
 
 /**
  * Canonical data -> what the compact card may see. Scope is applied as a view
- * over app.tasks, never baked into the stored list, so a wider read (the Task
- * Center's) leaves compact's boundary intact.
+ * over app.tasks, never baked into the stored list.
  */
 function compactVisibleTasks() {
   return filterTasksByScope(app.tasks, resolveScope([...app.knownSessionKeys], app.allActivity));
 }
-
-/** The task set the surface currently on screen is entitled to render. */
-function surfaceTasks() {
-  return app.displayMode === "fullscreen" ? app.tasks : compactVisibleTasks();
-}
-
-// Fullscreen is a request, never a dependency — every read/action the
-// fullscreen view uses is identical to the inline card's; the only
-// difference is layout. If the host never confirms fullscreen, the card
-// stays exactly as useful as it already was.
-async function openTaskCenter() {
-  if (!bridge.supportsDisplayModeRequest()) {
-    app.displayModeNote = "Fullscreen isn't available in this host.";
-    render();
-    return;
-  }
-  let granted = "inline";
-  try {
-    granted = await bridge.requestDisplayMode("fullscreen");
-  } catch {
-    granted = "inline";
-  }
-  if (granted === "fullscreen") {
-    app.displayMode = "fullscreen";
-    app.displayModeNote = null;
-    // Fullscreen widens the *read* (refresh() keys its list_tasks view and
-    // scope off displayMode) and nothing else. Compact's scope, row filter and
-    // pinned session are deliberately left alone: this used to set
-    // allActivity/view here, and since closing only flipped displayMode back,
-    // the compact card stayed pinned wide open on every session forever after.
-    app.selectedSessionKey = app.selectedSessionKey ?? app.compactSessionKey ?? app.mounted?.sessionKey ?? null;
-    // A card whose own work has finished has stopped polling; the Task Center
-    // still owes the user a current read of everything else.
-    app.reconcileRequested = true;
-    refresh();
-  } else {
-    app.displayModeNote = "The host didn't grant fullscreen — staying inline.";
-  }
-  render();
-}
-
-/**
- * Back to the compact card. Fullscreen state is dropped rather than carried,
- * and compact's selection is re-resolved against the canonical list — while
- * the Task Center was open, the session compact was pinned to may have
- * finished and dropped out of it.
- */
-function returnToInline() {
-  // Idempotent: a host that echoes the mode change back (openai:set_globals)
-  // reaches this through the listener *and* through our own Close button, and
-  // restoring twice would fire a duplicate read for the same transition.
-  if (app.displayMode === "inline") return;
-  app.displayMode = "inline";
-  app.selectedSessionKey = null;
-  app.selectedTaskId = null;
-  app.selectedDetail = null;
-  app.compactSessionKey = resolveCompactSelection(app.mounted, compactVisibleTasks(), app.compactSessionKey) ?? null;
-  // Re-read at compact breadth immediately so live updates resume on the
-  // compact card instead of waiting out whatever cadence fullscreen scheduled
-  // (or never resuming at all, if fullscreen's wider list had gone terminal).
-  app.reconcileRequested = true;
-  refresh();
-  render();
-}
-
-function closeTaskCenter() {
-  // Best-effort request back to inline; the local state flips regardless
-  // so the Close button always visibly works even if the host is slow or
-  // never confirms — same "never load-bearing" principle as everywhere
-  // else the card fetches something.
-  bridge.requestDisplayMode("inline").catch(() => {});
-  returnToInline();
-}
-
-bridge.onDisplayModeChange((mode) => {
-  // The host can also change display mode on its own (e.g. its own chrome
-  // close button) — stay in sync rather than trusting only our own calls, and
-  // through the same restore path as our own Close button.
-  if (mode !== app.displayMode) {
-    if (mode === "fullscreen") {
-      app.displayMode = "fullscreen";
-      render();
-    } else {
-      returnToInline();
-    }
-  }
-});
 
 /**
  * Register the session this card was mounted for. Idempotent, and safe to call
@@ -569,104 +399,72 @@ async function refreshPinnedCounts(sessionKey) {
 }
 
 async function refresh() {
-  // Bounded against what the surface on screen actually shows: a compact card
-  // must not keep polling on behalf of sessions it isn't allowed to render.
-  if (!app.reconcileRequested && !shouldPoll({ pollInFlight: app.pollInFlight, tasks: surfaceTasks() })) return;
+  // Bounded against what the compact card actually shows: it must not keep
+  // polling on behalf of sessions it isn't allowed to render.
+  if (!app.reconcileRequested && !shouldPoll({ pollInFlight: app.pollInFlight, tasks: compactVisibleTasks() })) return;
   app.reconcileRequested = false;
   app.pollInFlight = true;
-  const fullscreen = app.displayMode === "fullscreen";
   try {
-    // Always fetch the task list first, never just the one pinned task in
-    // isolation. Bug found via browser smoke test: an earlier version
-    // special-cased "only one active session known so far" (view.mode ===
-    // "focused") to skip list_tasks and fetch only that one task — but
-    // that's self-reinforcing. deriveViewMode's "focused vs aggregate"
-    // decision is computed FROM app.tasks, and app.tasks only grows by
-    // calling list_tasks — so a card that started single-task could never
-    // discover a second session came into existence, and toggling "All
-    // activity" (which only flips a fetch parameter) had no visible effect
-    // because the branch that would use it never ran. One list_tasks call
-    // per cycle is a small, already-bounded cost; the alternative is a
-    // card that can get stuck narrow forever.
     // Always read the complete list, never the server's "active" filter, and
     // never a breadth that depends on which surface is open. view:"active"
     // omits terminal work, so the moment a task finished it fell out of the
     // read and the card lost the very thing the user was waiting for. State
-    // should be complete and the *view* should filter — which is the same
-    // principle that keeps compact scope out of the store below, so one read
-    // now serves both surfaces.
-    const listView = "all";
-    const result = await bridge.callTool("list_tasks", { view: listView });
+    // should be complete and the *view* should filter.
+    const result = await bridge.callTool("list_tasks", { view: "all" });
     const tasks = result?.structuredContent?.tasks ?? result?.tasks ?? [];
     // Stored as fetched — the canonical set. Compact scope is a render-time
-    // view (compactVisibleTasks), not a narrowing of the store, because the
-    // store is shared with the Task Center, which renders every session.
-    // Retention is bounded to this card's own sessions: that bound used to be
-    // the fetch-time scope filter, which a render-time view can no longer
-    // provide. See reconcileTaskList.
+    // view (compactVisibleTasks), not a narrowing of the store. Retention is
+    // bounded to this card's own known sessions — see reconcileTaskList.
     app.tasks = reconcileTaskList(app.tasks, tasks, app.knownSessionKeys);
 
-    const visible = fullscreen ? app.tasks : compactVisibleTasks();
-    let pinnedSessionKey;
-    if (fullscreen) {
-      pinnedSessionKey = app.selectedSessionKey ?? deriveViewMode(app.mounted, visible).highlightSessionKey;
-    } else {
-      app.compactSessionKey = resolveCompactSelection(app.mounted, visible, app.compactSessionKey) ?? null;
-      pinnedSessionKey = app.compactSessionKey ?? undefined;
-    }
+    const visible = compactVisibleTasks();
+    app.compactSessionKey = resolveCompactSelection(app.mounted, visible, app.compactSessionKey) ?? null;
+    const pinnedSessionKey = app.compactSessionKey ?? undefined;
 
     // Bounded: exactly one extra read, only for the one session the user is
-    // actually looking at (pinned inline, or selected in the fullscreen
-    // sidebar) — never fan-out across every row in the command center.
+    // actually looking at — never fan-out across every row.
     const sessionTasks = pinnedSessionKey ? visible.filter((t) => t.sessionKey === pinnedSessionKey) : [];
-    // The Task Center's explicit task-list pick, when there is one. Written as
-    // a conditional rather than folded into the `??` chain below: `false ?? x`
-    // is `false`, so an `&&` guard inside a `??` chain silently swallows every
-    // later fallback.
-    const chosen =
-      fullscreen && app.selectedTaskId
-        ? sessionTasks.find((t) => (t.taskId ?? t.jobId) === app.selectedTaskId)
-        : undefined;
-    // list_tasks(view:"active") intentionally omits completed work. The mounted
-    // run is still authoritative and must be fetched directly — but only while
-    // focus is actually on it, or the Task Center would fetch the mounted
-    // task's detail for some other session's row.
+    // list_tasks omits nothing now (view:"all"), but the mounted run is still
+    // authoritative and must be fetched directly while focus is on it, in
+    // case a retention-pruned read hasn't caught up yet.
     const mountedFallback =
       app.mounted?.taskId && (!pinnedSessionKey || pinnedSessionKey === app.mounted.sessionKey)
         ? { taskId: app.mounted.taskId, jobId: app.mounted.taskId, sessionKey: app.mounted.sessionKey }
         : undefined;
-    const selected = chosen ?? sessionTasks[0] ?? mountedFallback;
+    const selected = sessionTasks[0] ?? mountedFallback;
     if (selected) {
       const taskId = selected.taskId ?? selected.jobId;
       // detail:"full" (not "updates") — list_tasks' TaskSummary has no
       // `artifacts` field (see packages/core/src/tools.ts's listTasks()),
       // so without the full snapshot here, deriveTitle's PR/branch
-      // detection and the fullscreen Artifacts tab would silently never
-      // have anything to show for *any* row, pinned or not.
-      const [detail, promptDetail] = await Promise.all([
-        bridge.callTool("get_task", { taskId, detail: "full" }),
-        bridge.callTool("get_task", { taskId, detail: "prompt" }),
-      ]);
+      // detection would silently never have anything to show.
+      //
+      // knownLogCount resumes from wherever the last read for THIS task left
+      // off — see mergeRingBuffer()/app.eventCursor. A cursor swap (new
+      // taskId) naturally starts that task at its own bounded initial window.
+      //
+      // The original prompt is deliberately NOT fetched here. get_task
+      // detail:"prompt" is a separate, heavier read (the full submitted task/
+      // context text) that has no place in a recurring heartbeat — it's
+      // fetched lazily, once, only when the user explicitly opens the
+      // Request tab (see selectCardTab below).
+      const detail = await bridge.callTool("get_task", { taskId, detail: "full", knownLogCount: app.eventCursor.get(taskId) ?? 0 });
       const snapshot = detail?.structuredContent ?? detail;
-      const prompt = promptDetail?.structuredContent?.prompt ?? promptDetail?.prompt;
-      if (prompt?.task != null) app.promptText.set(taskId, prompt.task);
       // isTaskSnapshot, not a bare id check: a not-found reply carries the id
       // it was asked about, and merging it would overwrite a retained row with
       // an error envelope — cancelling the retention guarantee for exactly the
       // task the card is pinned to.
       const resolved = isTaskSnapshot(snapshot) ? snapshot : null;
-      // Each surface keeps its own detail snapshot. ensurePinnedTask *adds* a
-      // detail that isn't in the list yet, so a shared field would inject the
-      // Task Center's selection into the compact card as a row of its own.
-      if (fullscreen) app.selectedDetail = resolved;
-      else app.pinnedDetail = resolved;
+      app.pinnedDetail = resolved;
       app.tasks = ensurePinnedTask(app.tasks, resolved);
-      app.timeline = deriveTimeline(snapshot?.updates ?? snapshot?.logs ?? []);
+      const delta = snapshot?.updates ?? snapshot?.logs ?? [];
+      app.recentEvents.set(taskId, mergeRingBuffer(app.recentEvents.get(taskId), delta));
+      if (typeof snapshot?.logCursor === "number") app.eventCursor.set(taskId, snapshot.logCursor);
+      app.timeline = deriveTimeline(app.recentEvents.get(taskId), 3);
       app.timelineFor = taskId;
       await refreshPinnedCounts(snapshot?.sessionKey ?? pinnedSessionKey ?? app.mounted?.sessionKey);
     } else {
-      if (fullscreen) app.selectedDetail = null;
-      else app.pinnedDetail = null;
+      app.pinnedDetail = null;
       app.timeline = [];
       app.timelineFor = null;
     }
@@ -675,20 +473,69 @@ async function refresh() {
     app.pollFailures += 1;
   } finally {
     app.pollInFlight = false;
-    render();
+    dispatchRender();
     scheduleNext();
+    syncElapsedTicker();
+  }
+}
+
+/**
+ * Status group the compact card is currently pinned to, for the render-
+ * cadence decision below and for scheduleNext()'s polling cadence.
+ */
+function currentPinnedGroup() {
+  const tasks = compactVisibleTasks();
+  const pinnedSessionKey = app.compactSessionKey ?? deriveViewMode(app.mounted, tasks).highlightSessionKey ?? app.mounted?.sessionKey;
+  const pinned = tasks.find((t) => t.sessionKey === pinnedSessionKey);
+  return pinned ? groupStatus(pinned.status) : "active";
+}
+
+// Debounces refresh()'s own re-renders: a lifecycle/terminal status-group
+// transition (including the first render) always renders immediately: that's
+// real state the user is owed right away. Cosmetic-only activity (same
+// group, just new ring-buffer entries) coalesces into at most one render per
+// COSMETIC_RENDER_DEBOUNCE_MS, so a run of quick polls doesn't thrash the DOM
+// once per cycle. User-triggered renders (tab clicks, expand/collapse)
+// bypass this entirely — they call render() directly.
+const COSMETIC_RENDER_DEBOUNCE_MS = 1000;
+function dispatchRender() {
+  const nextGroup = currentPinnedGroup();
+  if (shouldRenderImmediately(app.lastRenderedGroup, nextGroup)) {
+    if (app.renderTimer) {
+      clearTimeout(app.renderTimer);
+      app.renderTimer = null;
+    }
+    app.lastRenderedGroup = nextGroup;
+    render();
+    return;
+  }
+  if (app.renderTimer) return; // a coalesced render is already pending
+  app.renderTimer = setTimeout(() => {
+    app.renderTimer = null;
+    app.lastRenderedGroup = nextGroup;
+    render();
+  }, COSMETIC_RENDER_DEBOUNCE_MS);
+}
+
+// Elapsed-time display ("active 42s ago") is computed locally from
+// lastEventAt on every render (see deriveActivityLabel) — this ticker only
+// keeps that display fresh between network polls, on a render-only cadence
+// with no tool call of its own. Runs only while there's visible non-terminal
+// work; stops otherwise so an idle card holds no timer.
+const ELAPSED_TICK_MS = 5000;
+function syncElapsedTicker() {
+  const hasActiveWork = compactVisibleTasks().some((t) => !["completed", "failed"].includes(groupStatus(t.status)));
+  if (hasActiveWork && !app.elapsedTicker) {
+    app.elapsedTicker = setInterval(() => render(), ELAPSED_TICK_MS);
+  } else if (!hasActiveWork && app.elapsedTicker) {
+    clearInterval(app.elapsedTicker);
+    app.elapsedTicker = null;
   }
 }
 
 function scheduleNext() {
-  // Cadence follows the surface on screen, for the same reason refresh()'s
-  // poll guard does: compact's cadence is about compact's own work.
-  const tasks = surfaceTasks();
-  const view = deriveViewMode(app.mounted, tasks);
-  const group =
-    view.mode === "focused"
-      ? groupStatus(tasks.find((t) => t.taskId === view.taskId || t.jobId === view.taskId)?.status ?? "running")
-      : "active";
+  // Cadence follows what the compact card is actually pinned to.
+  const group = currentPinnedGroup();
   const delay = pollIntervalMs(group, app.pollFailures);
   if (delay === null) return; // terminal — stop polling entirely
   if (app.refreshTimer) clearTimeout(app.refreshTimer);
@@ -721,11 +568,9 @@ window.addEventListener("pageshow", reconcileOnResume);
 // throttled, and it only ever reads (get_task never waits server-side).
 //
 // `click`, never `pointerdown`: render() replaces the whole tree, so a refresh
-// fired on pointerdown tears the button out from under the finger that is
-// pressing it and the click never lands on the original node. Caught by driving
-// a real mouse — the Task Center button silently did nothing, while a
-// programmatic .click() (which skips pointerdown entirely) worked fine. `click`
-// fires after the target's own handler has run, so the gesture always completes
+// fired on pointerdown tears the target out from under the finger that is
+// pressing it and the click never lands on the original node. `click` fires
+// after the target's own handler has run, so the gesture always completes
 // first. pointerenter keeps the desktop hover signal, and hovering moves no
 // nodes.
 let lastInteractionRefresh = 0;
@@ -741,23 +586,26 @@ window.addEventListener("pointerenter", refreshOnInteraction, { passive: true })
 /**
  * Remember the tab per task and, for "request", fetch that task's prompt now.
  *
- * refresh() only fetches the prompt for the pinned session (bounded reads), so a
- * non-pinned card's Request tab would otherwise sit on "Loading request…"
- * forever. This is user-initiated and exactly one call.
+ * refresh() never fetches the prompt (see the comment there) — this is the
+ * ONLY place get_task(detail:"prompt") is ever called, exactly once per
+ * taskId (cached in app.promptText afterward), and guarded by
+ * app.promptLoading so a rapid re-select of the tab before the first fetch
+ * resolves can't fire a second concurrent request.
  */
 async function selectCardTab(taskId, tab, task) {
   app.cardTabByTask.set(taskId, tab);
   render();
-  if (tab !== "request" || app.promptText.has(taskId) || !canReadPrompt(task)) return;
+  if (tab !== "request" || app.promptText.has(taskId) || app.promptLoading.has(taskId) || !canReadPrompt(task)) return;
+  app.promptLoading.add(taskId);
   try {
     const result = await bridge.callTool("get_task", { taskId, detail: "prompt" });
     const prompt = result?.structuredContent?.prompt ?? result?.prompt;
-    if (prompt?.task != null) {
-      app.promptText.set(taskId, prompt.task);
-      render();
-    }
+    if (prompt?.task != null) app.promptText.set(taskId, prompt.task);
   } catch {
-    // Leave the loading state; the next refresh of a pinned row may still fill it.
+    // Leave the loading state; the next explicit tab selection may retry.
+  } finally {
+    app.promptLoading.delete(taskId);
+    render();
   }
 }
 
@@ -817,8 +665,10 @@ function renderRow(row, opts = {}) {
   const history = app.expanded.get(row.sessionKey);
   const historyOpen = app.historyOpen.has(row.sessionKey);
   const promptResolved = app.promptText.has(taskId);
-  // The latest timeline item is the live evidence shown below the response.
-  const latestEntry = taskId === app.timelineFor ? app.timeline[0] : undefined;
+  // Concise recent activity — the live evidence shown below the response,
+  // from the client-side ring buffer (see mergeRingBuffer/app.recentEvents),
+  // not a single line derived fresh from one snapshot. At most 3 rows.
+  const recentActivity = taskId === app.timelineFor ? app.timeline : [];
 
   const children = [];
   const headChildren = [
@@ -852,15 +702,6 @@ function renderRow(row, opts = {}) {
         },
       }, [tabLabels[tab]]),
       ),
-      ...(bridge.supportsDisplayModeRequest()
-        ? [el("button", {
-            class: "cc-card-tab cc-card-tab--expand",
-            type: "button",
-            title: "Open Task Center",
-            "aria-label": "Open Task Center",
-            onclick: (e) => { e.stopPropagation(); openTaskCenter(); },
-          }, [el("span", { "aria-hidden": "true" }, ["⛶"])])]
-        : []),
     ]),
   );
 
@@ -888,23 +729,23 @@ function renderRow(row, opts = {}) {
     } else if (row.latestTask.status === "completed_no_summary") {
       panelChildren.push(contentNode("cc-response", "Finished - no response summary was returned."));
     } else if (row.latestTask.status === "running" || row.latestTask.status === "queued") {
-      // The status pill and timeline are the explanation while a task runs.
-      // Keep the response area quiet until there is an actual response.
-      if (!latestEntry) panelChildren.push(el("span", { class: "cc-live-loading", role: "status", "aria-label": "Task is running" }, []));
+      // The status pill and recent-activity list are the explanation while a
+      // task runs. Keep the response area quiet until there is an actual response.
+      if (recentActivity.length === 0) panelChildren.push(el("span", { class: "cc-live-loading", role: "status", "aria-label": "Task is running" }, []));
     }
   }
   children.push(el("div", { role: "tabpanel", id: `${tablistId}-panel`, "aria-labelledby": `${tablistId}-${activeTab}` }, panelChildren));
 
-  // The actual evidence behind "is working" — a real log line, not just a
+  // The actual evidence behind "is working" — real log lines, not just a
   // status word. Only present for the one row currently in focus/highlighted
   // (refresh() only fetches it there — see the bounded-reads note in refresh()).
-  if (latestEntry) {
+  for (const entry of recentActivity) {
     children.push(
       el("div", { class: "cc-update" }, [
         // Lifecycle/tool rows are evidence, not task status. Keep them
         // neutral unless the event itself carried an error bit.
-        el("span", { class: "cc-update-icon" }, [latestEntry.isError ? "✕" : "•"]),
-        el("span", { class: "cc-update-text" }, [latestEntry.count > 1 ? `${latestEntry.text} ×${latestEntry.count}` : latestEntry.text]),
+        el("span", { class: "cc-update-icon" }, [entry.isError ? "✕" : "•"]),
+        el("span", { class: "cc-update-text" }, [entry.count > 1 ? `${entry.text} ×${entry.count}` : entry.text]),
       ]),
     );
   }
@@ -939,19 +780,12 @@ function renderRow(row, opts = {}) {
 function render() {
   const root = document.getElementById("root");
   root.innerHTML = "";
-  root.className = app.displayMode === "fullscreen" ? "cc-fullscreen" : "";
-  if (app.displayMode === "fullscreen") {
-    renderFullscreen(root);
-  } else {
-    renderInline(root);
-  }
+  root.className = "";
+  renderInline(root);
   persist();
 }
 
 function renderInline(root) {
-  // Compact renders its own slice of the canonical list, resolved here rather
-  // than read from whatever the last fetch happened to store — that store is
-  // shared with the Task Center, which reads every session.
   const tasks = compactVisibleTasks();
   const pinnedSessionKey =
     app.compactSessionKey ?? deriveViewMode(app.mounted, tasks).highlightSessionKey ?? app.mounted?.sessionKey;
@@ -982,143 +816,6 @@ function renderInline(root) {
   } else {
     for (const row of visibleRows) root.append(renderRow(row, { pinned: row.sessionKey === pinnedSessionKey }));
   }
-
-  if (app.displayModeNote) {
-    root.append(el("div", { class: "cc-note" }, [app.displayModeNote]));
-  }
-
-}
-
-function renderFullscreen(root) {
-  const rows = buildSessionRows(ensurePinnedTask(app.tasks, app.selectedDetail), { highlightSessionKey: app.selectedSessionKey });
-  const visibleRows = filterRows(rows, FULLSCREEN_ROW_VIEW, app.selectedSessionKey);
-
-  const header = el("div", { class: "cc-fs-header" }, [
-    el("div", { class: "cc-fs-title" }, ["Task Center"]),
-    el("button", { class: "cc-btn", onclick: closeTaskCenter }, ["Close"]),
-  ]);
-
-  const sidebar = el(
-    "div",
-    { class: "cc-fs-sidebar" },
-    [
-      ...(visibleRows.length === 0
-        ? [el("div", { class: "cc-meta" }, ["Nothing here yet."])]
-        : visibleRows.map((row) => {
-            const selected = row.sessionKey === app.selectedSessionKey;
-            const pill = deriveStatusPill(row.group);
-            return el(
-              "div",
-              {
-                class: `cc-fs-session${selected ? " cc-fs-session--selected" : ""}`,
-                onclick: () => {
-                  app.selectedSessionKey = row.sessionKey;
-                  app.selectedTaskId = null;
-                  app.detailTab = "overview";
-                  refresh();
-                },
-              },
-              [
-                el("div", { class: "cc-title" }, [row.title]),
-                el("div", { class: "cc-meta" }, [`${pill.icon} ${row.latestTask.agent ?? "?"} · ${deriveActivityLabel(row.latestTask, Date.now())}`]),
-              ],
-            );
-          })),
-    ],
-  );
-
-  const selectedSessionKey = app.selectedSessionKey;
-  const history = selectedSessionKey ? app.expanded.get(selectedSessionKey) : undefined;
-  const selectedSummary = history?.find((t) => (t.taskId ?? t.jobId) === app.selectedTaskId) ?? history?.[0];
-  // get_session(mode:"tasks") also returns plain TaskSummary (no
-  // artifacts) — swap in the full snapshot when the selection matches the
-  // one pinned/detail-fetched task, same as mergePinnedDetail() does for rows.
-  const selectedTask = selectedSummary ? mergePinnedDetail([selectedSummary], app.selectedDetail)[0] : selectedSummary;
-
-  const taskList = el(
-    "div",
-    { class: "cc-fs-tasklist" },
-    !selectedSessionKey
-      ? [el("div", { class: "cc-meta" }, ["Select a session."])]
-      : !history
-        ? [el("div", { class: "cc-meta" }, ["Loading…"])]
-        : history.length === 0
-          ? [el("div", { class: "cc-meta" }, ["No tasks in this session yet."])]
-          : history.map((t) => {
-              const tid = t.taskId ?? t.jobId;
-              const selected = Boolean(selectedTask) && tid === (selectedTask.taskId ?? selectedTask.jobId);
-              return el(
-                "div",
-                {
-                  class: `cc-fs-task${selected ? " cc-fs-task--selected" : ""}`,
-                  onclick: () => { app.selectedTaskId = tid; app.detailTab = "overview"; refresh(); },
-                },
-                [el("span", { class: `cc-dot cc-dot--${groupStatus(t.status)}` }, []), deriveTitle(t)],
-              );
-            }),
-  );
-
-  const main = el("div", { class: "cc-fs-main" }, [taskList, renderDetailPane(selectedTask)]);
-  root.append(header, el("div", { class: "cc-fs-body" }, [sidebar, main]));
-}
-
-function renderDetailPane(task) {
-  if (!task) {
-    return el("div", { class: "cc-fs-detail" }, [el("div", { class: "cc-meta" }, ["Select a task to see its details."])]);
-  }
-  const taskId = task.taskId ?? task.jobId;
-  const tabs = deriveDetailTabs(task);
-  if (!tabs.includes(app.detailTab)) app.detailTab = "overview";
-  const tabLabels = { overview: "Overview", artifacts: "Artifacts", prompt: "Original prompt" };
-
-  const tabButtons = tabs.map((tab) =>
-    el(
-      "button",
-      { class: `cc-btn${app.detailTab === tab ? " cc-btn--primary" : ""}`, onclick: () => { app.detailTab = tab; render(); } },
-      [tabLabels[tab]],
-    ),
-  );
-
-  const body = [];
-  if (app.detailTab === "overview") {
-    const pill = deriveStatusPill(groupStatus(task.status));
-    body.push(el("span", { class: `cc-pill cc-pill--${groupStatus(task.status)}` }, [`${pill.icon} ${pill.label}`]));
-    body.push(el("div", { class: "cc-meta" }, [`${task.agent ?? "?"} · ${deriveActivityLabel(task, Date.now())}`]));
-    // Same evidence as the inline card's update line, from the same
-    // bounded per-selection fetch in refresh() — not a separate concept.
-    if (taskId === app.timelineFor && app.timeline.length > 0) {
-      body.push(
-        el(
-          "div",
-          { class: "cc-history" },
-          app.timeline.map((entry) =>
-            el("div", { class: "cc-history-item" }, [entry.count > 1 ? `${entry.text} ×${entry.count}` : entry.text]),
-          ),
-        ),
-      );
-    }
-    if (task.summary) body.push(contentNode("cc-response", task.summary));
-    if (task.error) body.push(el("div", {}, [`Error: ${task.error}`]));
-  } else if (app.detailTab === "artifacts") {
-    const a = task.artifacts ?? {};
-    if (a.prUrl) body.push(el("div", {}, [`Pull request: ${a.prUrl}`]));
-    if (a.branchName) body.push(el("div", {}, [`Branch: ${a.branchName}`]));
-    if (a.commitSha) body.push(el("div", {}, [`Commit: ${a.commitSha}`]));
-    if (a.filesChanged?.length) body.push(el("div", {}, [`Files changed: ${a.filesChanged.join(", ")}`]));
-    if (a.commandsRun?.length) body.push(el("div", {}, [`Commands run: ${a.commandsRun.length}`]));
-  } else if (app.detailTab === "prompt") {
-    if (app.promptText.has(taskId)) {
-      body.push(contentNode("cc-prompt-body", app.promptText.get(taskId)));
-    } else {
-      body.push(el("div", { class: "cc-prompt-loading" }, ["Loading request…"]));
-    }
-  }
-
-  return el("div", { class: "cc-fs-detail" }, [
-    el("div", { class: "cc-title" }, [deriveTitle(task)]),
-    el("div", { class: "cc-fs-tabs" }, tabButtons),
-    el("div", { class: "cc-fs-detail-body" }, body),
-  ]);
 }
 
 rehydrate();

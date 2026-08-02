@@ -14,8 +14,6 @@ import {
   defaultCardTab,
   isLikelyMarkdown,
   renderMarkdownHtml,
-  deriveDetailSections,
-  deriveDetailTabs,
   pollIntervalMs,
   shouldPoll,
   preferSnapshot,
@@ -32,6 +30,9 @@ import {
   deriveCounts,
   formatCounts,
   nextCardTab,
+  mergeRingBuffer,
+  RING_BUFFER_MAX,
+  shouldRenderImmediately,
 } from "./state.js";
 
 function task(overrides = {}) {
@@ -436,36 +437,6 @@ describe("renderMarkdownHtml — escapes first, then emits only tags shell.html 
   });
 });
 
-describe("deriveDetailSections — context-aware, read-only detail rendering", () => {
-  it("shows only sections the task actually has data for", () => {
-    expect(deriveDetailSections(task({ status: "running", summary: undefined }))).toEqual(["status", "liveUpdate"]);
-    expect(deriveDetailSections(task({ status: "done", summary: "done!" }))).toEqual(["status", "summary"]);
-    expect(
-      deriveDetailSections(task({ status: "error", error: "boom", errorInfo: { category: "unknown" } })),
-    ).toContain("error");
-    expect(
-      deriveDetailSections(task({ status: "done", artifacts: { filesChanged: ["a.ts"], commandsRun: [] } })),
-    ).toContain("artifacts");
-  });
-
-  it("never includes an action/mutation section — read-only, navigation only", () => {
-    const sections = deriveDetailSections(task({ status: "done", summary: "x", artifacts: { prUrl: "y" } }));
-    expect(sections).not.toContain("cancel");
-    expect(sections).not.toContain("mutate");
-  });
-});
-
-describe("deriveDetailTabs — fullscreen detail pane, built on deriveDetailSections", () => {
-  it("always offers overview; artifacts/prompt only when there's something behind them", () => {
-    expect(deriveDetailTabs(task({ status: "running" }))).toEqual(["overview", "prompt"]);
-    expect(deriveDetailTabs(task({ status: "done", artifacts: { prUrl: "x" } }))).toEqual(["overview", "artifacts", "prompt"]);
-  });
-
-  it("omits the prompt tab entirely when no id is resolvable", () => {
-    expect(deriveDetailTabs(task({ taskId: undefined, jobId: undefined, status: "done" }))).toEqual(["overview"]);
-  });
-});
-
 describe("bounded + deduplicated reads", () => {
   it("pollIntervalMs follows the attention-shaped cadence and stops at any terminal group", () => {
     expect(pollIntervalMs("active")).toBe(2500);
@@ -725,6 +696,58 @@ describe("deriveTimeline / deriveLatestUpdate — the actual evidence, not just 
   it("deriveLatestUpdate returns the single most recent entry", () => {
     expect(deriveLatestUpdate(logs)).toEqual({ ts: 2000, type: "tool", text: "Running command: pnpm test" });
     expect(deriveLatestUpdate([])).toBeNull();
+  });
+});
+
+describe("mergeRingBuffer — client-side accumulation of check_task/get_task's now-bounded per-poll delta", () => {
+  it("appends a delta onto the existing buffer", () => {
+    const existing = [{ ts: 1, type: "lifecycle", text: "a", seq: 1 }];
+    const delta = [{ ts: 2, type: "lifecycle", text: "b", seq: 2 }];
+    expect(mergeRingBuffer(existing, delta)).toEqual([...existing, ...delta]);
+  });
+
+  it("caps the merged buffer at RING_BUFFER_MAX, dropping the oldest first", () => {
+    const existing = Array.from({ length: RING_BUFFER_MAX }, (_, i) => ({ ts: i, type: "lifecycle", text: `e${i}`, seq: i + 1 }));
+    const delta = [{ ts: 999, type: "lifecycle", text: "new", seq: RING_BUFFER_MAX + 1 }];
+    const merged = mergeRingBuffer(existing, delta);
+    expect(merged.length).toBe(RING_BUFFER_MAX);
+    expect(merged.at(-1)?.text).toBe("new");
+    expect(merged[0].text).toBe("e1"); // e0 dropped to make room
+  });
+
+  it("an empty delta is a no-op, returning the same buffer", () => {
+    const existing = [{ ts: 1, type: "lifecycle", text: "a", seq: 1 }];
+    expect(mergeRingBuffer(existing, [])).toBe(existing);
+    expect(mergeRingBuffer(existing, undefined)).toBe(existing);
+  });
+
+  it("treats a missing/undefined existing buffer as empty", () => {
+    const delta = [{ ts: 1, type: "lifecycle", text: "a", seq: 1 }];
+    expect(mergeRingBuffer(undefined, delta)).toEqual(delta);
+  });
+
+  it("deduplicates by seq — a defensive guard against overlapping reads racing", () => {
+    const existing = [{ ts: 1, type: "lifecycle", text: "a", seq: 1 }];
+    const delta = [{ ts: 1, type: "lifecycle", text: "a", seq: 1 }, { ts: 2, type: "lifecycle", text: "b", seq: 2 }];
+    expect(mergeRingBuffer(existing, delta)).toEqual([
+      { ts: 1, type: "lifecycle", text: "a", seq: 1 },
+      { ts: 2, type: "lifecycle", text: "b", seq: 2 },
+    ]);
+  });
+});
+
+describe("shouldRenderImmediately — lifecycle/terminal changes render now, cosmetic activity can debounce", () => {
+  it("the first render (no prior group) is always immediate", () => {
+    expect(shouldRenderImmediately(null, "active")).toBe(true);
+  });
+
+  it("a status-group transition is always immediate", () => {
+    expect(shouldRenderImmediately("active", "completed")).toBe(true);
+    expect(shouldRenderImmediately("active", "needs_attention")).toBe(true);
+  });
+
+  it("the same group as last render is not immediate — cosmetic activity may debounce", () => {
+    expect(shouldRenderImmediately("active", "active")).toBe(false);
   });
 });
 

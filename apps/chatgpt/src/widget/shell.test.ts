@@ -9,17 +9,20 @@ describe("Task Center visual regressions", () => {
     expect(shell).toContain("--cc-action-selected");
     expect(shell).not.toMatch(/#(?:d97e2c|eb9c4f)/i);
     expect(shell).not.toContain("cc-btn cc-control cc-btn--primary");
-    expect(shell).toContain("class: \"cc-card-tab cc-card-tab--expand\"");
   });
 
-  it("renders a compact intentional empty state with an accessible center action", () => {
+  it("renders a compact intentional empty state", () => {
     expect(shell).toContain("No active tasks");
     expect(shell).toContain("New delegated tasks will appear here while they run.");
     expect(shell).toContain('class: "cc-empty"');
-    expect(shell).toContain('title: "Open Task Center"');
-    expect(shell).toContain('aria-label": "Open Task Center"');
-    expect(shell).toContain("justify-content: flex-end");
     expect(shell).toContain("min-height: 58px");
+  });
+
+  it("has no fullscreen/Task Center surface — the widget is compact-only", () => {
+    expect(shell).not.toContain("cc-fullscreen");
+    expect(shell).not.toContain("cc-fs-");
+    expect(shell).not.toContain("Task Center");
+    expect(shell).not.toContain("requestDisplayMode");
   });
 
   it("keeps the card tabs off .cc-btn, so their own rules can't lose the cascade to it", () => {
@@ -40,8 +43,7 @@ describe("Task Center visual regressions", () => {
     expect(shell).not.toContain("cc-segment"); // superseded — no dead rules left behind
   });
 
-  it("keeps narrow embeds compact and removes the waiting placeholder from active runs", () => {
-    expect(shell).toContain("@media (max-width: 640px)");
+  it("removes the waiting placeholder from active runs", () => {
     expect(shell).toContain("cc-live-loading");
     expect(shell).not.toContain("Waiting for the final response...");
   });
@@ -80,12 +82,7 @@ describe("Task Center visual regressions", () => {
     expect(shell).toContain('window.addEventListener("click", refreshOnInteraction');
     expect(shell).not.toContain('addEventListener("pointerdown", refreshOnInteraction');
     expect(shell).toContain(".cc-card-tabs");
-    expect(shell).toContain("@media (max-width: 640px)");
     expect(shell).not.toContain('class: "cc-btn cc-segment"');
-    expect(shell).toContain('class: "cc-card-tab cc-card-tab--expand"');
-    expect(shell).toContain('title: "Open Task Center"');
-    expect(shell).toContain('"aria-label": "Open Task Center"');
-    expect(shell).toContain("margin-left: auto");
     expect(shell).not.toContain('class: "cc-toolbar"');
   });
 });
