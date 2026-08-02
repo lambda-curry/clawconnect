@@ -77,6 +77,16 @@ const agentToolEvent = (runId: string, name: string) =>
 const sendAck = (id: string | undefined, runId: string) =>
   JSON.stringify({ type: "res", id, ok: true, payload: { runId } });
 
+/** Poll a predicate on real timers — the reconnect loop is genuinely async I/O. */
+async function waitFor(predicate: () => boolean, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  throw new Error(`waitFor timed out after ${timeoutMs}ms`);
+}
+
 let cleanup: (() => Promise<void>)[] = [];
 
 afterEach(async () => {
@@ -233,6 +243,63 @@ describe("OpenClawGateway.chat — run correlation across the send boundary", ()
       /did not return a runId/,
     );
   });
+});
+
+describe("OpenClawGateway reconnect — a failed attempt must re-arm", () => {
+  it("reconnects on a later retry after the first reconnect attempt fails", async () => {
+    // Regression for the dead end this replaced: scheduleReconnect cleared its
+    // own timer before retrying, so if that retry threw, nothing was left to
+    // fire another one — no timer, and no socket to emit another `close`. The
+    // client stayed offline until the process restarted. Live logs showed 53
+    // disconnects against 56 live-timeout errors, which is that dead end.
+    //
+    // Only the background loop can prove this: sendRpc calls connect() itself,
+    // so any RPC-based assertion would reconnect the client and mask the bug.
+    // The reconnect log line is the one unambiguous signal.
+    const wss = new WebSocketServer({ port: 0, host: "127.0.0.1" });
+    await once(wss, "listening");
+    const { port } = wss.address() as AddressInfo;
+    const handshake = (socket: ServerSocket) => {
+      socket.send(JSON.stringify({ type: "event", event: "connect.challenge", payload: { nonce: "n" } }));
+      socket.on("message", (raw: Buffer) => {
+        const frame = JSON.parse(raw.toString()) as RequestFrame;
+        if (frame.method === "connect") {
+          socket.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: { protocol: 4 } }));
+        }
+      });
+    };
+    wss.on("connection", handshake);
+
+    const lines: string[] = [];
+    const realError = console.error;
+    console.error = (...args: unknown[]) => void lines.push(args.map(String).join(" "));
+
+    const gateway = new OpenClawGateway({ url: `ws://127.0.0.1:${port}`, token: "t" });
+    let revived: WebSocketServer | undefined;
+    try {
+      await gateway.connect();
+
+      // Drop the server so the client sees `close` and starts reconnecting
+      // into a port with nothing listening — the first attempt must fail.
+      await new Promise<void>((r) => {
+        wss.clients.forEach((c) => c.terminate());
+        wss.close(() => r());
+      });
+      await waitFor(() => lines.some((l) => l.includes("reconnect failed")), 8_000);
+
+      // Bring it back on the same port. Only a RE-ARMED timer can find it.
+      revived = new WebSocketServer({ port, host: "127.0.0.1" });
+      await once(revived, "listening");
+      revived.on("connection", handshake);
+
+      await waitFor(() => lines.some((l) => l.includes("reconnected after")), 15_000);
+      expect(lines.some((l) => l.includes("reconnect failed"))).toBe(true);
+    } finally {
+      console.error = realError;
+      gateway.close();
+      if (revived) await new Promise<void>((r) => revived!.close(() => r()));
+    }
+  }, 30_000);
 });
 
 describe("OpenClawGateway.reconcileRun — bounded read of upstream truth", () => {

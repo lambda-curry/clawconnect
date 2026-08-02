@@ -54,6 +54,10 @@ export const RECONCILE_QUIET_MS = readEnvMs("CLAWCONNECT_RECONCILE_QUIET_MS", 12
 // Gap between the two transcript reads a single reconciliation round takes.
 // Long enough that a run still writing will visibly move between them.
 const RECONCILE_SAMPLE_INTERVAL_MS = readEnvMs("CLAWCONNECT_RECONCILE_SAMPLE_INTERVAL_MS", 15_000);
+// The summary a job carries when its run ended without producing visible
+// text. Also the exact string chat() resolves with in that case, which is how
+// the live stream reports "finished, nothing to say".
+const NO_SUMMARY_SENTINEL = "Stream finished with no response collected.";
 
 /**
  * Job.logs is authoritative full history — server-retained, never trimmed or
@@ -385,7 +389,7 @@ export class SessionManager {
           // chat() settled: the live stream answered for itself, so the quiet
           // watchdog has nothing left to reconcile.
           this.clearReconciler(jobId);
-          const noSummary = !reply || reply === "Stream finished with no response collected.";
+          const noSummary = !reply || reply === NO_SUMMARY_SENTINEL;
           if (job.status !== "running") {
             // Reconciliation already finalized this job while chat() was
             // still pending. chat() settling is the last live evidence this
@@ -401,8 +405,7 @@ export class SessionManager {
             this.recheckSettled.delete(jobId);
             if (!noSummary && wasProvisional) {
               job.lastEventAt = Date.now();
-              job.status = "completed";
-              job.summary = reply;
+              this.setOutcome(job, "completed", reply);
               extractPatternsFromSummary(artifacts, reply);
               // Reconciliation freed this session, so a newer job may already
               // own it — this reply is minutes stale by construction. Upgrade
@@ -437,8 +440,7 @@ export class SessionManager {
             this.recoverLateFinalText(job, sessionKey, jobId, artifacts);
             return;
           }
-          job.status = "completed";
-          job.summary = reply;
+          this.setOutcome(job, "completed", reply);
           extractPatternsFromSummary(artifacts, reply);
           this.sessions.set(sessionKey, {
             sessionKey,
@@ -465,7 +467,7 @@ export class SessionManager {
             return;
           }
           job.lastEventAt = Date.now();
-          job.status = "error";
+          this.setOutcome(job, "error", undefined);
           job.error = err instanceof Error ? err.message : String(err);
           job.errorInfo = classifyError(job.error);
           this.sessions.set(sessionKey, {
@@ -755,8 +757,7 @@ export class SessionManager {
     this.clearReconciler(job.jobId);
     this.provisionalOutcomes.add(job.jobId);
     job.lastEventAt = Date.now();
-    job.status = status;
-    job.summary = status === "completed" ? summary : "Stream finished with no response collected.";
+    this.setOutcome(job, status, status === "completed" ? summary : NO_SUMMARY_SENTINEL);
     if (status === "completed") extractPatternsFromSummary(job.artifacts, summary);
     pushLog(job, {
       ts: Date.now(),
@@ -832,10 +833,14 @@ export class SessionManager {
       .then(
         (recovered) => {
           if (job.status !== "running") return;
+          // Same ownership check its two siblings make before touching
+          // continuation state. Unreachable while the busy guard holds (a
+          // `running` job is necessarily its session's latest), so it is
+          // uniformity rather than a live fix — and untested for that reason.
+          if (this.latestJobBySession.get(sessionKey) !== jobId) return;
           job.lastEventAt = Date.now();
           if (recovered && recovered.length > 0) {
-            job.status = "completed";
-            job.summary = recovered;
+            this.setOutcome(job, "completed", recovered);
             job.recovery = undefined;
             extractPatternsFromSummary(artifacts, recovered);
             this.sessions.set(sessionKey, {
@@ -851,13 +856,12 @@ export class SessionManager {
             );
             return;
           }
-          job.status = "completed_no_summary";
-          job.summary = "Stream finished with no response collected.";
+          this.setOutcome(job, "completed_no_summary", NO_SUMMARY_SENTINEL);
           job.recovery = undefined;
           this.sessions.set(sessionKey, {
             sessionKey,
             lastJobId: jobId,
-            lastSummary: job.summary.slice(0, 500),
+            lastSummary: NO_SUMMARY_SENTINEL.slice(0, 500),
             artifacts,
             recommendedNextStep: deriveNextStep(artifacts, job.status),
           });
@@ -873,13 +877,12 @@ export class SessionManager {
           // entire in-memory jobs map. Mark the job terminal cleanly instead.
           if (job.status !== "running") return;
           job.lastEventAt = Date.now();
-          job.status = "completed_no_summary";
+          this.setOutcome(job, "completed_no_summary", NO_SUMMARY_SENTINEL);
           job.recovery = undefined;
-          job.summary = "Stream finished with no response collected.";
           this.sessions.set(sessionKey, {
             sessionKey,
             lastJobId: jobId,
-            lastSummary: job.summary.slice(0, 500),
+            lastSummary: NO_SUMMARY_SENTINEL.slice(0, 500),
             artifacts,
             recommendedNextStep: deriveNextStep(artifacts, job.status),
           });
@@ -889,6 +892,22 @@ export class SessionManager {
           );
         },
       );
+  }
+
+  /**
+   * The one place a job's terminal outcome is written. Every write bumps
+   * `outcomeVersion`, which is what lets an in-flight transcript read tell
+   * afterwards that it was superseded — including by a write of IDENTICAL
+   * text, which comparing the values before and after cannot detect.
+   *
+   * Route every status/summary assignment through here. The invariant is
+   * "an outcome write is a version bump"; enforcing it by construction is why
+   * this exists rather than a comment asking future callers to remember.
+   */
+  private setOutcome(job: Job, status: JobStatus, summary: string | undefined): void {
+    job.status = status;
+    job.summary = summary;
+    job.outcomeVersion = (job.outcomeVersion ?? 0) + 1;
   }
 
   /**
@@ -920,30 +939,26 @@ export class SessionManager {
     // this the old job would adopt the new run's answer as its own and
     // repoint the session's continuation state at itself.
     if (this.latestJobBySession.get(job.sessionKey) !== job.jobId) return;
+    // One read at a time. A read can outlive the cooldown that is meant to
+    // space reads apart — its own budget is attempts*intervalMs (12s here) but
+    // that is only checked BETWEEN attempts, so a single slow chat.history (20s
+    // RPC timeout) overruns it, ~32s worst case against a 20s cooldown. Two
+    // reads in flight then race to write the outcome, and every ordering
+    // question that follows from that ("which started first?", "what if the
+    // newer one comes back empty?") simply does not arise if there is only
+    // ever one. Cheaper to forbid the overlap than to arbitrate it.
+    if (job.recheckInFlight) return;
     const RECHECK_COOLDOWN_MS = 20_000;
     const last = job.lastRecheckAt ?? 0;
     if (Date.now() - last < RECHECK_COOLDOWN_MS) return;
     job.lastRecheckAt = Date.now();
-    // Two independent things can beat this read to the answer, and they need
-    // two different tests. Both are captured before the await.
-    //
-    // 1. A NEWER round of this same method. Reads can outlive the cooldown and
-    //    so overlap: the poll's own budget is attempts*intervalMs (12s here),
-    //    but it is only checked BETWEEN attempts, so a single slow chat.history
-    //    — its RPC timeout is 20s — overruns it, to ~32s worst case against a
-    //    RECHECK_COOLDOWN_MS of 20s. lastRecheckAt is stamped per read, so a
-    //    changed value means a later read exists — and this one is then the
-    //    older observation and must lose, whichever of the two resolves first.
-    //    Comparing outcomes cannot express that: it only says "somebody wrote",
-    //    not "somebody newer".
-    const recheckStartedAt = job.lastRecheckAt;
-    // 2. chat()'s late-final replacement. While a job is terminal that is the
-    //    only other writer of its outcome, so comparing the VALUE is an exact
-    //    "was I superseded?" test — and unlike a flag it does not fire when
-    //    chat() settles carrying nothing to supersede with (a reject, or the
-    //    no-summary sentinel).
-    const summaryAtStart = job.summary;
-    const statusAtStart = job.status;
+    // The run's own live final can still land while this read is out. Capture
+    // the outcome version rather than the summary text: a version bump catches
+    // a superseding write even when it happens to carry identical text, and it
+    // does NOT fire when chat() settles carrying nothing to supersede with (a
+    // reject, or the no-summary sentinel), which writes no outcome at all.
+    const outcomeAtStart = job.outcomeVersion ?? 0;
+    job.recheckInFlight = true;
     let recovered: string | undefined;
     try {
       recovered = await this.gateway.pollTranscriptForFinalText(job.sessionKey, {
@@ -959,22 +974,20 @@ export class SessionManager {
         `[job ${job.jobId}] lazy-recheck threw: ${err instanceof Error ? err.message : String(err)}`,
       );
       return;
+    } finally {
+      // In `finally` so a throw cannot strand the flag and wedge the job out
+      // of ever being re-read again.
+      job.recheckInFlight = false;
     }
     if (!recovered) return;
     // The poll above takes seconds, so re-check ownership: a new job may have
     // claimed the session while it ran.
     if (this.latestJobBySession.get(job.sessionKey) !== job.jobId) return;
-    // A newer read started while this one was in flight, so this one is the
-    // older observation no matter which of them resolves first.
-    if (job.lastRecheckAt !== recheckStartedAt) {
-      logDebug(`[job ${job.jobId}] lazy-recheck superseded by a newer read — discarding the older one`);
-      return;
-    }
-    // ...or the run's own live final landed while this read ran. Writing over
-    // that would be PERMANENT: chat() settling retires the provisional flag,
-    // so nothing replaces the summary again and no later poll re-reads it.
-    if (job.summary !== summaryAtStart || job.status !== statusAtStart) {
-      logDebug(`[job ${job.jobId}] lazy-recheck superseded by the live final — discarding the stale read`);
+    // Superseded while reading. Writing over the live final would be
+    // PERMANENT: chat() settling retires the provisional flag, so nothing
+    // replaces the summary again and no later poll re-reads it.
+    if ((job.outcomeVersion ?? 0) !== outcomeAtStart) {
+      logDebug(`[job ${job.jobId}] lazy-recheck superseded while reading — discarding the stale read`);
       return;
     }
     // Did this read actually heal anything? Either it brought text the job
@@ -990,8 +1003,7 @@ export class SessionManager {
     const healed = recovered !== job.summary || job.status !== "completed";
     if (healed) this.recheckSettled.add(job.jobId);
     job.lastEventAt = Date.now();
-    job.status = "completed";
-    job.summary = recovered;
+    this.setOutcome(job, "completed", recovered);
     job.error = undefined;
     job.errorInfo = undefined;
     extractPatternsFromSummary(job.artifacts, recovered);

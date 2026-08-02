@@ -628,52 +628,74 @@ describe("completion reconciliation — the live job 9f21545a shape", () => {
     expect(sessions.getJob(job.jobId)?.summary).toBe("the corrected final from the transcript");
   });
 
-  // Two re-reads can genuinely overlap: the cooldown is 20s but a read can run
-  // ~32s — its 12s budget is only checked between attempts, so one slow
-  // chat.history (20s RPC timeout) overruns it. Whichever
-  // STARTED first is the older observation and must lose — and it must lose on
-  // BOTH resolution orders. Comparing outcomes alone cannot express that: it
-  // only detects "somebody wrote", not "somebody newer", so it fixes whichever
-  // ordering it happens to see and silently inverts the other.
-  for (const olderResolvesFirst of [false, true]) {
-    it(`never lets an older overlapping re-read win when it resolves ${olderResolvesFirst ? "first" : "last"}`, async () => {
-      vi.useFakeTimers();
-      const firstRead = deferred<string | undefined>();
-      const secondRead = deferred<string | undefined>();
-      let reads = 0;
-      const { sessions, job } = await reconcileToProvisionalCompleted("an early guess", () =>
-        ++reads === 1 ? firstRead.promise : secondRead.promise,
-      );
-
-      const pollingA = sessions.waitForJob(job.jobId, 0, undefined, "wait", 1_000);
-      await vi.advanceTimersByTimeAsync(0);
-      await vi.advanceTimersByTimeAsync(21_000); // past the recheck cooldown
-      const pollingB = sessions.waitForJob(job.jobId, 0, undefined, "wait", 1_000);
-      await vi.advanceTimersByTimeAsync(0);
-      expect(reads).toBe(2);
-
-      const settleOlder = async () => {
-        firstRead.resolve("older partial text");
-        await pollingA;
-      };
-      const settleNewer = async () => {
-        secondRead.resolve("the newer, complete answer");
-        await pollingB;
-      };
-      if (olderResolvesFirst) {
-        await settleOlder();
-        await vi.advanceTimersByTimeAsync(0);
-        await settleNewer();
-      } else {
-        await settleNewer();
-        await vi.advanceTimersByTimeAsync(0);
-        await settleOlder();
-      }
-      await vi.advanceTimersByTimeAsync(0);
-
-      expect(sessions.getJob(job.jobId)?.summary).toBe("the newer, complete answer");
+  it("refuses to start a second re-read while one is still in flight", async () => {
+    vi.useFakeTimers();
+    // A read can outlive the cooldown that spaces reads apart: its own budget
+    // is attempts*intervalMs (12s), but that is only checked BETWEEN attempts,
+    // so one slow chat.history (20s RPC timeout) overruns it — ~32s against a
+    // 20s cooldown. Two reads in flight then race to write the outcome, and
+    // every ordering question that follows ("which started first?", "what if
+    // the newer one comes back empty?") is only answerable by arbitration.
+    // Forbidding the overlap deletes all of them at once, so THIS is the
+    // property worth pinning.
+    const inFlight = deferred<string | undefined>();
+    let reads = 0;
+    const { sessions, job } = await reconcileToProvisionalCompleted("an early guess", () => {
+      reads += 1;
+      return inFlight.promise;
     });
-  }
+
+    const pollingA = sessions.waitForJob(job.jobId, 0, undefined, "wait", 1_000);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(reads).toBe(1);
+
+    // Cooldown elapses while the first read is STILL out. Without the
+    // in-flight guard this second poll starts a competing read.
+    await vi.advanceTimersByTimeAsync(21_000);
+    const pollingB = sessions.waitForJob(job.jobId, 0, undefined, "wait", 1_000);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(reads).toBe(1);
+    await pollingB;
+
+    // Resolve with the SAME text the job already holds: that heals nothing, so
+    // the job stays eligible for re-reading and the gate reopening is what the
+    // next assertion actually measures (a healing read deliberately ends the
+    // re-read loop, which would mask it).
+    inFlight.resolve("an early guess");
+    await pollingA;
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sessions.getJob(job.jobId)?.summary).toBe("an early guess");
+
+    // The gate is a gate, not a latch — once the read is done another may run.
+    await vi.advanceTimersByTimeAsync(21_000);
+    await sessions.waitForJob(job.jobId, 0, undefined, "wait", 1_000);
+    expect(reads).toBe(2);
+  });
+
+  it("discards a stale read even when the live final carried byte-identical text", async () => {
+    vi.useFakeTimers();
+    // The version counter exists for exactly this: comparing summary values
+    // before and after the read cannot see a superseding write that happens
+    // to carry the same string, so the stale read would sail past the guard
+    // and overwrite the run's own terminal answer with older transcript text.
+    const readGate = deferred<string | undefined>();
+    const { ctrl, sessions, job } = await reconcileToProvisionalCompleted(
+      "an early guess",
+      () => readGate.promise,
+    );
+
+    const polling = sessions.waitForJob(job.jobId, 0, undefined, "wait", 1_000);
+    await vi.advanceTimersByTimeAsync(0);
+
+    // chat() settles with text IDENTICAL to what the job already holds.
+    ctrl.finishChat("an early guess");
+    await vi.advanceTimersByTimeAsync(0);
+
+    readGate.resolve("stale text from the transcript");
+    await polling;
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sessions.getJob(job.jobId)?.summary).toBe("an early guess");
+  });
 
   it("still lets a later real live final replace an outcome a transcript re-read already corrected", async () => {
     vi.useFakeTimers();

@@ -85,6 +85,15 @@ export type Job = {
    *  (completed_no_summary / error). Used to rate-limit re-reads so a poll
    *  storm doesn't hammer chat.history. Unset until the first recheck. */
   lastRecheckAt?: number;
+  /** True while a lazy transcript recheck is awaiting its read. Only one runs
+   *  at a time: a read can outlive the cooldown that spaces reads apart, and
+   *  two in flight at once race to write the outcome. */
+  recheckInFlight?: boolean;
+  /** Bumped by SessionManager.setOutcome on every write to status/summary.
+   *  An in-flight transcript read captures it and re-checks afterwards, so it
+   *  can tell it was superseded — including by a write of identical text,
+   *  which comparing the values cannot detect. */
+  outcomeVersion?: number;
   /** Number of times waitForJob has been called for this job (check_task calls). */
   pollCount: number;
   /** The original submitted task/context/senderName. See JobPrompt. */
