@@ -472,6 +472,49 @@ describe("completion reconciliation — the live job 9f21545a shape", () => {
     expect(pollSpy).toHaveBeenCalledTimes(1);
   });
 
+  it("stops re-reading a provisional completion once chat() settles with the no-summary sentinel", async () => {
+    vi.useFakeTimers();
+    // The re-read loop exists to catch a text that changes. A transcript that
+    // never changes would otherwise keep it alive on every poll forever, so
+    // chat() settling — the last live evidence the job can ever get — has to
+    // close it out.
+    const pollSpy = vi.fn(async () => "an early guess");
+    const { ctrl, sessions, job } = await reconcileToProvisionalCompleted("an early guess", pollSpy);
+
+    // Still provisional while chat() is outstanding: the re-read happens.
+    await sessions.waitForJob(job.jobId, 0, undefined, "wait", 1_000);
+    expect(pollSpy).toHaveBeenCalledTimes(1);
+
+    ctrl.finishChat(SENTINEL);
+    await vi.advanceTimersByTimeAsync(0);
+
+    await vi.advanceTimersByTimeAsync(21_000); // past the recheck cooldown
+    await sessions.waitForJob(job.jobId, 0, undefined, "wait", 1_000);
+    expect(pollSpy).toHaveBeenCalledTimes(1);
+    // The sentinel carries nothing, so the reconciled outcome is untouched.
+    expect(sessions.getJob(job.jobId)?.status).toBe("completed");
+    expect(sessions.getJob(job.jobId)?.summary).toBe("an early guess");
+  });
+
+  it("stops re-reading a provisional completion once chat() rejects", async () => {
+    vi.useFakeTimers();
+    const pollSpy = vi.fn(async () => "an early guess");
+    const { ctrl, sessions, job } = await reconcileToProvisionalCompleted("an early guess", pollSpy);
+
+    await sessions.waitForJob(job.jobId, 0, undefined, "wait", 1_000);
+    expect(pollSpy).toHaveBeenCalledTimes(1);
+
+    ctrl.failChat(new Error("OpenClaw task timed out"));
+    await vi.advanceTimersByTimeAsync(0);
+
+    await vi.advanceTimersByTimeAsync(21_000);
+    await sessions.waitForJob(job.jobId, 0, undefined, "wait", 1_000);
+    expect(pollSpy).toHaveBeenCalledTimes(1);
+    // The abandoned stream's timeout must not overwrite the outcome either.
+    expect(sessions.getJob(job.jobId)?.status).toBe("completed");
+    expect(sessions.getJob(job.jobId)?.error).toBeUndefined();
+  });
+
   it("stays provisional when a re-read returns the identical text off a still-frozen transcript", async () => {
     vi.useFakeTimers();
     // Reading the same text twice is the same inference twice, not

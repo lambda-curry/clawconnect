@@ -358,14 +358,17 @@ export class SessionManager {
           const noSummary = !reply || reply === "Stream finished with no response collected.";
           if (job.status !== "running") {
             // Reconciliation already finalized this job while chat() was
-            // still pending — but that outcome was an inference, and this is
-            // the run's actual terminal text. It replaces a provisional
-            // outcome of either kind, including a reconciled `completed`
-            // whose summary may be text the run had merely written on its
-            // way past. An outcome that came from a real terminal event is
-            // never provisional and is left alone.
-            if (!noSummary && this.provisionalOutcomes.has(jobId)) {
-              this.provisionalOutcomes.delete(jobId);
+            // still pending. chat() settling is the last live evidence this
+            // job can ever receive, so the outcome stops being provisional
+            // either way — that also bounds the re-read loop, which an
+            // unchanging transcript would otherwise keep alive forever.
+            // When the settlement carries real text it is the run's actual
+            // terminal answer and replaces the inference, including a
+            // reconciled `completed` whose summary may be text the run had
+            // merely written on its way past. An outcome that came from a
+            // real terminal event is never provisional and is left alone.
+            const wasProvisional = this.provisionalOutcomes.delete(jobId);
+            if (!noSummary && wasProvisional) {
               job.lastEventAt = Date.now();
               job.status = "completed";
               job.summary = reply;
@@ -422,8 +425,13 @@ export class SessionManager {
           this.clearReconciler(jobId);
           // A job reconciliation already finished keeps its outcome: chat()
           // rejecting afterwards is the abandoned live stream timing out, not
-          // new information about the run.
-          if (job.status !== "running") return;
+          // new information about the run. It is still a settlement, though,
+          // so the outcome stops being provisional — nothing can replace it
+          // now, and the re-read loop has nothing left to wait for.
+          if (job.status !== "running") {
+            this.provisionalOutcomes.delete(jobId);
+            return;
+          }
           job.lastEventAt = Date.now();
           job.status = "error";
           job.error = err instanceof Error ? err.message : String(err);
