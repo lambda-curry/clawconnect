@@ -162,7 +162,7 @@ function createHost(opts: { mountedOnBoot?: boolean; knownSessionKeys?: string[]
     toolOutput: opts.mountedOnBoot ? { structuredContent: mountPayload } : null,
     widgetState: opts.knownSessionKeys ? { mounted: null, knownSessionKeys: opts.knownSessionKeys } : null,
     setWidgetState(value: unknown) {
-      host.widgetState = value;
+      host.widgetState = value as typeof host.widgetState;
     },
     // Test control, not part of window.openai's real surface.
     pushEvent(text: string) {
