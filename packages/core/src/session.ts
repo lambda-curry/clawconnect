@@ -154,6 +154,18 @@ export class SessionManager {
    */
   private provisionalOutcomes = new Set<string>();
   /**
+   * Jobs whose provisional outcome a transcript re-read has already
+   * confirmed or corrected — they stop being re-read, but stay provisional.
+   *
+   * These are two different questions and were previously one flag. "May a
+   * late live final replace this?" is only answered when chat() settles;
+   * "should later polls keep re-reading the transcript?" is answered the
+   * first time a read changes something. Letting a re-read answer both meant
+   * an inference retired the guard protecting against inference, and the
+   * run's actual terminal text was then discarded.
+   */
+  private recheckSettled = new Set<string>();
+  /**
    * openclaw's runId per job, once chat.send has returned one. Kept outside
    * the reconciler state so it cannot be lost to callback/arming order —
    * onRunId can fire before or after the watchdog is armed.
@@ -386,6 +398,7 @@ export class SessionManager {
             // merely written on its way past. An outcome that came from a
             // real terminal event is never provisional and is left alone.
             const wasProvisional = this.provisionalOutcomes.delete(jobId);
+            this.recheckSettled.delete(jobId);
             if (!noSummary && wasProvisional) {
               job.lastEventAt = Date.now();
               job.status = "completed";
@@ -448,6 +461,7 @@ export class SessionManager {
           // now, and the re-read loop has nothing left to wait for.
           if (job.status !== "running") {
             this.provisionalOutcomes.delete(jobId);
+            this.recheckSettled.delete(jobId);
             return;
           }
           job.lastEventAt = Date.now();
@@ -937,8 +951,11 @@ export class SessionManager {
     // transcript is exactly the condition under which that inference was
     // unsafe to begin with. Such a job stays provisional so later polls
     // keep re-reading it.
+    // Stops the re-read loop only. The outcome stays provisional: a
+    // transcript read is another inference, and the live final — when it
+    // eventually arrives — is the run's own terminal text and outranks it.
     const healed = recovered !== job.summary || job.status !== "completed";
-    if (healed) this.provisionalOutcomes.delete(job.jobId);
+    if (healed) this.recheckSettled.add(job.jobId);
     job.lastEventAt = Date.now();
     job.status = "completed";
     job.summary = recovered;
@@ -1063,7 +1080,7 @@ export class SessionManager {
       if (
         job.status === "completed_no_summary" ||
         job.status === "error" ||
-        this.provisionalOutcomes.has(job.jobId)
+        (this.provisionalOutcomes.has(job.jobId) && !this.recheckSettled.has(job.jobId))
       ) {
         await this.maybeRecoverTerminalJob(job);
       }

@@ -540,6 +540,32 @@ describe("completion reconciliation — the live job 9f21545a shape", () => {
     expect(pollSpy).toHaveBeenCalledTimes(1);
   });
 
+  it("still lets a later real live final replace an outcome a transcript re-read already corrected", async () => {
+    vi.useFakeTimers();
+    // Reviewer blocker D1. The re-read is itself an inference; the live final
+    // is the run's own terminal text. Letting the former retire the guard
+    // that protects the latter silently discarded the real answer.
+    const pollSpy = vi.fn(async () => "text from the transcript re-read");
+    const { ctrl, sessions, job } = await reconcileToProvisionalCompleted("an early guess", pollSpy);
+
+    // A re-read lands first and corrects the summary.
+    const afterRecheck = await sessions.waitForJob(job.jobId, 0, undefined, "wait", 1_000);
+    expect(pollSpy).toHaveBeenCalledTimes(1);
+    expect(afterRecheck?.summary).toBe("text from the transcript re-read");
+
+    // Having corrected it, the loop stops re-reading...
+    await vi.advanceTimersByTimeAsync(21_000); // past the recheck cooldown
+    await sessions.waitForJob(job.jobId, 0, undefined, "wait", 1_000);
+    expect(pollSpy).toHaveBeenCalledTimes(1);
+
+    // ...but the run's actual final answer, arriving afterwards, still wins.
+    ctrl.finishChat("the real final answer");
+    await vi.advanceTimersByTimeAsync(0);
+    const live = sessions.getJob(job.jobId)!;
+    expect(live.status).toBe("completed");
+    expect(live.summary).toBe("the real final answer");
+  });
+
   it("stops re-reading a provisional completion once chat() settles with the no-summary sentinel", async () => {
     vi.useFakeTimers();
     // The re-read loop exists to catch a text that changes. A transcript that
