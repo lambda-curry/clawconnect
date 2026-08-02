@@ -518,17 +518,24 @@ export class SessionManager {
 
   /**
    * The live stream has been silent for RECONCILE_QUIET_MS. Ask upstream what
-   * actually happened and turn the answer into a bounded outcome:
+   * actually happened. Only positive evidence decides anything:
    *
-   *   upstream still advancing  → stay `running` (and reset the round count)
-   *   upstream settled, has text → `completed` with that text
-   *   upstream settled, no text  → `completed_no_summary` (after MAX_ROUNDS)
-   *   upstream unreadable        → `completed_no_summary` (after MAX_ROUNDS)
+   *   upstream still advancing   → stay `running` (and reset the round count)
+   *   upstream settled, has text → `completed`, once the SAME text repeats
+   *                                across consecutive successful rounds
+   *   upstream settled, no text  → stay `running`
+   *   upstream unreadable        → stay `running`
    *
-   * The last two cases are why this exists: a run whose terminal event never
-   * reached us must still end. `maybeRecoverTerminalJob` keeps re-reading the
-   * transcript on later polls, so a text that lands afterwards still upgrades
-   * the job to `completed` — the terminal call here is bounded, not final.
+   * Absence is never a verdict: a frozen transcript with no live events is
+   * indistinguishable from a model composing a long final answer, which on
+   * real traffic runs for 20+ minutes (see the no-terminal-from-absence note
+   * below). Runs that genuinely end without producing text stay bounded by
+   * chat()'s own TIMEOUT_MS, exactly as before this existed.
+   *
+   * The `completed` it can produce is an inference, not ground truth, so it
+   * is recorded as provisional — a late live final overwrites it, and
+   * `maybeRecoverTerminalJob` keeps re-reading it until a CHANGED read
+   * confirms it.
    */
   private async reconcileQuietRun(job: Job): Promise<void> {
     // Captured before anything can await: this object's identity is what
@@ -647,21 +654,17 @@ export class SessionManager {
 
     // `completed` requires the SAME text from two successful rounds, with no
     // weaker fallback. chat.history exposes whatever the agent last wrote,
-    // and an active run routinely flashes an interim status line ("I'm
-    // tracing the live wiring now…") into the trailing-assistant slot and
-    // then works for minutes without returning to it — see the stability
-    // note in pollTranscriptForFinalText. Reaching the round cap is NOT
-    // evidence: an unreadable round followed by one readable interim line is
-    // two rounds of nothing confirmed. Unconfirmed text falls through to
-    // completed_no_summary, which self-heals — maybeRecoverTerminalJob
-    // re-reads the transcript on later polls and upgrades the job if the
-    // text is really final.
+    // and an active run can leave an interim line in the trailing-assistant
+    // slot and then work for minutes without returning to it — see the
+    // stability note in pollTranscriptForFinalText. Text seen once proves
+    // nothing, and there is no round count that substitutes for a second
+    // sighting: unconfirmed text simply leaves the job running.
     const textConfirmed =
       observation.ok &&
       observation.trailingText.length > 0 &&
       observation.trailingText === owner.candidateText;
     if (textConfirmed) {
-      this.finalizeReconciled(job, "completed", observation.trailingText);
+      this.finalizeReconciled(job, observation.trailingText);
       return;
     }
 
@@ -683,35 +686,33 @@ export class SessionManager {
     this.scheduleReconcile(job, RECONCILE_QUIET_MS);
   }
 
-  /** Apply a reconciled terminal outcome to a job that the live stream abandoned. */
-  private finalizeReconciled(
-    job: Job,
-    status: "completed" | "completed_no_summary",
-    summary: string,
-  ): void {
+  /**
+   * Complete a job from recovered transcript text. `completed` is the only
+   * outcome reconciliation can produce — absence never terminates a job — so
+   * this takes no status parameter. The result is marked provisional: it came
+   * from a transcript read, not from a terminal event.
+   */
+  private finalizeReconciled(job: Job, summary: string): void {
     this.clearReconciler(job.jobId);
     this.provisionalOutcomes.add(job.jobId);
     job.lastEventAt = Date.now();
-    job.status = status;
+    job.status = "completed";
     job.summary = summary;
-    if (status === "completed") extractPatternsFromSummary(job.artifacts, summary);
+    extractPatternsFromSummary(job.artifacts, summary);
     pushLog(job, {
       ts: Date.now(),
       type: "recovery",
-      text:
-        status === "completed"
-          ? "Recovered the final response from the upstream transcript after the live stream went quiet"
-          : "Upstream shows the run is no longer active and left no visible response",
+      text: "Recovered the final response from the upstream transcript after the live stream went quiet",
     });
     this.sessions.set(job.sessionKey, {
       sessionKey: job.sessionKey,
       lastJobId: job.jobId,
       lastSummary: summary.slice(0, 500),
       artifacts: job.artifacts,
-      recommendedNextStep: deriveNextStep(job.artifacts, status),
+      recommendedNextStep: deriveNextStep(job.artifacts, "completed"),
     });
     this.persistActiveJobs();
-    logDebug(`[job ${job.jobId}] reconciled to ${status} (${summary.length} chars)`);
+    logDebug(`[job ${job.jobId}] reconciled to completed (${summary.length} chars)`);
   }
 
   /**
@@ -829,12 +830,17 @@ export class SessionManager {
   }
 
   /**
-   * Lazy transcript re-check for a terminal job. Called from waitForJob when
-   * a job is already in a non-running, non-success terminal state
-   * (completed_no_summary / error). Reads chat.history for the sessionKey
-   * with a brief stability window — if a substantial trailing-assistant text
-   * now exists that wasn't there when we originally marked the job terminal,
+   * Lazy transcript re-check for a terminal job. Called from waitForJob for a
+   * job in a non-running, non-success terminal state (completed_no_summary /
+   * error) OR one whose success was merely inferred by reconciliation and is
+   * still marked provisional. Reads chat.history for the sessionKey with a
+   * brief stability window — if a substantial trailing-assistant text now
+   * exists that wasn't there when we originally marked the job terminal,
    * upgrade the job to completed.
+   *
+   * A read that returns exactly what the job already has heals nothing and
+   * leaves it provisional, so it keeps being re-read; only a changed text or
+   * a genuine status upgrade retires it.
    *
    * Rate-limited so a poll storm doesn't hammer chat.history: at most one
    * re-check per RECHECK_COOLDOWN_MS per job. Subsequent waitForJob calls
@@ -876,9 +882,15 @@ export class SessionManager {
     // The poll above takes seconds, so re-check ownership: a new job may have
     // claimed the session while it ran.
     if (this.latestJobBySession.get(job.sessionKey) !== job.jobId) return;
-    // A stable transcript read has now independently confirmed this text, so
-    // the outcome stops being provisional and stops being re-read.
-    this.provisionalOutcomes.delete(job.jobId);
+    // Did this read actually heal anything? Either it brought text the job
+    // did not have, or it moved a non-success terminal status to completed.
+    // Re-reading the SAME text off a still-frozen transcript is NOT
+    // confirmation — it is the same inference a second time, and a frozen
+    // transcript is exactly the condition under which that inference was
+    // unsafe to begin with. Such a job stays provisional so later polls
+    // keep re-reading it.
+    const healed = recovered !== job.summary || job.status !== "completed";
+    if (healed) this.provisionalOutcomes.delete(job.jobId);
     job.lastEventAt = Date.now();
     job.status = "completed";
     job.summary = recovered;

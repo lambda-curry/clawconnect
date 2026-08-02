@@ -436,26 +436,59 @@ describe("completion reconciliation — the live job 9f21545a shape", () => {
     expect(live.summary).toBe(LONG_REPORT);
   });
 
+  /** Drive a job to a provisional reconciled `completed` carrying `text`. */
+  async function reconcileToProvisionalCompleted(
+    text: string,
+    pollTranscriptForFinalText: () => Promise<string | undefined>,
+  ) {
+    const ctrl = fakeGateway({ observations: [settled(text)], pollTranscriptForFinalText });
+    const sessions = new SessionManager(ctrl.gateway);
+    const job = sessions.submitTask({ task: "tool-heavy job" });
+    emitToolRound(ctrl);
+    await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
+    await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
+    expect(sessions.getJob(job.jobId)?.status).toBe("completed");
+    expect(sessions.getJob(job.jobId)?.summary).toBe(text);
+    return { ctrl, sessions, job };
+  }
+
   it("re-reads a provisional reconciled completion on a later poll and corrects its summary", async () => {
     vi.useFakeTimers();
     // A reconciled `completed` is inferred from a transcript read, never from
     // a terminal event, so it must not be treated as settled truth the way a
     // live completion is.
-    const ctrl = fakeGateway({
-      observations: [settled("an early guess")],
-      pollTranscriptForFinalText: async () => "the corrected final answer",
-    });
-    const sessions = new SessionManager(ctrl.gateway);
-    const job = sessions.submitTask({ task: "tool-heavy job" });
-    emitToolRound(ctrl);
-
-    await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
-    await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
-    expect(sessions.getJob(job.jobId)?.summary).toBe("an early guess");
+    const pollSpy = vi.fn(async () => "the corrected final answer");
+    const { sessions, job } = await reconcileToProvisionalCompleted("an early guess", pollSpy);
 
     const polled = await sessions.waitForJob(job.jobId, 0, undefined, "wait", 1_000);
     expect(polled?.status).toBe("completed");
     expect(polled?.summary).toBe("the corrected final answer");
+    expect(pollSpy).toHaveBeenCalledTimes(1);
+
+    // The read CHANGED the summary, so the outcome is genuinely healed and
+    // stops being re-read.
+    await vi.advanceTimersByTimeAsync(21_000); // past the recheck cooldown
+    await sessions.waitForJob(job.jobId, 0, undefined, "wait", 1_000);
+    expect(pollSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("stays provisional when a re-read returns the identical text off a still-frozen transcript", async () => {
+    vi.useFakeTimers();
+    // Reading the same text twice is the same inference twice, not
+    // confirmation — and a frozen transcript is precisely the condition that
+    // made the first inference unsafe. The job must remain eligible for
+    // later re-reads rather than being locked to a possibly-interim summary.
+    const pollSpy = vi.fn(async () => "an early guess");
+    const { sessions, job } = await reconcileToProvisionalCompleted("an early guess", pollSpy);
+
+    await sessions.waitForJob(job.jobId, 0, undefined, "wait", 1_000);
+    expect(pollSpy).toHaveBeenCalledTimes(1);
+    expect(sessions.getJob(job.jobId)?.summary).toBe("an early guess");
+
+    await vi.advanceTimersByTimeAsync(21_000); // past the recheck cooldown
+    await sessions.waitForJob(job.jobId, 0, undefined, "wait", 1_000);
+    expect(pollSpy).toHaveBeenCalledTimes(2);
+    expect(sessions.getJob(job.jobId)?.status).toBe("completed");
   });
 });
 
