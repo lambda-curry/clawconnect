@@ -61,7 +61,9 @@ function resolveWaitMs(requested: number | undefined): number {
 }
 
 function buildNextAction(job: { jobId: string; sessionKey: string; status: JobStatus }): NextAction {
-  return job.status === "running" ? { tool: "check_task", args: { taskId: job.jobId, sessionKey: job.sessionKey } } : null;
+  // args keys are check_task's own parameter names (jobId, not the taskId
+  // alias) so the object is directly callable — see NextAction in types.ts.
+  return job.status === "running" ? { tool: "check_task", args: { jobId: job.jobId, sessionKey: job.sessionKey } } : null;
 }
 
 const LEGACY_CHATGPT_SESSION_PREFIX = "agent:chatgpt:";

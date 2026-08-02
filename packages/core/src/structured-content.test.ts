@@ -29,7 +29,7 @@ function fixtureSnapshot(overrides: Partial<JobSnapshot> = {}): JobSnapshot {
     pollCount: 3,
     continuePolling: true,
     retryAfterMs: 0,
-    nextAction: { tool: "check_task", args: { taskId: "job-1", sessionKey: "session-1" } },
+    nextAction: { tool: "check_task", args: { jobId: "job-1", sessionKey: "session-1" } },
     ...overrides,
   };
 }
@@ -48,7 +48,7 @@ describe("buildRunTaskStructuredContent", () => {
       sessionKey: "session-1",
       status: "running",
       agent: "test-agent",
-      nextAction: { tool: "check_task", args: { taskId: "job-1", sessionKey: "session-1" } },
+      nextAction: { tool: "check_task", args: { jobId: "job-1", sessionKey: "session-1" } },
     };
     const structured = buildRunTaskStructuredContent(result);
 
@@ -58,7 +58,7 @@ describe("buildRunTaskStructuredContent", () => {
       sessionKey: "session-1",
       status: "running",
       agent: "test-agent",
-      nextAction: { tool: "check_task", args: { taskId: "job-1", sessionKey: "session-1" } },
+      nextAction: { tool: "check_task", args: { jobId: "job-1", sessionKey: "session-1" } },
     });
     // RunTaskResult has no prompt/task/context field to begin with — this
     // assertion documents that guarantee rather than testing a redaction step.

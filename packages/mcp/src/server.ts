@@ -17,6 +17,7 @@ import {
   buildRunTaskStructuredContent,
   buildCheckTaskStructuredContent,
   buildGetTaskStructuredContent,
+  TASK_SUMMARY_PREVIEW_MAX,
 } from "@clawconnect/core";
 import type {
   AgentRegistry,
@@ -72,7 +73,10 @@ function defaultFormatRunTask(result: RunTaskResult): McpToolResponse {
   };
 }
 
-function defaultFormatCheckTask(result: CheckTaskResult): McpToolResponse {
+/** Exported for the contract tests — driving a real running job through the
+ *  in-memory transport would need a live gateway, and the model-facing text
+ *  (not just structuredContent) is the thing under test. */
+export function defaultFormatCheckTask(result: CheckTaskResult): McpToolResponse {
   if (!result.found) {
     return {
       content: [{ type: "text" as const, text: "Job not found. The server may have restarted." }],
@@ -93,15 +97,20 @@ function defaultFormatCheckTask(result: CheckTaskResult): McpToolResponse {
       sessionKey: snapshot.sessionKey,
       agent: snapshot.agent,
       elapsedSeconds: Math.round((Date.now() - snapshot.startedAt) / 1000),
-      logCount: snapshot.logs.length,
+      // logCursor, not the returned-entry count: `logs` is a bounded
+      // projection, so its length is exactly the number a caller must NOT
+      // send back as knownLogCount. logEventCount is the server-side total,
+      // for awareness only — it is not a cursor either.
+      logCursor: snapshot.logCursor,
+      logEventCount: snapshot.logEventCount,
       pollCount: snapshot.pollCount,
       recovery: snapshot.recovery,
       continuePolling,
       retryAfterMs: snapshot.retryAfterMs,
       nextAction: snapshot.nextAction,
       hint: snapshot.recovery
-        ? "Task is recovering late transcript final text. Call check_task again to continue waiting."
-        : "Task is actively running (this is a non-terminal timeout, not an error). Call check_task again with the same jobId to continue waiting.",
+        ? `Task is recovering late transcript final text. Call check_task again to continue waiting; pass knownLogCount=${snapshot.logCursor}.`
+        : `Task is actively running (this is a non-terminal timeout, not an error). Call check_task again with the same jobId to continue waiting; pass knownLogCount=${snapshot.logCursor} to resume the log window.`,
     };
     return {
       content: [{ type: "text" as const, text: JSON.stringify(payload) }],
@@ -184,22 +193,22 @@ export function createMcpServer(config: { registry: AgentRegistry; provider?: Pr
 
   const agentIds = config.registry.agents.map((a) => a.id);
   const agentBlurbs = config.registry.agents.map(agentBlurb).join("; ");
-  const agentList = agentIds.join(", ");
   const agentEnum = z.enum(agentIds as [string, ...string[]]);
   const defaultAgent = config.registry.default;
-  const agentDescription = `OpenClaw agent to dispatch to. Available: ${agentBlurbs}. Default: ${defaultAgent}. Use list_agents for full descriptions and routing guidance.`;
+  // The enum already constrains the ids; this adds only the role hint needed
+  // to pick between them. Full descriptions live in list_agents — the other
+  // tools' agent params infer the agent and don't repeat any of this.
+  const agentDescription = `OpenClaw agent to dispatch to: ${agentBlurbs}. Default: ${defaultAgent}. See list_agents for full routing guidance.`;
 
   server.tool(
     "run_task",
-    `Delegate work to an OpenClaw agent for deeper investigation, implementation, or judgment that benefits from that agent's own context, tools, and identity. Returns a jobId and sessionKey immediately while the task runs in the background.
+    `Delegate work to an OpenClaw agent. Returns a jobId and sessionKey immediately; the task runs in the background.
 
-The actual result is what the user wants — not the jobId. After calling run_task, immediately call check_task with mode="wait" in a loop, passing the same jobId, until status is no longer "running" (equivalently: until continuePolling is false). Then report the real outcome (summary, files changed, errors, etc.) to the user. A typical short task takes 30s–3min and needs a handful of check_task calls at the default 45s wait window. The response's nextAction field always names the exact next call to make.
+The result is what the user wants — not the jobId. Call check_task in a loop until continuePolling is false, then report the real outcome. \`nextAction\` is the exact next call: its args are check_task's parameters, so pass them through unchanged. A typical short task takes 30s–3min.
 
-Skip the polling loop only when:
-- The user explicitly asked for fire-and-forget ("just dispatch it, I'll check later").
-- You are parallel-dispatching multiple jobs to different agents — in that case dispatch all first, then poll each in turn.
+Skip the polling loop only for explicit fire-and-forget, or when parallel-dispatching to several agents (dispatch all first, then poll each).
 
-Pass a sessionKey from a previous task to continue the same thread. Available agents: ${agentList}.`,
+Pass a sessionKey from a previous task to continue the same thread.`,
     {
       task: z.string().describe("The task to perform"),
       agent: agentEnum.optional().describe(agentDescription),
@@ -219,22 +228,22 @@ Pass a sessionKey from a previous task to continue the same thread. Available ag
 
   server.tool(
     "check_task",
-    `Check whether a previously dispatched run_task job has finished, and collect the result. This is the only tool that waits — get_task is for an immediate, non-blocking read.
+    `Wait for a dispatched run_task job and collect its result. The only tool that waits — get_task is the immediate, non-blocking read.
 
-With mode="wait" (recommended, default): blocks for up to waitMs (default 45000ms, override with waitMs, clamped to [1000, 120000]) and only returns early on a terminal status (completed / completed_no_summary / error). A timeout return is NOT an error and NOT terminal — continuePolling is true and nextAction says to call check_task again with the same jobId. There is no cap on how many times you may do this; never submit a new run_task because a check_task call timed out (that risks a duplicate — the session-busy guard will reject it anyway).
+mode="wait" (default) blocks up to waitMs and returns early only on a terminal status: completed, completed_no_summary, or error. A timeout return is neither an error nor terminal — continuePolling is true, so just call again with the same jobId. There is no cap on how many times. Never submit a new run_task because a check_task timed out; the session-busy guard would reject the duplicate anyway.
 
-With mode="poll": returns as soon as any new log activity appears (also bounded by waitMs). Use this only when you need intermediate progress (live UI), not when you just want the final result.
+mode="poll" returns as soon as any new log activity appears (still bounded by waitMs) — for live progress UIs, not for collecting a final result.
 
-If a job returns status="completed_no_summary" or status="error" on a long, tool-heavy run, calling check_task again 30–60 seconds later can upgrade it: the openclaw session may have produced the final answer after the connector marked terminal, and a lazy re-read of the transcript on subsequent polls will surface it. Worth one or two follow-up polls before reporting back that no result was produced.
+Each response's logCursor is an opaque resume token: pass it back verbatim as knownLogCount on the next call. Do not derive it from how many log entries you received.
 
-Pass the jobId returned by run_task. Available agents: ${agentList}.`,
+completed_no_summary and error are terminal — report them. Rarely, a long tool-heavy run finishes its answer after the connector marks it terminal; one follow-up check_task ~30s later can upgrade such a job to completed. Do that at most once or twice, not as routine.`,
     {
-      jobId: z.string().optional().describe("The jobId from run_task"),
-      sessionKey: z.string().optional().describe("The sessionKey from run_task (alternative to jobId)"),
-      agent: agentEnum.optional().describe(`${agentDescription} Usually inferred from jobId; only set if you started run_task in a different process.`),
-      knownLogCount: z.number().optional().describe("Log cursor from a previous response's logCursor (0/omit for the initial window). Server returns only events after it — a bounded delta, not the full log — and in poll mode returns early on new activity."),
-      mode: z.enum(["poll", "wait"]).optional().describe('Polling mode: "wait" (default) blocks up to waitMs and only returns early on a terminal status — a timeout return is non-terminal, just call again. "poll" returns on any new log activity — use for live progress UIs.'),
-      waitMs: z.number().optional().describe("Max time to block, in ms. Default 45000. Clamped to [1000, 120000] — out-of-range values clamp rather than error."),
+      jobId: z.string().optional().describe("The jobId from run_task."),
+      sessionKey: z.string().optional().describe("The sessionKey from run_task — resolves the session's latest job. Alternative to jobId."),
+      agent: agentEnum.optional().describe("Usually inferred from jobId; set only if run_task ran in a different process."),
+      knownLogCount: z.number().optional().describe("The previous response's logCursor, passed back UNCHANGED — an opaque resume token, never a count you compute from the entries you received. Omit or 0 for the initial window. The server returns only events after it (a bounded delta, not the full log); in poll mode it also gates the early return."),
+      mode: z.enum(["poll", "wait"]).optional().describe('"wait" (default) blocks up to waitMs, returning early only on a terminal status; a timeout return is non-terminal, just call again. "poll" returns on any new log activity — for live progress UIs.'),
+      waitMs: z.number().optional().describe("Max time to block, in ms. Default 45000; clamped to [1000, 120000] rather than erroring."),
     },
     // idempotentHint:true because repeated calls with the same args don't create
     // duplicate side effects (each call only reads/advances polling state) — it
@@ -256,9 +265,9 @@ Pass the jobId returned by run_task. Available agents: ${agentList}.`,
 
   server.tool(
     "list_tasks",
-    `List manager-friendly task summaries across agents. This is task-level coordination (what needs attention), not low-level session debugging.`,
+    `List task rows across agents — one per session — for coordination ("what needs attention"), not session debugging. Each row's summary is a bounded preview (~${TASK_SUMMARY_PREVIEW_MAX} chars, flagged with summaryTruncated); use get_task for a task's full summary and artifacts.`,
     {
-      view: z.enum(["active", "all"]).optional().describe('Optional preset. "active" returns non-terminal tasks (queued, running, blocked, needs-human) that still need attention.'),
+      view: z.enum(["active", "all"]).optional().describe('"active" returns only non-terminal tasks (queued, running, blocked, needs-human); omit to include terminal ones too.'),
     },
     { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
     async ({ view }) => {
@@ -270,18 +279,18 @@ Pass the jobId returned by run_task. Available agents: ${agentList}.`,
 
   server.tool(
     "get_task",
-    `Inspect a task by taskId/jobId with a detail preset controlling which fields are returned. Unlike check_task, this NEVER waits — it's an immediate snapshot of whatever state exists right now (including status="running"), for diagnostics, manual reads, or UI refresh. Use check_task to actually wait for a result.
+    `Immediate snapshot of one task — NEVER waits, unlike check_task. Returns whatever state exists right now (including status="running"), for diagnostics, manual reads, or UI refresh. This is also the read path for a task's COMPLETE summary and artifacts; list_tasks only carries a truncated preview.
 
-With detail="updates"/"full"/"fullWithDiagnostics", the returned \`updates\` array is a bounded recent-activity window, not the full accumulated log — pass \`knownLogCount\` (the \`logCursor\` a previous response returned) to get only newer entries; omit it for the initial window. The final \`summary\`/\`artifacts\` are never bounded by this — always complete once terminal, regardless of cursor.`,
+At detail levels that include it, \`updates\` is a bounded recent-activity window, not the full accumulated log — pass \`knownLogCount\` to get only newer entries. \`summary\`/\`artifacts\` are never bounded by the cursor: once terminal they are always complete.`,
     {
-      taskId: z.string().describe("Task identifier (same as jobId in v1)"),
+      taskId: z.string().describe("Task identifier. Same value as jobId — either name resolves the same task."),
       detail: z
         .enum(["core", "summary", "updates", "artifacts", "diagnostics", "prompt", "full", "fullWithDiagnostics"])
         .optional()
         .describe(
-          "Detail preset. Omit for summary. core=ids+status only; summary=+summary; updates=+logs; artifacts=+artifacts; diagnostics=+error info; prompt=the original submitted task/context (not included by any other preset); full=core+summary+updates+artifacts; fullWithDiagnostics=full+diagnostics",
+          "Detail preset; omit for summary. core=identifiers, status, and polling metadata only; summary=core+summary; updates=core+`updates` (recent activity) with logCursor/logEventCount; artifacts=core+artifacts; diagnostics=core+`diagnostics` (error, errorInfo, recovery, continuationState); prompt=the originally submitted task/context, which no other preset ever returns; full=core+summary+updates+artifacts; fullWithDiagnostics=full+diagnostics.",
         ),
-      knownLogCount: z.number().optional().describe("Log cursor from a previous response's logCursor. Server returns only events after it (bounded); omit for the initial recent-activity window."),
+      knownLogCount: z.number().optional().describe("The previous response's logCursor, passed back UNCHANGED — an opaque resume token, never a count of entries you received. Omit for the initial recent-activity window."),
     },
     { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
     async ({ taskId, detail, knownLogCount }) => {
@@ -306,13 +315,16 @@ With detail="updates"/"full"/"fullWithDiagnostics", the returned \`updates\` arr
 
   server.tool(
     "get_session",
-    `Inspect one session for debugging ("what exactly happened?"). Use mode="snapshot" for current state, "events" for bounded event retrieval, "tail" for cursor-based tailing, or "tasks" to list every task ever run under this session (newest first) — the same TaskSummary shape as list_tasks.`,
+    `Inspect one session for debugging ("what exactly happened?").`,
     {
-      sessionId: z.string().describe("Session key to inspect"),
-      mode: z.enum(["snapshot", "events", "tail", "tasks"]).optional(),
-      limit: z.number().int().positive().max(200).optional().describe("Max events to return for events/tail modes"),
-      after: z.number().int().nonnegative().optional().describe("Zero-based event cursor; for tail mode use returned nextAfter"),
-      agent: agentEnum.optional().describe(`${agentDescription} Usually inferred from sessionId.`),
+      sessionId: z.string().describe("Session key to inspect."),
+      mode: z
+        .enum(["snapshot", "events", "tail", "tasks"])
+        .optional()
+        .describe('"snapshot" (default) = the session\'s current state, no events. "events" = one bounded slice from `after`. "tail" = the same slice plus a `nextAfter` cursor for paging FORWARD through the log (oldest-first, not last-N-lines); page again with after=nextAfter until fewer than `limit` events come back. "tasks" = every task ever run under this session, newest first, in list_tasks\' row shape (summaries are truncated previews there).'),
+      limit: z.number().int().positive().max(200).optional().describe("Max events per page for events/tail modes. Default 50, max 200."),
+      after: z.number().int().nonnegative().optional().describe("Zero-based event offset to read from; for tail mode pass the previous response's nextAfter. Unrelated to check_task/get_task's logCursor — different cursor space."),
+      agent: agentEnum.optional().describe("Usually inferred from sessionId."),
     },
     { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
     async ({ sessionId, mode, limit, after, agent }) => {
@@ -323,7 +335,7 @@ With detail="updates"/"full"/"fullWithDiagnostics", the returned \`updates\` arr
 
   server.tool(
     "list_sessions",
-    `List active OpenClaw sessions across configured agents. Shows agent, session keys, last job status, and recommended next steps. Available agents: ${agentList}.`,
+    `List every OpenClaw session this connector knows about, across agents — including finished ones, since a completed session's sessionKey is what you pass to run_task to continue that thread. Shows agent, session key, last job, last summary, and a recommended next step.`,
     {},
     { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
     async () => {

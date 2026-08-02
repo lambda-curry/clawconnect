@@ -20,8 +20,9 @@ import {
   buildRunTaskStructuredContent,
   buildCheckTaskStructuredContent,
   buildGetTaskStructuredContent,
+  TASK_SUMMARY_PREVIEW_MAX,
 } from "@clawconnect/core";
-import type { AgentEntry, AgentRegistry, CheckMode, TaskDetail, TaskSummary } from "@clawconnect/core";
+import type { AgentEntry, AgentRegistry, CheckMode, JobSnapshot, TaskDetail, TaskSummary } from "@clawconnect/core";
 import {
   negotiateProtocolVersion,
   buildExtensionsCapability,
@@ -59,6 +60,21 @@ export interface App {
 }
 
 /**
+ * Model-facing text for a check_task response.
+ *
+ * While running, the text carries `logCursor` — not just structuredContent.
+ * A client reading only `content` still has to hand that value back verbatim
+ * as `knownLogCount`, and counting the entries it received would be wrong
+ * (the log window is a bounded projection). Split out as a pure function so
+ * this is testable without a live gateway keeping a job in "running".
+ */
+export function checkTaskText(snapshot: JobSnapshot, isTerminal: boolean): string {
+  if (isTerminal) return snapshot.summary ?? snapshot.error ?? "";
+  const resume = `Poll again with knownLogCount=${snapshot.logCursor}.`;
+  return snapshot.recovery ? `Recovering late transcript final text. ${resume}` : `Still running. ${resume}`;
+}
+
+/**
  * Builds the full ChatGPT HTTP MCP surface for a given agent registry, with
  * no side effects (no env reads beyond feature flags, no listen()). Split
  * out of index.ts so it's testable without the registry-loading /
@@ -92,7 +108,6 @@ export function createApp(registry: AgentRegistry, opts: CreateAppOptions = {}):
   // would leave its in-flight jobs unrecovered indefinitely.
   pool.warmAll();
   const AGENT_IDS = registry.agents.map((a) => a.id);
-  const AGENT_LIST = AGENT_IDS.join(", ");
 
   const CORS_HEADERS = {
     "Access-Control-Allow-Origin": "*",
@@ -176,7 +191,6 @@ export function createApp(registry: AgentRegistry, opts: CreateAppOptions = {}):
   }
 
   function buildTools(allowedIds: string[], defaultId: string, identity: Identity) {
-    const list = allowedIds.join(", ");
     const blurbs = blurbsFor(allowedIds);
     const senderNameProp = identity.user
       ? {
@@ -197,15 +211,13 @@ export function createApp(registry: AgentRegistry, opts: CreateAppOptions = {}):
     return [
       {
         name: "run_task",
-        description: `Delegate work to an OpenClaw agent for deeper investigation, implementation, or judgment that benefits from that agent's own context, tools, and identity. Returns a jobId and sessionKey immediately while the task runs in the background.
+        description: `Delegate work to an OpenClaw agent. Returns a jobId and sessionKey immediately; the task runs in the background.
 
-The actual result is what the user wants — not the jobId. After calling run_task, immediately call check_task with mode="wait" in a loop, passing the same jobId, until status is no longer "running" (equivalently: until continuePolling is false). Then report the real outcome (summary, files changed, errors, etc.) to the user. A typical short task takes 30s–3min and needs a handful of check_task calls at the default 45s wait window. The response's nextAction field always names the exact next call to make.
+The result is what the user wants — not the jobId. Call check_task in a loop until continuePolling is false, then report the real outcome. \`nextAction\` is the exact next call: its args are check_task's parameters, so pass them through unchanged. A typical short task takes 30s–3min.
 
-Skip the polling loop only when:
-- The user explicitly asked for fire-and-forget ("just dispatch it, I'll check later").
-- You are parallel-dispatching multiple jobs to different agents — in that case dispatch all first, then poll each in turn.
+Skip the polling loop only for explicit fire-and-forget, or when parallel-dispatching to several agents (dispatch all first, then poll each).
 
-Pass sessionKey from a previous result to continue the same thread. Available agents: ${list}.`,
+Pass sessionKey from a previous result to continue the same thread.`,
         inputSchema: {
           type: "object",
           properties: {
@@ -237,11 +249,13 @@ Pass sessionKey from a previous result to continue the same thread. Available ag
                 tool: { type: "string", enum: ["check_task"] },
                 args: {
                   type: "object",
+                  // check_task's own parameter names — the args object is
+                  // meant to be forwarded verbatim.
                   properties: {
-                    taskId: { type: "string" },
+                    jobId: { type: "string" },
                     sessionKey: { type: "string" },
                   },
-                  required: ["taskId", "sessionKey"],
+                  required: ["jobId", "sessionKey"],
                 },
               },
               required: ["tool", "args"],
@@ -267,39 +281,39 @@ Pass sessionKey from a previous result to continue the same thread. Available ag
       },
       {
         name: "check_task",
-        description: `Check whether a previously dispatched run_task job has finished, and collect the result. This is the only tool that waits — get_task is for an immediate, non-blocking read.
+        description: `Wait for a dispatched run_task job and collect its result. The only tool that waits — get_task is the immediate, non-blocking read.
 
-With mode="wait" (recommended, default): blocks for up to waitMs (default 45000ms, override with waitMs, clamped to [1000, 120000]) and only returns early on a terminal status (completed / completed_no_summary / error). A timeout return is NOT an error and NOT terminal — continuePolling is true and nextAction says to call check_task again with the same jobId. There is no cap on how many times you may do this; never submit a new run_task because a check_task call timed out (that risks a duplicate — the session-busy guard will reject it anyway).
+mode="wait" (default) blocks up to waitMs and returns early only on a terminal status: completed, completed_no_summary, or error. A timeout return is neither an error nor terminal — continuePolling is true, so just call again with the same jobId. There is no cap on how many times. Never submit a new run_task because a check_task timed out; the session-busy guard would reject the duplicate anyway.
 
-With mode="poll": returns as soon as any new log activity appears (also bounded by waitMs). Use this only when you need intermediate progress (live UI), not when you just want the final result.
+mode="poll" returns as soon as any new log activity appears (still bounded by waitMs) — for live progress UIs, not for collecting a final result.
 
-If a job returns status="completed_no_summary" or status="error" on a long, tool-heavy run, calling check_task again 30–60 seconds later can upgrade it: the openclaw session may have produced the final answer after the connector marked terminal, and a lazy re-read of the transcript on subsequent polls will surface it. Worth one or two follow-up polls before reporting back that no result was produced.
+Each response's logCursor is an opaque resume token: pass it back verbatim as knownLogCount on the next call. Do not derive it from how many log entries you received.
 
-Pass the jobId returned by run_task. Available agents: ${list}.`,
+completed_no_summary and error are terminal — report them. Rarely, a long tool-heavy run finishes its answer after the connector marks it terminal; one follow-up check_task ~30s later can upgrade such a job to completed. Do that at most once or twice, not as routine.`,
         inputSchema: {
           type: "object",
           properties: {
-            jobId: { type: "string", description: "The jobId returned by run_task" },
+            jobId: { type: "string", description: "The jobId returned by run_task." },
             sessionKey: {
               type: "string",
-              description: "Optional session key for reattaching status checks after refresh.",
+              description: "The sessionKey from run_task — resolves the session's latest job. Alternative to jobId, and how a status check reattaches after a refresh.",
             },
             agent: {
               ...agentProp,
-              description: `${agentProp.description} Usually inferred from jobId; set explicitly if you started run_task elsewhere.`,
+              description: "Usually inferred from jobId; set only if run_task ran elsewhere.",
             },
             knownLogCount: {
               type: "number",
-              description: "Log cursor from a previous response's logCursor (0/omit for the initial window). Server returns only events after it — a bounded delta, not the full log — and in poll mode returns as soon as new entries appear.",
+              description: "The previous response's logCursor, passed back UNCHANGED — an opaque resume token, never a count you compute from the entries you received. Omit or 0 for the initial window. The server returns only events after it (a bounded delta, not the full log); in poll mode it also gates the early return.",
             },
             mode: {
               type: "string",
               enum: ["poll", "wait"],
-              description: 'Polling mode: "wait" (default) blocks up to waitMs and only returns on a terminal status — a timeout return is non-terminal, just call again. "poll" returns on any new log activity — use for live progress UIs.',
+              description: '"wait" (default) blocks up to waitMs, returning early only on a terminal status; a timeout return is non-terminal, just call again. "poll" returns on any new log activity — for live progress UIs.',
             },
             waitMs: {
               type: "number",
-              description: "Max time to block, in ms. Default 45000. Clamped to [1000, 120000].",
+              description: "Max time to block, in ms. Default 45000; clamped to [1000, 120000] rather than erroring.",
             },
           },
         },
@@ -313,7 +327,7 @@ Pass the jobId returned by run_task. Available agents: ${list}.`,
       },
       {
         name: "list_sessions",
-        description: `List active OpenClaw sessions across configured agents. Available agents: ${list}.`,
+        description: `List every OpenClaw session this connector knows about, across agents — including finished ones, since a completed session's sessionKey is what you pass to run_task to continue that thread.`,
         inputSchema: { type: "object", properties: {} },
         annotations: {
           title: "List Sessions",
@@ -374,14 +388,14 @@ Pass the jobId returned by run_task. Available agents: ${list}.`,
       },
       {
         name: "list_tasks",
-        description: `List manager-friendly task summaries across agents. This is task-level coordination (what needs attention), not low-level session debugging.`,
+        description: `List task rows across agents — one per session — for coordination ("what needs attention"), not session debugging. Each row's summary is a bounded preview (~${TASK_SUMMARY_PREVIEW_MAX} chars, flagged with summaryTruncated); use get_task for a task's full summary and artifacts.`,
         inputSchema: {
           type: "object",
           properties: {
             view: {
               type: "string",
               enum: ["active", "all"],
-              description: 'Optional preset. "active" returns non-terminal tasks (queued, running, blocked, needs-human) that still need attention.',
+              description: '"active" returns only non-terminal tasks (queued, running, blocked, needs-human); omit to include terminal ones too.',
             },
           },
         },
@@ -390,22 +404,22 @@ Pass the jobId returned by run_task. Available agents: ${list}.`,
       },
       {
         name: "get_task",
-        description: `Inspect a task by taskId/jobId with a detail preset controlling which fields are returned. Unlike check_task, this NEVER waits — it's an immediate snapshot of whatever state exists right now (including status="running"), for diagnostics, manual reads, or UI refresh. Use check_task to actually wait for a result.
+        description: `Immediate snapshot of one task — NEVER waits, unlike check_task. Returns whatever state exists right now (including status="running"), for diagnostics, manual reads, or UI refresh. This is also the read path for a task's COMPLETE summary and artifacts; list_tasks only carries a truncated preview.
 
-With detail="updates"/"full"/"fullWithDiagnostics", the returned \`updates\` array is a BOUNDED WINDOW (recent activity), not the full accumulated log — pass \`knownLogCount\` (the \`logCursor\` a previous response returned) to get only newer entries; omit it for the initial recent-activity window. The final \`summary\`/\`artifacts\` are never bounded by this — they're always complete once the task is terminal, regardless of cursor.`,
+At detail levels that include it, \`updates\` is a bounded recent-activity window, not the full accumulated log — pass \`knownLogCount\` to get only newer entries. \`summary\`/\`artifacts\` are never bounded by the cursor: once terminal they are always complete.`,
         inputSchema: {
           type: "object",
           properties: {
-            taskId: { type: "string", description: "Task identifier (same as jobId in v1)" },
+            taskId: { type: "string", description: "Task identifier. Same value as jobId — either name resolves the same task." },
             detail: {
               type: "string",
               enum: ["core", "summary", "updates", "artifacts", "diagnostics", "prompt", "full", "fullWithDiagnostics"],
               description:
-                'Detail preset. Omit for summary. core=ids+status only; summary=+summary; updates=+logs; artifacts=+artifacts; diagnostics=+error info; prompt=the original submitted task/context (not included by any other preset); full=core+summary+updates+artifacts; fullWithDiagnostics=full+diagnostics',
+                'Detail preset; omit for summary. core=identifiers, status, and polling metadata only; summary=core+summary; updates=core+`updates` (recent activity) with logCursor/logEventCount; artifacts=core+artifacts; diagnostics=core+`diagnostics` (error, errorInfo, recovery, continuationState); prompt=the originally submitted task/context, which no other preset ever returns; full=core+summary+updates+artifacts; fullWithDiagnostics=full+diagnostics.',
             },
             knownLogCount: {
               type: "number",
-              description: "Log cursor from a previous response's logCursor. Server returns only events after it (bounded); omit for the initial recent-activity window.",
+              description: "The previous response's logCursor, passed back UNCHANGED — an opaque resume token, never a count of entries you received. Omit for the initial recent-activity window.",
             },
           },
           required: ["taskId"],
@@ -415,19 +429,19 @@ With detail="updates"/"full"/"fullWithDiagnostics", the returned \`updates\` arr
       },
       {
         name: "get_session",
-        description: `Inspect one session for debugging ("what exactly happened?"). Use mode="snapshot" for current state, "events" for bounded event retrieval, "tail" for cursor-based tailing, or "tasks" to list every task ever run under this session (newest first) — the same TaskSummary shape as list_tasks.`,
+        description: `Inspect one session for debugging ("what exactly happened?").`,
         inputSchema: {
           type: "object",
           properties: {
-            sessionId: { type: "string", description: "Session key to inspect" },
+            sessionId: { type: "string", description: "Session key to inspect." },
             mode: {
               type: "string",
               enum: ["snapshot", "events", "tail", "tasks"],
-              description: "Inspection mode: snapshot (default), events, tail, or tasks",
+              description: '"snapshot" (default) = the session\'s current state, no events. "events" = one bounded slice from `after`. "tail" = the same slice plus a `nextAfter` cursor for paging FORWARD through the log (oldest-first, not last-N-lines); page again with after=nextAfter until fewer than `limit` events come back. "tasks" = every task ever run under this session, newest first, in list_tasks\' row shape (summaries are truncated previews there).',
             },
-            limit: { type: "number", description: "Max events to return for events/tail modes (1–200)" },
-            after: { type: "number", description: "Zero-based event cursor; for tail mode use returned nextAfter" },
-            agent: { ...agentProp, description: `${agentProp.description} Usually inferred from sessionId.` },
+            limit: { type: "number", description: "Max events per page for events/tail modes. Default 50, max 200." },
+            after: { type: "number", description: "Zero-based event offset to read from; for tail mode pass the previous response's nextAfter. Unrelated to check_task/get_task's logCursor — different cursor space." },
+            agent: { ...agentProp, description: "Usually inferred from sessionId." },
           },
           required: ["sessionId"],
         },
@@ -762,16 +776,7 @@ With detail="updates"/"full"/"fullWithDiagnostics", the returned \`updates\` arr
           } else {
             const { snapshot, isTerminal, isError } = result;
             respond({
-              content: [
-                {
-                  type: "text",
-                  text: isTerminal
-                    ? (snapshot.summary ?? snapshot.error ?? "")
-                    : snapshot.recovery
-                      ? "Recovering late transcript final text. Poll again."
-                      : "Still running. Poll again.",
-                },
-              ],
+              content: [{ type: "text", text: checkTaskText(snapshot, isTerminal) }],
               structuredContent: buildCheckTaskStructuredContent(result),
               ...(isError ? { isError: true } : {}),
             });
@@ -780,7 +785,7 @@ With detail="updates"/"full"/"fullWithDiagnostics", the returned \`updates\` arr
           const all = listSessions(pool);
           const sessions = all.filter((s) => !s.agent || scope.allowedIds.includes(s.agent));
           const summary = sessions.length === 0
-            ? "No active sessions."
+            ? "No sessions known to this connector yet."
             : sessions.map((s) => `${s.agent ?? "?"}: ${s.sessionKey.slice(-12)} (${s.lastJobId.slice(0, 8)})`).join("\n");
           respond({
             content: [{ type: "text", text: summary }],

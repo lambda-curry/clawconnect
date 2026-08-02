@@ -108,7 +108,7 @@ describe("SessionManager.waitForJob — check_task wait semantics", () => {
       // A wait-mode call already blocked for its full window, so it's safe
       // to call again right away — no artificial backoff outside recovery.
       expect(snapshot.retryAfterMs).toBe(0);
-      expect(snapshot.nextAction).toEqual({ tool: "check_task", args: { taskId: job.jobId, sessionKey: job.sessionKey } });
+      expect(snapshot.nextAction).toEqual({ tool: "check_task", args: { jobId: job.jobId, sessionKey: job.sessionKey } });
 
       // Re-polling the same job is safe and does not spawn a second job —
       // submitting a new task on the same (still-running) session is refused.

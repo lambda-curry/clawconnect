@@ -13,7 +13,7 @@ Send a task to an OpenClaw agent (e.g. clawdy) via the clawconnect MCP server an
 This skill uses the `clawconnect` MCP server which provides three tools:
 - `run_task` — Submit a task, returns jobId + sessionKey immediately
 - `check_task` — Poll for progress (blocks up to 50s per call)
-- `list_sessions` — List active sessions
+- `list_sessions` — List every session this connector knows about, finished ones included
 
 ## Workflow
 
@@ -92,4 +92,4 @@ When the user wants to follow up ("tell clawdy to also...", "ask clawdy about...
 
 - If the MCP server isn't connected, tell the user to check that their OpenClaw instance is running and the clawconnect MCP server is configured in settings.json.
 - The `mode: "wait"` is important — without it, check_task returns on every log event which wastes tool calls.
-- You can use `list_sessions` to see all active sessions if the user wants to reconnect to a previous thread.
+- You can use `list_sessions` to see every known session — finished threads stay listed, and a completed session's sessionKey is what you pass back to run_task to continue it.

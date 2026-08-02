@@ -9,7 +9,7 @@ export { searchMemory, getMemory, listCollections, DEFAULT_QMD_URL } from "./mem
 export type { MemorySearchHit, MemorySearchResult, GetMemoryResult, SearchMemoryOpts, CollectionListing } from "./memory.ts";
 export { classifyError } from "./errors.ts";
 export { emptyArtifacts, processEvent, extractPatternsFromSummary, deriveNextStep } from "./artifacts.ts";
-export { runTask, checkTask, getTask, getTaskPrompt, listSessions, listTasks, getSession } from "./tools.ts";
+export { runTask, checkTask, getTask, getTaskPrompt, listSessions, listTasks, getSession, TASK_SUMMARY_PREVIEW_MAX } from "./tools.ts";
 export { collapseToolPairs, projectLogWindow, INITIAL_WINDOW_MAX, DELTA_WINDOW_MAX, EVENT_TEXT_MAX } from "./log-projection.ts";
 export type { LogWindow } from "./log-projection.ts";
 export { setTelemetrySink, recordTelemetry } from "./telemetry.ts";

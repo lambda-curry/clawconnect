@@ -3,8 +3,8 @@ import { createServer, type Server } from "node:http";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createApp } from "./app.ts";
-import type { AgentRegistry } from "@clawconnect/core";
+import { createApp, checkTaskText } from "./app.ts";
+import type { AgentRegistry, JobSnapshot } from "@clawconnect/core";
 
 /**
  * Real HTTP integration tests against createApp()'s request listener — a
@@ -87,7 +87,7 @@ describe("unmounted core independence — run_task/get_task work identically reg
     expect(runResult.error).toBeUndefined();
     const structured = runResult.result.structuredContent;
     expect(structured.jobId).toBeTruthy();
-    expect(structured.nextAction).toEqual({ tool: "check_task", args: { taskId: structured.jobId, sessionKey: structured.sessionKey } });
+    expect(structured.nextAction).toEqual({ tool: "check_task", args: { jobId: structured.jobId, sessionKey: structured.sessionKey } });
 
     const getResult = await rpc(url, "tools/call", { name: "get_task", arguments: { taskId: structured.jobId } });
     expect(getResult.error).toBeUndefined();
@@ -193,5 +193,50 @@ describe("protocolVersion negotiation over real HTTP", () => {
     const { url } = await startTestApp({ widgetEnabled: false });
     const result = await rpc(url, "initialize", { protocolVersion: "1999-01-01" });
     expect(result.result.protocolVersion).toBe("2025-06-18");
+  });
+});
+
+describe("check_task model-facing text carries the resume cursor", () => {
+  function runningSnapshot(overrides: Partial<JobSnapshot> = {}): JobSnapshot {
+    return {
+      jobId: "job-1",
+      sessionKey: "session-1",
+      status: "running",
+      startedAt: 1000,
+      lastEventAt: 2000,
+      lastPollAt: 3000,
+      // Two entries returned but the cursor is 17: the returned-entry count
+      // is NOT the cursor, which is exactly the confusion this text prevents.
+      logs: [
+        { ts: 1, type: "tool", text: "a", seq: 16 },
+        { ts: 2, type: "lifecycle", text: "b", seq: 17 },
+      ],
+      logCursor: 17,
+      logEventCount: 17,
+      artifacts: { filesChanged: [], commandsRun: [], needsHumanDecision: false },
+      agent: "test-agent",
+      pollCount: 2,
+      continuePolling: true,
+      retryAfterMs: 0,
+      nextAction: { tool: "check_task", args: { jobId: "job-1", sessionKey: "session-1" } },
+      ...overrides,
+    };
+  }
+
+  it("a running response tells the caller which knownLogCount to send back", () => {
+    expect(checkTaskText(runningSnapshot(), false)).toBe("Still running. Poll again with knownLogCount=17.");
+  });
+
+  it("a late-recovery response carries the cursor too", () => {
+    const snapshot = runningSnapshot({
+      recovery: { reason: "no_live_final_text", startedAt: 1000, idleTimeoutMs: 1, hardCapMs: 2 },
+    });
+    expect(checkTaskText(snapshot, false)).toBe("Recovering late transcript final text. Poll again with knownLogCount=17.");
+  });
+
+  it("a terminal response is the result itself — no polling instructions appended", () => {
+    const text = checkTaskText(runningSnapshot({ status: "completed", summary: "the answer" }), true);
+    expect(text).toBe("the answer");
+    expect(text).not.toContain("knownLogCount");
   });
 });

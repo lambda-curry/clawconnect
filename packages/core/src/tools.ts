@@ -4,6 +4,7 @@ import type {
   CheckTaskOpts,
   CheckTaskResult,
   ContinuationState,
+  Job,
   RunTaskResult,
   SessionInspectMode,
   SessionInspectResult,
@@ -48,7 +49,8 @@ export function runTask(pool: GatewayPool, input: TaskInput): RunTaskResult {
     sessionKey: job.sessionKey,
     status: "running",
     agent: entry.agent.id,
-    nextAction: { tool: "check_task", args: { taskId: job.jobId, sessionKey: job.sessionKey } },
+    // args keys are check_task's own parameter names — see NextAction.
+    nextAction: { tool: "check_task", args: { jobId: job.jobId, sessionKey: job.sessionKey } },
   };
 }
 
@@ -69,6 +71,35 @@ function deriveTaskStatus(job: { status: string; error?: string; artifacts: { ne
   return mapTaskStatus(job.status);
 }
 
+/**
+ * Cap on the `summary` preview carried by a TaskSummary row. list_tasks and
+ * get_session(mode:"tasks") are listings — one row per session/job — so an
+ * unbounded summary per row multiplies the whole response by however many
+ * tasks exist. get_task is the read path that returns the summary in full.
+ */
+export const TASK_SUMMARY_PREVIEW_MAX = 500;
+
+function previewSummary(summary: string | undefined): Pick<TaskSummary, "summary" | "summaryTruncated"> {
+  if (summary === undefined) return {};
+  if (summary.length <= TASK_SUMMARY_PREVIEW_MAX) return { summary };
+  return { summary: `${summary.slice(0, TASK_SUMMARY_PREVIEW_MAX - 1)}…`, summaryTruncated: true };
+}
+
+/** The one place a Job becomes a listing row, so list_tasks and get_session(mode:"tasks") can't drift. */
+function toTaskSummary(job: Job, agentId: string): TaskSummary {
+  return {
+    taskId: job.jobId,
+    jobId: job.jobId,
+    sessionKey: job.sessionKey,
+    agent: agentId,
+    status: deriveTaskStatus(job),
+    startedAt: job.startedAt,
+    lastEventAt: job.lastEventAt,
+    ...previewSummary(job.summary),
+    error: job.error,
+  };
+}
+
 export function listTasks(pool: GatewayPool): TaskSummary[] {
   const start = Date.now();
   const items: TaskSummary[] = [];
@@ -76,17 +107,7 @@ export function listTasks(pool: GatewayPool): TaskSummary[] {
     for (const session of entry.sessions.listSessions()) {
       const job = entry.sessions.getLatestJobForSession(session.sessionKey);
       if (!job) continue;
-      items.push({
-        taskId: job.jobId,
-        jobId: job.jobId,
-        sessionKey: job.sessionKey,
-        agent: entry.agent.id,
-        status: deriveTaskStatus(job),
-        startedAt: job.startedAt,
-        lastEventAt: job.lastEventAt,
-        summary: job.summary,
-        error: job.error,
-      });
+      items.push(toTaskSummary(job, entry.agent.id));
     }
   }
   recordTelemetry({ tool: "list_tasks", taskCount: items.length, durationMs: Date.now() - start });
@@ -231,6 +252,13 @@ export function getTaskPrompt(
   return { found: true, prompt: job.prompt };
 }
 
+/**
+ * list_sessions: every session this connector currently knows about, not
+ * just the ones with work in flight. A session is recorded on its first
+ * run_task and kept (with its latest continuation state) until the process
+ * restarts, so completed threads stay listed — that's what makes the
+ * sessionKey re-usable for a follow-up task.
+ */
 export function listSessions(pool: GatewayPool): ContinuationState[] {
   const all: ContinuationState[] = [];
   for (const entry of pool.allEntries()) {
@@ -241,6 +269,16 @@ export function listSessions(pool: GatewayPool): ContinuationState[] {
   return all;
 }
 
+/**
+ * get_session: debug-level inspection of one session's latest job.
+ *
+ * `mode:"tail"` is FORWARD pagination, not a "last N lines" tail: it returns
+ * up to `limit` events starting at `after` (oldest-first) and hands back
+ * `nextAfter` to pass as the next call's `after`. Pagination is exhausted
+ * when fewer than `limit` events come back (equivalently, when `nextAfter`
+ * stops advancing). `after`/`nextAfter` are get_session's own event offsets
+ * and are NOT interchangeable with check_task/get_task's `logCursor`.
+ */
 export function getSession(
   pool: GatewayPool,
   opts: { sessionId: string; mode?: SessionInspectMode; limit?: number; after?: number; agent?: string },
@@ -265,17 +303,7 @@ export function getSession(
 
   const tasks: TaskSummary[] | undefined =
     mode === "tasks"
-      ? entry.sessions.getJobHistory(opts.sessionId).map((historyJob) => ({
-          taskId: historyJob.jobId,
-          jobId: historyJob.jobId,
-          sessionKey: historyJob.sessionKey,
-          agent: entry.agent.id,
-          status: deriveTaskStatus(historyJob),
-          startedAt: historyJob.startedAt,
-          lastEventAt: historyJob.lastEventAt,
-          summary: historyJob.summary,
-          error: historyJob.error,
-        }))
+      ? entry.sessions.getJobHistory(opts.sessionId).map((historyJob) => toTaskSummary(historyJob, entry.agent.id))
       : undefined;
 
   return {

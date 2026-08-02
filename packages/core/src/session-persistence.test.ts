@@ -111,7 +111,7 @@ describe("SessionManager restart persistence", () => {
     expect(snapshot.continuePolling).toBe(true);
     expect(snapshot.nextAction).toEqual({
       tool: "check_task",
-      args: { taskId: persistedRunning.jobId, sessionKey: persistedRunning.sessionKey },
+      args: { jobId: persistedRunning.jobId, sessionKey: persistedRunning.sessionKey },
     });
   });
 
