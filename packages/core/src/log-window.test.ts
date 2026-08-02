@@ -86,6 +86,31 @@ describe("check_task/get_task log window — long tasks stay bounded, cursor is 
     expect(new Set(seenSeqs).size).toBe(seenSeqs.length);
   });
 
+  it("keeps recording past the old 200-entry cap — Job.logs is authoritative full history, never silently trimmed", () => {
+    const ctrl = controllableGateway();
+    const sessions = new SessionManager(ctrl.gateway);
+    const job = sessions.submitTask({ task: "very long task", sessionKey: "fixed-session" });
+    ctrl.emitMany(350, lifecycleEvent);
+
+    const live = sessions.getJob(job.jobId)!;
+    expect(live.logs.length).toBe(350); // nothing dropped past 200
+    expect(live.logs.at(-1)?.seq).toBe(350); // seq stays monotonic well past the old cap
+
+    // The response stays bounded regardless — only the storage is uncapped.
+    const initial = sessions.buildSnapshot(live);
+    expect(initial.logs.length).toBeLessThanOrEqual(INITIAL_WINDOW_MAX);
+    expect(initial.logEventCount).toBe(350);
+    expect(initial.logCursor).toBe(350);
+
+    // Cursor keeps advancing past 200 too — a client that polled the whole way
+    // through still resumes correctly, no stall at the old cap.
+    ctrl.emitMany(20, (i) => lifecycleEvent(350 + i));
+    const next = sessions.buildSnapshot(sessions.getJob(job.jobId)!, initial.logCursor);
+    expect(next.logCursor).toBe(370);
+    expect(next.logEventCount).toBe(370);
+    expect(next.logs.length).toBeLessThanOrEqual(DELTA_WINDOW_MAX);
+  });
+
   it("reconnect/remount (client cursor lost, passes undefined again) gets the bounded recent window, not the full accumulated history", () => {
     const ctrl = controllableGateway();
     const sessions = new SessionManager(ctrl.gateway);

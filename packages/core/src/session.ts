@@ -35,10 +35,6 @@ const RECOVERY_TIMEOUT_MS = readEnvMs("CLAWCONNECT_RECOVERY_TIMEOUT_MS", 90 * 60
 const DEFAULT_WAIT_MS = readEnvMs("CLAWCONNECT_CHECK_WAIT_MS", 45_000);
 const MIN_WAIT_MS = 1_000;
 const MAX_WAIT_MS = readEnvMs("CLAWCONNECT_CHECK_MAX_WAIT_MS", 120_000);
-// Per-job in-memory log cap. Env-overridable for the same reason as the
-// windows above — a deployment watching long, chatty runs may want more
-// retained history than the default.
-const MAX_LOG_ENTRIES = readEnvMs("CLAWCONNECT_MAX_LOG_ENTRIES", 200);
 // "poll" mode's early-return wait: a lifecycle/recovery event always wakes
 // the wait immediately (it's a real state transition, never just cosmetic
 // tool chatter). A run of tool/tool-result-only activity instead has to
@@ -47,11 +43,15 @@ const MAX_LOG_ENTRIES = readEnvMs("CLAWCONNECT_MAX_LOG_ENTRIES", 200);
 // couple hundred ms) collapse into one wake instead of one per event.
 const COSMETIC_POLL_DEBOUNCE_MS = readEnvMs("CLAWCONNECT_COSMETIC_POLL_DEBOUNCE_MS", 400);
 
+/**
+ * Job.logs is authoritative full history — server-retained, never trimmed or
+ * capped (docs/decisions/2026-07-27-task-contract.md: "the server remains
+ * authoritative" / "the server retains full history"; the widget/check_task
+ * simplification only bounds what a given response projects from it — see
+ * log-projection.ts). seq is 1-based and equal to the post-push array
+ * length; monotonic for the life of the job regardless of how long it runs.
+ */
 function pushLog(job: Pick<Job, "logs">, entry: { ts: number; type: string; text: string; isError?: boolean }): void {
-  if (job.logs.length >= MAX_LOG_ENTRIES) return;
-  // seq is 1-based and equal to the post-push array length — see LogEntry's
-  // doc comment in types.ts for why this is treated as an opaque cursor
-  // rather than "just" the index.
   job.logs.push({ ...entry, seq: job.logs.length + 1 });
 }
 
