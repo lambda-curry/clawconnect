@@ -714,6 +714,11 @@ export class OpenClawGateway {
       const agentSubId = randomUUID();
       let runId: string | undefined;
       const bufferedFrames: Frame[] = [];
+      // Diagnostics for the two ways a pre-runId frame can be discarded.
+      // Reported with the replay so a run that lost events is explainable
+      // from the log rather than by inference.
+      let droppedForeignChatFrames = 0;
+      let evictedFrames = 0;
       let accumulated = "";
       // SFR-message-veto: when the agent calls OpenClaw's generic `message`
       // tool, the body it intended for the caller lives in the tool args and
@@ -853,19 +858,38 @@ export class OpenClawGateway {
 
       // Before the runId is known there is nothing to correlate on, so hold
       // the frames instead of discarding them. The buffer is fed by ALL
-      // socket traffic, including other sessions' runs, so it is narrowed
-      // twice: `chat` events carry a sessionKey and anything from a
-      // different session is dropped outright, and the cap evicts the OLDEST
-      // frame rather than refusing the newest — this run's terminal event is
-      // always the most recent thing it will ever buffer, so unrelated
-      // chatter can never push it out.
+      // socket traffic, including other sessions' busy runs, so it is
+      // narrowed twice:
+      //
+      //   1. `chat` events carry a sessionKey — another session's are
+      //      dropped on arrival and never compete for space.
+      //   2. At the cap, the victim is the oldest `agent` frame, never a
+      //      `chat` frame. Agent frames are progress chatter (at worst a
+      //      missing log line); every buffered chat frame belongs to this
+      //      session and could be the terminal event this call exists to
+      //      receive. A flood of agent frames must not be able to evict it.
       const buffer = (frame: Frame) => {
         if (frame.event === "chat") {
           const frameSessionKey = (frame.payload as { sessionKey?: string } | undefined)?.sessionKey;
-          if (typeof frameSessionKey === "string" && frameSessionKey !== sessionKey) return;
+          if (typeof frameSessionKey === "string" && frameSessionKey !== sessionKey) {
+            droppedForeignChatFrames += 1;
+            if (droppedForeignChatFrames === 1) {
+              logDebug(
+                `[openclaw-gateway] dropping pre-runId chat frames for other sessions ` +
+                  `(first: ${frameSessionKey}) while awaiting the send for ${sessionKey}`,
+              );
+            }
+            return;
+          }
         }
         bufferedFrames.push(frame);
-        if (bufferedFrames.length > MAX_PRE_RUNID_FRAMES) bufferedFrames.shift();
+        if (bufferedFrames.length <= MAX_PRE_RUNID_FRAMES) return;
+        // Oldest agent frame if there is one; otherwise the buffer is all
+        // this session's chat frames and the oldest is the least likely to
+        // be terminal.
+        const agentIndex = bufferedFrames.findIndex((f) => f.event === "agent");
+        bufferedFrames.splice(agentIndex >= 0 ? agentIndex : 0, 1);
+        evictedFrames += 1;
       };
 
       this.subscribers.set(agentSubId, (frame) => {
@@ -898,9 +922,11 @@ export class OpenClawGateway {
           // splice before dispatching: a buffered `final` runs cleanup and
           // resolves, and nothing should be left queued behind it.
           const replay = bufferedFrames.splice(0);
-          if (replay.length > 0) {
+          if (replay.length > 0 || droppedForeignChatFrames > 0 || evictedFrames > 0) {
             logDebug(
-              `[openclaw-gateway] replaying ${replay.length} frame(s) that arrived before runId ${id}`,
+              `[openclaw-gateway] replaying ${replay.length} frame(s) that arrived before runId ${id} ` +
+                `(dropped ${droppedForeignChatFrames} foreign-session chat frame(s), ` +
+                `evicted ${evictedFrames} over-cap frame(s))`,
             );
           }
           for (const frame of replay) dispatch(frame);

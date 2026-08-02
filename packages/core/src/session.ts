@@ -50,14 +50,14 @@ const COSMETIC_POLL_DEBOUNCE_MS = readEnvMs("CLAWCONNECT_COSMETIC_POLL_DEBOUNCE_
 // the job sits in `running` until TIMEOUT_MS turns it into a bogus error.
 // Sized to clear a long model_call between tool rounds, which produces no
 // live events but is not a finished run.
-const RECONCILE_QUIET_MS = readEnvMs("CLAWCONNECT_RECONCILE_QUIET_MS", 120_000);
+export const RECONCILE_QUIET_MS = readEnvMs("CLAWCONNECT_RECONCILE_QUIET_MS", 120_000);
 // Gap between the two transcript reads a single reconciliation round takes.
 // Long enough that a run still writing will visibly move between them.
 const RECONCILE_SAMPLE_INTERVAL_MS = readEnvMs("CLAWCONNECT_RECONCILE_SAMPLE_INTERVAL_MS", 15_000);
 // Reconciliation rounds without upstream progress before the job is forced
 // terminal. Bounded on purpose: "we can't tell" must still end the job, not
 // leave it running forever. A round that sees upstream advance resets this.
-const RECONCILE_MAX_ROUNDS = 2;
+export const RECONCILE_MAX_ROUNDS = 2;
 
 /**
  * Job.logs is authoritative full history — server-retained, never trimmed or
@@ -553,18 +553,21 @@ export class SessionManager {
       return;
     }
 
-    // `completed` is never decided by a single round. chat.history exposes
-    // whatever the agent last wrote, and an active run routinely flashes an
-    // interim status line ("I'm tracing the live wiring now…") into the
-    // trailing-assistant slot and then works for minutes without returning
-    // to it — see the stability note in pollTranscriptForFinalText. Text
-    // only counts once the SAME text survives consecutive quiet rounds, or
-    // once the round cap is reached, both of which mean upstream has not
-    // moved for the whole accumulated window.
+    // `completed` requires the SAME text from two successful rounds, with no
+    // weaker fallback. chat.history exposes whatever the agent last wrote,
+    // and an active run routinely flashes an interim status line ("I'm
+    // tracing the live wiring now…") into the trailing-assistant slot and
+    // then works for minutes without returning to it — see the stability
+    // note in pollTranscriptForFinalText. Reaching the round cap is NOT
+    // evidence: an unreadable round followed by one readable interim line is
+    // two rounds of nothing confirmed. Unconfirmed text falls through to
+    // completed_no_summary, which self-heals — maybeRecoverTerminalJob
+    // re-reads the transcript on later polls and upgrades the job if the
+    // text is really final.
     const textConfirmed =
       observation.ok &&
       observation.trailingText.length > 0 &&
-      (observation.trailingText === owner.candidateText || round >= RECONCILE_MAX_ROUNDS);
+      observation.trailingText === owner.candidateText;
     if (textConfirmed) {
       this.finalizeReconciled(job, "completed", observation.trailingText);
       return;
@@ -748,6 +751,13 @@ export class SessionManager {
    * gives multiple chances over time.
    */
   private async maybeRecoverTerminalJob(job: Job): Promise<void> {
+    // Only the session's current job may read the session's transcript.
+    // Reconciliation ends jobs whose live stream was abandoned, which frees
+    // the session for new work — so unlike before, a terminal job can now be
+    // polled while a NEWER job is running on the same sessionKey. Without
+    // this the old job would adopt the new run's answer as its own and
+    // repoint the session's continuation state at itself.
+    if (this.latestJobBySession.get(job.sessionKey) !== job.jobId) return;
     const RECHECK_COOLDOWN_MS = 20_000;
     const last = job.lastRecheckAt ?? 0;
     if (Date.now() - last < RECHECK_COOLDOWN_MS) return;
@@ -769,6 +779,9 @@ export class SessionManager {
       return;
     }
     if (!recovered) return;
+    // The poll above takes seconds, so re-check ownership: a new job may have
+    // claimed the session while it ran.
+    if (this.latestJobBySession.get(job.sessionKey) !== job.jobId) return;
     job.lastEventAt = Date.now();
     job.status = "completed";
     job.summary = recovered;

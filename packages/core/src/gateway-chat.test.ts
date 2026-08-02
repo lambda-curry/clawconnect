@@ -155,6 +155,23 @@ describe("OpenClawGateway.chat — run correlation across the send boundary", ()
     await expect(gateway.chat("agent:main:main:thread:test", "hi", 10_000)).resolves.toBe("our answer");
   });
 
+  it("keeps this run's buffered final when a flood of agent frames would overflow the buffer", async () => {
+    // Agent frames carry no sessionKey, so they cannot be filtered on
+    // arrival — they can only be bounded. Evicting oldest-first would throw
+    // away the terminal chat frame that was buffered before them; progress
+    // chatter must be sacrificed instead.
+    const gateway = await harness((frame, socket) => {
+      if (frame.method !== "chat.send") return;
+      socket.send(chatEvent("run-6", "final", "our answer"));
+      for (let i = 0; i < 600; i++) {
+        socket.send(agentToolEvent(`noisy-run-${i}`, "Bash"));
+      }
+      socket.send(sendAck(frame.id, "run-6"));
+    });
+
+    await expect(gateway.chat("agent:main:main:thread:test", "hi", 10_000)).resolves.toBe("our answer");
+  });
+
   it("still handles the ordinary case where the acknowledgement precedes the events", async () => {
     const gateway = await harness((frame, socket) => {
       if (frame.method !== "chat.send") return;

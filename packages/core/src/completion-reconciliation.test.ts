@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { SessionManager } from "./session.ts";
+import { RECONCILE_QUIET_MS, SessionManager } from "./session.ts";
 import type { OpenClawGateway, RunObservation } from "./gateway.ts";
 import type { GatewayEvent } from "./types.ts";
 
@@ -18,7 +18,10 @@ import type { GatewayEvent } from "./types.ts";
  * SessionManager.reconcileQuietRun.
  */
 
-const QUIET_MS = 120_000; // RECONCILE_QUIET_MS in session.ts
+// Read from the module rather than hardcoded: CLAWCONNECT_RECONCILE_QUIET_MS
+// can override the policy, and a fixture that assumed 120s would then be
+// advancing the fake clock to the wrong place.
+const QUIET_MS = RECONCILE_QUIET_MS;
 const PAST_QUIET_MS = QUIET_MS + 1_000;
 
 const settled = (trailingText: string, snapshotKey = "settled-1"): RunObservation => ({
@@ -273,6 +276,27 @@ describe("completion reconciliation — an active run is never mistaken for a fi
     }
   });
 
+  it("never completes on unconfirmed text — one unreadable round plus one interim line is not evidence", async () => {
+    vi.useFakeTimers();
+    // Reaching the round cap is not a substitute for confirmation: the first
+    // round told us nothing at all, so the interim line the second round
+    // happens to see has been observed exactly once.
+    const ctrl = fakeGateway({ observations: [unreadable(), settled("I'm tracing the live wiring now…")] });
+    const sessions = new SessionManager(ctrl.gateway);
+    const job = sessions.submitTask({ task: "tool-heavy job" });
+    ctrl.emit(toolEvent);
+
+    await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
+    expect(sessions.getJob(job.jobId)?.status).toBe("running");
+
+    await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
+    const live = sessions.getJob(job.jobId)!;
+    // Bounded and self-healing: the lazy terminal recheck upgrades this to
+    // `completed` later if the text really was final.
+    expect(live.status).toBe("completed_no_summary");
+    expect(live.summary).not.toContain("tracing the live wiring");
+  });
+
   it("resets accumulated quiet rounds when live activity arrives between them", async () => {
     vi.useFakeTimers();
     const ctrl = fakeGateway({ observations: [settled("")] });
@@ -395,6 +419,35 @@ describe("completion reconciliation — handing the job off safely", () => {
     const continuation = sessions.getSessionState(sessionKey);
     expect(continuation?.lastJobId).toBe(second.jobId);
     expect(continuation?.lastSummary).not.toBe("the stale first answer");
+  });
+
+  it("a superseded terminal job never consumes the newer job's transcript on recheck", async () => {
+    vi.useFakeTimers();
+    // Reconciliation ends abandoned runs, which frees the session — so a
+    // terminal job can now be polled while a NEWER job runs on the same
+    // sessionKey. The old job's lazy recheck must not read (and claim) the
+    // new run's answer.
+    const pollSpy = vi.fn(async () => "the newer job's answer");
+    const ctrl = fakeGateway({ observations: [settled("")], pollTranscriptForFinalText: pollSpy });
+    const sessions = new SessionManager(ctrl.gateway);
+    const sessionKey = "agent:main:main:thread:supersede";
+    const first = sessions.submitTask({ task: "first ask", sessionKey });
+    ctrl.emit(toolEvent);
+
+    await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
+    await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
+    expect(sessions.getJob(first.jobId)?.status).toBe("completed_no_summary");
+
+    const second = sessions.submitTask({ task: "second ask", sessionKey });
+    expect(second.status).toBe("running");
+
+    // Polling the OLD job: the recheck must not fire at all.
+    await sessions.waitForJob(first.jobId, 0, undefined, "wait", 1_000);
+
+    expect(pollSpy).not.toHaveBeenCalled();
+    expect(sessions.getJob(first.jobId)?.status).toBe("completed_no_summary");
+    expect(sessions.getJob(first.jobId)?.summary).not.toBe("the newer job's answer");
+    expect(sessions.getSessionState(sessionKey)?.lastJobId).toBe(second.jobId);
   });
 
   it("the abandoned live stream timing out does not overwrite a reconciled completion", async () => {
