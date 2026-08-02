@@ -213,6 +213,19 @@ export type RunObservation = {
   /** Visible trailing-assistant text at the last successful read; "" when the trailing entry carries none. */
   trailingText: string;
   /**
+   * What upstream says about the run itself, independent of the transcript.
+   * `active` and `terminal` are POSITIVE evidence from openclaw's
+   * `sessionInfo.hasActiveRun`/`activeRunIds`; `unknown` means the field was
+   * absent or unreadable and nothing may be concluded from it.
+   *
+   * This is the only signal that separates "the run ended writing nothing"
+   * from "the model is composing a long answer" — both of which look like a
+   * frozen transcript. Verified on the wire 2026-08-02: during a sleeping
+   * run, hasActiveRun stayed true with the runId listed while the transcript
+   * sat at one user message; on completion it flipped to false/[].
+   */
+  upstream: "active" | "terminal" | "unknown";
+  /**
    * Snapshot key of the last successful read ("" when none succeeded).
    * Exposed so a caller comparing successive observations can detect
    * progress that happened BETWEEN them — a run that advances one tool round
@@ -220,6 +233,40 @@ export type RunObservation = {
    */
   snapshotKey: string;
 };
+
+/**
+ * Read openclaw's run-state flags off a `chat.history` payload.
+ *
+ * `sessionInfo` carries no typebox schema upstream, so every field is treated
+ * as optional and anything unrecognized degrades to "unknown" rather than
+ * being guessed at.
+ *
+ *   our runId listed in activeRunIds        → active
+ *   hasActiveRun === false                  → terminal (nothing in flight)
+ *   activeRunIds non-empty, ours absent     → terminal (someone else's run)
+ *   hasActiveRun true, activeRunIds empty   → active (upstream ORs in
+ *                                             projected runs it can't name)
+ *   field missing / wrong type              → unknown
+ */
+export function classifyUpstreamRun(
+  sessionInfo: unknown,
+  runId?: string,
+): RunObservation["upstream"] {
+  if (!sessionInfo || typeof sessionInfo !== "object") return "unknown";
+  const info = sessionInfo as { hasActiveRun?: unknown; activeRunIds?: unknown };
+  const ids = Array.isArray(info.activeRunIds)
+    ? info.activeRunIds.filter((id): id is string => typeof id === "string")
+    : undefined;
+  if (runId && ids?.includes(runId)) return "active";
+  if (info.hasActiveRun === false) return "terminal";
+  if (info.hasActiveRun === true) {
+    // Named runs that aren't ours mean ours is done; an unnamed active run
+    // is ambiguous, so stay conservative and call it active.
+    if (runId && ids && ids.length > 0) return "terminal";
+    return "active";
+  }
+  return "unknown";
+}
 
 // ── Gateway client ───────────────────────────────────────────────────────────
 
@@ -404,7 +451,15 @@ export class OpenClawGateway {
       this.reconnectTimer = null;
       this.connect().then(
         () => logDebug(`[openclaw-gateway] reconnected after ${this.reconnectAttempt} attempt(s)`),
-        (err) => console.error(`[openclaw-gateway] reconnect failed:`, (err as Error).message),
+        (err) => {
+          // Re-arm. Without this a single failed attempt ended reconnection
+          // permanently: the timer is already cleared and no socket remains
+          // to fire another `close`, so the client stayed offline until the
+          // process restarted. Live logs showed 53 disconnects against 56
+          // live-timeout errors, which is that dead end.
+          console.error(`[openclaw-gateway] reconnect failed:`, (err as Error).message);
+          this.scheduleReconnect();
+        },
       );
     }, delay);
   }
@@ -466,17 +521,19 @@ export class OpenClawGateway {
    */
   private async readTranscriptSample(
     sessionKey: string,
-  ): Promise<{ snapshotKey: string; trailingText: string } | null> {
+    runId?: string,
+  ): Promise<{ snapshotKey: string; trailingText: string; upstream: RunObservation["upstream"] } | null> {
     try {
       const res = (await this.sendRpc(
         "chat.history",
         { sessionKey, limit: 20, maxChars: 200_000 },
         20_000,
-      )) as { messages?: unknown };
+      )) as { messages?: unknown; sessionInfo?: unknown };
       const messages = Array.isArray(res?.messages) ? res.messages : [];
       return {
         snapshotKey: transcriptSnapshotKey(messages),
         trailingText: trailingAssistantText(messages),
+        upstream: classifyUpstreamRun(res?.sessionInfo, runId),
       };
     } catch (err) {
       logDebug("[openclaw-gateway] transcript read failed:", (err as Error).message);
@@ -496,7 +553,7 @@ export class OpenClawGateway {
    */
   async reconcileRun(
     sessionKey: string,
-    options: { samples?: number; intervalMs?: number } = {},
+    options: { samples?: number; intervalMs?: number; runId?: string } = {},
   ): Promise<RunObservation> {
     const samples = Math.max(2, options.samples ?? 2);
     const intervalMs = options.intervalMs ?? 15_000;
@@ -505,20 +562,31 @@ export class OpenClawGateway {
     let changed = false;
     let trailingText = "";
     let snapshotKey = "";
+    let upstream: RunObservation["upstream"] = "unknown";
     for (let i = 0; i < samples; i++) {
       if (i > 0) await new Promise((r) => setTimeout(r, intervalMs));
-      const sample = await this.readTranscriptSample(sessionKey);
+      const sample = await this.readTranscriptSample(sessionKey, options.runId);
       if (!sample) continue;
       successes += 1;
       trailingText = sample.trailingText;
       snapshotKey = sample.snapshotKey;
+      // Last successful read wins: a run that went terminal between samples
+      // should read as terminal, not be pinned to the earlier "active".
+      upstream = sample.upstream;
       if (previousKey !== undefined && sample.snapshotKey !== previousKey) changed = true;
       previousKey = sample.snapshotKey;
     }
-    const observation: RunObservation = { ok: successes >= 2, changed, trailingText, snapshotKey };
+    const observation: RunObservation = {
+      ok: successes >= 2,
+      changed,
+      trailingText,
+      snapshotKey,
+      upstream,
+    };
     logDebug(
       `[openclaw-gateway] reconcile ${sessionKey.slice(-12)}: reads=${successes}/${samples} ` +
-        `ok=${observation.ok} changed=${observation.changed} trailingLen=${observation.trailingText.length}`,
+        `ok=${observation.ok} changed=${observation.changed} upstream=${observation.upstream} ` +
+        `trailingLen=${observation.trailingText.length}`,
     );
     return observation;
   }
@@ -704,6 +772,7 @@ export class OpenClawGateway {
     message: string,
     timeoutMs: number,
     onEvent?: (entry: GatewayEvent) => void,
+    onRunId?: (runId: string) => void,
   ): Promise<string> {
     await this.connect();
 
@@ -919,6 +988,9 @@ export class OpenClawGateway {
             return;
           }
           runId = id;
+          // Hand the correlation key to the caller before replaying anything,
+          // so a reconciliation racing this dispatch can already name the run.
+          onRunId?.(id);
           // splice before dispatching: a buffered `final` runs cleanup and
           // resolves, and nothing should be left queued behind it.
           const replay = bufferedFrames.splice(0);

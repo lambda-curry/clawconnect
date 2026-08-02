@@ -24,19 +24,28 @@ import type { GatewayEvent } from "./types.ts";
 const QUIET_MS = RECONCILE_QUIET_MS;
 const PAST_QUIET_MS = QUIET_MS + 1_000;
 
-const settled = (trailingText: string, snapshotKey = "settled-1"): RunObservation => ({
-  ok: true,
-  changed: false,
-  trailingText,
-  snapshotKey,
-});
-const advancing = (snapshotKey = "advancing-1"): RunObservation => ({
+type Upstream = RunObservation["upstream"];
+// `unknown` by default: an openclaw that reports no run state, which is the
+// conservative inference-only path every pre-existing fixture exercises.
+const settled = (
+  trailingText: string,
+  snapshotKey = "settled-1",
+  upstream: Upstream = "unknown",
+): RunObservation => ({ ok: true, changed: false, trailingText, snapshotKey, upstream });
+const advancing = (snapshotKey = "advancing-1", upstream: Upstream = "unknown"): RunObservation => ({
   ok: true,
   changed: true,
   trailingText: "",
   snapshotKey,
+  upstream,
 });
-const unreadable = (): RunObservation => ({ ok: false, changed: false, trailingText: "", snapshotKey: "" });
+const unreadable = (): RunObservation => ({
+  ok: false,
+  changed: false,
+  trailingText: "",
+  snapshotKey: "",
+  upstream: "unknown",
+});
 
 function deferred<T>() {
   let resolve!: (v: T) => void;
@@ -395,6 +404,97 @@ describe("completion reconciliation — an active run is never mistaken for a fi
     await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
     expect(sessions.getJob(job.jobId)?.status).toBe("completed");
     expect(sessions.getJob(job.jobId)?.summary).toBe("the answer");
+  });
+});
+
+describe("completion reconciliation — upstream run state is the deciding evidence", () => {
+  it("never terminates a run upstream reports as still executing, however long the transcript is frozen", async () => {
+    vi.useFakeTimers();
+    // The job 9f21545a shape, now with the signal that actually resolves it.
+    // Verified on the wire 2026-08-02: a sleeping run reported
+    // hasActiveRun=true with its runId listed while chat.history sat at a
+    // single user message — transcript-identical to a dead run.
+    const ctrl = fakeGateway({ observations: [settled("", "frozen", "active")] });
+    const sessions = new SessionManager(ctrl.gateway);
+    const job = sessions.submitTask({ task: "long silent composition" });
+    for (let i = 0; i < 20; i++) emitToolRound(ctrl);
+
+    for (let round = 0; round < 10; round++) {
+      await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
+      expect(sessions.getJob(job.jobId)?.status).toBe("running");
+    }
+    const colliding = sessions.submitTask({ task: "colliding", sessionKey: job.sessionKey });
+    expect(colliding.errorInfo?.message).toBe("session busy");
+
+    ctrl.finishChat("the real answer");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sessions.getJob(job.jobId)?.summary).toBe("the real answer");
+  });
+
+  it("completes with the transcript answer as soon as upstream reports the run terminal", async () => {
+    vi.useFakeTimers();
+    // Positive evidence needs no multi-round confirmation: an interim line
+    // can only mislead while the run is going, and upstream has ruled that
+    // out. One round, not the 30-minute live timeout.
+    const ctrl = fakeGateway({ observations: [settled("the recovered answer", "k", "terminal")] });
+    const sessions = new SessionManager(ctrl.gateway);
+    const job = sessions.submitTask({ task: "lost terminal event" });
+    emitToolRound(ctrl);
+
+    await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
+    const live = sessions.getJob(job.jobId)!;
+    expect(live.status).toBe("completed");
+    expect(live.summary).toBe("the recovered answer");
+    expect(ctrl.reconcileCalls).toHaveLength(1);
+  });
+
+  it("returns completed_no_summary when upstream is terminal and produced no visible text", async () => {
+    vi.useFakeTimers();
+    const ctrl = fakeGateway({ observations: [settled("", "k", "terminal")] });
+    const sessions = new SessionManager(ctrl.gateway);
+    const sessionKey = "agent:main:main:thread:no-text";
+    const job = sessions.submitTask({ task: "run that wrote nothing", sessionKey });
+    emitToolRound(ctrl);
+
+    await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
+    const live = sessions.getJob(job.jobId)!;
+    expect(live.status).toBe("completed_no_summary");
+    expect(live.summary).toBe(SENTINEL);
+
+    // The busy lock is released on this terminal outcome too.
+    const next = sessions.submitTask({ task: "follow-up", sessionKey });
+    expect(next.status).toBe("running");
+  });
+
+  it("falls back to conservative two-round confirmation when upstream reports no run state", async () => {
+    vi.useFakeTimers();
+    // An openclaw without hasActiveRun must not get the fast path.
+    const ctrl = fakeGateway({ observations: [settled("some text", "k", "unknown")] });
+    const sessions = new SessionManager(ctrl.gateway);
+    const job = sessions.submitTask({ task: "older upstream" });
+    emitToolRound(ctrl);
+
+    await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
+    expect(sessions.getJob(job.jobId)?.status).toBe("running");
+    await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
+    expect(sessions.getJob(job.jobId)?.status).toBe("completed");
+  });
+
+  it("keeps waiting when upstream is terminal but the read itself failed", async () => {
+    vi.useFakeTimers();
+    // ok=false means we could not read upstream at all; the `terminal` label
+    // on an unsuccessful read must not be trusted.
+    const ctrl = fakeGateway({
+      observations: [{ ok: false, changed: false, trailingText: "", snapshotKey: "", upstream: "terminal" }],
+    });
+    const sessions = new SessionManager(ctrl.gateway);
+    const job = sessions.submitTask({ task: "unreadable" });
+    emitToolRound(ctrl);
+
+    for (let round = 0; round < 3; round++) {
+      await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
+      expect(sessions.getJob(job.jobId)?.status).toBe("running");
+    }
   });
 });
 

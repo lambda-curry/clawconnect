@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { extractMessageToolReply, formatLifecycleEventText } from "./gateway.ts";
+import { classifyUpstreamRun, extractMessageToolReply, formatLifecycleEventText } from "./gateway.ts";
 
 describe("extractMessageToolReply", () => {
   it("returns the trimmed `message` arg for codex-style `message` tool calls", () => {
@@ -62,5 +62,42 @@ describe("formatLifecycleEventText", () => {
   it("handles missing lifecycle phase explicitly", () => {
     expect(formatLifecycleEventText(undefined)).toBe("Agent lifecycle: unknown");
     expect(formatLifecycleEventText("  ")).toBe("Agent lifecycle: unknown");
+  });
+});
+
+describe("classifyUpstreamRun — openclaw's sessionInfo run-state flags", () => {
+  const RUN = "d4f49586-2fb7-4de4-879e-bb1ca611261f";
+
+  it("reports active when our runId is listed", () => {
+    // Shape observed live 2026-08-02 while a run was sleeping, with the
+    // transcript frozen at a single user message.
+    expect(classifyUpstreamRun({ hasActiveRun: true, activeRunIds: [RUN] }, RUN)).toBe("active");
+  });
+
+  it("reports terminal when nothing is running", () => {
+    expect(classifyUpstreamRun({ hasActiveRun: false, activeRunIds: [] }, RUN)).toBe("terminal");
+  });
+
+  it("reports terminal when the only active runs belong to someone else", () => {
+    expect(classifyUpstreamRun({ hasActiveRun: true, activeRunIds: ["other-run"] }, RUN)).toBe("terminal");
+  });
+
+  it("stays active when upstream claims a run but names none", () => {
+    // sessionInfo.hasActiveRun ORs in projected runs it cannot enumerate, so
+    // an unnamed active run must not be read as ours having finished.
+    expect(classifyUpstreamRun({ hasActiveRun: true, activeRunIds: [] }, RUN)).toBe("active");
+  });
+
+  it("is unknown when the field is absent, malformed, or sessionInfo is missing", () => {
+    // sessionInfo carries no schema upstream, so nothing may be assumed.
+    expect(classifyUpstreamRun(undefined, RUN)).toBe("unknown");
+    expect(classifyUpstreamRun({}, RUN)).toBe("unknown");
+    expect(classifyUpstreamRun({ hasActiveRun: "yes" }, RUN)).toBe("unknown");
+    expect(classifyUpstreamRun("not-an-object", RUN)).toBe("unknown");
+  });
+
+  it("still classifies without a runId to correlate against", () => {
+    expect(classifyUpstreamRun({ hasActiveRun: false }, undefined)).toBe("terminal");
+    expect(classifyUpstreamRun({ hasActiveRun: true, activeRunIds: ["x"] }, undefined)).toBe("active");
   });
 });

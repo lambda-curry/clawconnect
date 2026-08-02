@@ -189,6 +189,8 @@ export class SessionManager {
       candidateText: string;
       /** Transcript snapshot key from the previous quiet round, for detecting progress BETWEEN rounds. */
       snapshotKey: string;
+      /** openclaw's runId for this job's chat.send, once known — the correlation key for upstream run state. */
+      runId?: string;
     }
   >();
 
@@ -336,20 +338,33 @@ export class SessionManager {
     this.persistActiveJobs();
 
     this.gateway
-      .chat(sessionKey, message, TIMEOUT_MS, (event) => {
-        job.lastEventAt = Date.now();
-        this.noteLiveActivity(jobId, event);
-        pushLog(job, {
-          ts: Date.now(),
-          type: event.type,
-          text: event.text,
-          ...(event.type === "tool-result" && event.isError ? { isError: true } : {}),
-        });
-        logDebug(
-          `[job ${jobId.slice(0, 8)}] event #${job.logs.length}: ${event.type} - ${event.text.slice(0, 80)}`,
-        );
-        processEvent(artifacts, event);
-      })
+      .chat(
+        sessionKey,
+        message,
+        TIMEOUT_MS,
+        (event) => {
+          job.lastEventAt = Date.now();
+          this.noteLiveActivity(jobId, event);
+          pushLog(job, {
+            ts: Date.now(),
+            type: event.type,
+            text: event.text,
+            ...(event.type === "tool-result" && event.isError ? { isError: true } : {}),
+          });
+          logDebug(
+            `[job ${jobId.slice(0, 8)}] event #${job.logs.length}: ${event.type} - ${event.text.slice(0, 80)}`,
+          );
+          processEvent(artifacts, event);
+        },
+        (runId) => {
+          // openclaw's handle for this run. Reconciliation correlates against
+          // it so "is THIS run still going?" is answered by upstream rather
+          // than inferred from transcript stillness.
+          const state = this.reconcilers.get(jobId);
+          if (state) state.runId = runId;
+          logDebug(`[job ${jobId.slice(0, 8)}] upstream runId ${runId}`);
+        },
+      )
       .then(
         (reply) => {
           // chat() settled: the live stream answered for itself, so the quiet
@@ -601,12 +616,13 @@ export class SessionManager {
       observation = await this.gateway.reconcileRun(job.sessionKey, {
         samples: 2,
         intervalMs: RECONCILE_SAMPLE_INTERVAL_MS,
+        runId: owner.runId,
       });
     } catch (err) {
       logDebug(
         `[job ${job.jobId}] reconcile threw: ${err instanceof Error ? err.message : String(err)}`,
       );
-      observation = { ok: false, changed: false, trailingText: "", snapshotKey: "" };
+      observation = { ok: false, changed: false, trailingText: "", snapshotKey: "", upstream: "unknown" };
     }
 
     // The job may have changed hands while we were sampling. Two distinct
@@ -640,6 +656,43 @@ export class SessionManager {
     // Recomputed now that the observation is known to be current.
     const round = owner.rounds + 1;
 
+    // Upstream says the run is still executing. That is positive evidence,
+    // and it is the ONLY thing that separates a model composing a long answer
+    // from a run that ended writing nothing — both freeze the transcript.
+    // Verified on the wire: a sleeping run reported hasActiveRun=true with
+    // its runId listed while the transcript sat at one user message.
+    if (observation.upstream === "active") {
+      pushLog(job, {
+        ts: Date.now(),
+        type: "recovery",
+        text: "Upstream confirms the run is still executing — the task is still running",
+      });
+      owner.rounds = 0;
+      owner.candidateText = "";
+      if (observation.ok) owner.snapshotKey = observation.snapshotKey;
+      this.scheduleReconcile(job, RECONCILE_QUIET_MS);
+      return;
+    }
+
+    // Upstream says the run is over. That is positive evidence, so no
+    // multi-round inference is needed: whatever the transcript holds now is
+    // final. An interim status line can only mislead us while the run is
+    // still going, and upstream has just ruled that out. This is what turns
+    // a lost terminal event into a ~2-minute outcome instead of the
+    // 30-minute live timeout that produced job 3a2619f9's error.
+    if (observation.ok && observation.upstream === "terminal") {
+      if (observation.trailingText.length > 0) {
+        this.finalizeReconciled(job, observation.trailingText);
+      } else {
+        this.finalizeReconciled(job, "", "completed_no_summary");
+      }
+      return;
+    }
+
+    // Everything below is the fallback for `unknown` upstream — an openclaw
+    // that doesn't report run state. It infers from transcript behaviour
+    // alone and so stays deliberately conservative.
+    //
     // Progress means "moved at any point since the last round", not just
     // "moved between this round's two samples": a run that advances one tool
     // round per minute looks perfectly stable inside a single 15s window.
@@ -676,18 +729,8 @@ export class SessionManager {
       return;
     }
 
-    // No terminal decision from absence. Upstream showing nothing is NOT
-    // evidence the run ended: openclaw writes the final assistant message
-    // only when it is complete, so a model composing a long answer leaves
-    // the transcript frozen on the last toolResult and emits no live events
-    // for as long as it takes. Live job 9f21545a did exactly that for 20.9
-    // minutes and then returned a 6942-char report — an earlier version of
-    // this code would have declared it completed_no_summary at ~4.5 minutes,
-    // 16 minutes before its real answer existed, releasing the session guard
-    // while it was still working. `completed` still requires positive
-    // evidence (confirmed trailing text, above); everything else keeps
-    // waiting, bounded by chat()'s TIMEOUT_MS exactly as it was before
-    // reconciliation existed.
+    // Upstream unknown or unreadable: keep waiting. chat()'s TIMEOUT_MS is
+    // the outer bound, exactly as before reconciliation existed.
     owner.rounds = round;
     owner.candidateText = observation.ok ? observation.trailingText : "";
     if (observation.ok) owner.snapshotKey = observation.snapshotKey;
@@ -700,27 +743,34 @@ export class SessionManager {
    * this takes no status parameter. The result is marked provisional: it came
    * from a transcript read, not from a terminal event.
    */
-  private finalizeReconciled(job: Job, summary: string): void {
+  private finalizeReconciled(
+    job: Job,
+    summary: string,
+    status: "completed" | "completed_no_summary" = "completed",
+  ): void {
     this.clearReconciler(job.jobId);
     this.provisionalOutcomes.add(job.jobId);
     job.lastEventAt = Date.now();
-    job.status = "completed";
-    job.summary = summary;
-    extractPatternsFromSummary(job.artifacts, summary);
+    job.status = status;
+    job.summary = status === "completed" ? summary : "Stream finished with no response collected.";
+    if (status === "completed") extractPatternsFromSummary(job.artifacts, summary);
     pushLog(job, {
       ts: Date.now(),
       type: "recovery",
-      text: "Recovered the final response from the upstream transcript after the live stream went quiet",
+      text:
+        status === "completed"
+          ? "Recovered the final response from the upstream transcript after the live stream went quiet"
+          : "Upstream confirms the run ended without producing a visible response",
     });
     this.sessions.set(job.sessionKey, {
       sessionKey: job.sessionKey,
       lastJobId: job.jobId,
-      lastSummary: summary.slice(0, 500),
+      lastSummary: (job.summary ?? "").slice(0, 500),
       artifacts: job.artifacts,
-      recommendedNextStep: deriveNextStep(job.artifacts, "completed"),
+      recommendedNextStep: deriveNextStep(job.artifacts, status),
     });
     this.persistActiveJobs();
-    logDebug(`[job ${job.jobId}] reconciled to completed (${summary.length} chars)`);
+    logDebug(`[job ${job.jobId}] reconciled to ${status} (${summary.length} chars)`);
   }
 
   /**
