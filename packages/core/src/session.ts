@@ -153,10 +153,26 @@ export class SessionManager {
    * Live quiet-watchdogs, keyed by jobId. Present only while a job is
    * `running` with a live chat() still outstanding; cleared the moment the
    * job goes terminal or chat() settles (after which recoverLateFinalText
-   * owns the job). `rounds` counts consecutive reconciliations that saw no
-   * upstream progress — see RECONCILE_MAX_ROUNDS.
+   * owns the job).
+   *
+   * The state object's identity doubles as an ownership token: an in-flight
+   * reconciliation captures it before awaiting and re-checks it afterwards,
+   * so a round that started before the job changed hands can't act on a
+   * world that moved on. Clearing deletes the entry, so any later
+   * re-arm allocates a fresh object and fails that identity check.
    */
-  private reconcilers = new Map<string, { timer: ReturnType<typeof setTimeout>; rounds: number }>();
+  private reconcilers = new Map<
+    string,
+    {
+      timer: ReturnType<typeof setTimeout>;
+      /** Consecutive quiet rounds that saw no upstream progress — see RECONCILE_MAX_ROUNDS. Reset by live activity. */
+      rounds: number;
+      /** Trailing assistant text from the previous quiet round; a repeat of it is what promotes a run to `completed`. */
+      candidateText: string;
+      /** Transcript snapshot key from the previous quiet round, for detecting progress BETWEEN rounds. */
+      snapshotKey: string;
+    }
+  >();
 
   constructor(
     private readonly gateway: OpenClawGateway,
@@ -304,6 +320,7 @@ export class SessionManager {
     this.gateway
       .chat(sessionKey, message, TIMEOUT_MS, (event) => {
         job.lastEventAt = Date.now();
+        this.noteLiveActivity(jobId);
         pushLog(job, {
           ts: Date.now(),
           type: event.type,
@@ -331,13 +348,20 @@ export class SessionManager {
               job.status = "completed";
               job.summary = reply;
               extractPatternsFromSummary(artifacts, reply);
-              this.sessions.set(sessionKey, {
-                sessionKey,
-                lastJobId: jobId,
-                lastSummary: reply.slice(0, 500),
-                artifacts,
-                recommendedNextStep: deriveNextStep(artifacts, job.status),
-              });
+              // Reconciliation freed this session, so a newer job may already
+              // own it — this reply is minutes stale by construction. Upgrade
+              // the job record either way, but only touch the session's
+              // continuation state while this job is still the session's
+              // latest, or a late arrival would overwrite live work.
+              if (this.latestJobBySession.get(sessionKey) === jobId) {
+                this.sessions.set(sessionKey, {
+                  sessionKey,
+                  lastJobId: jobId,
+                  lastSummary: reply.slice(0, 500),
+                  artifacts,
+                  recommendedNextStep: deriveNextStep(artifacts, job.status),
+                });
+              }
               this.persistActiveJobs();
               logDebug(`[job ${jobId}] late live final upgraded reconciled job to completed`);
             }
@@ -405,13 +429,33 @@ export class SessionManager {
    */
   private scheduleReconcile(job: Job, delayMs: number): void {
     if (job.status !== "running") return;
-    const state = this.reconcilers.get(job.jobId);
-    if (state) clearTimeout(state.timer);
     const timer = setTimeout(() => void this.reconcileQuietRun(job), delayMs);
     // Never a reason to hold the process open — a pending reconciliation is
     // always recoverable from the transcript on the next check_task.
     timer.unref?.();
-    this.reconcilers.set(job.jobId, { timer, rounds: state?.rounds ?? 0 });
+    const state = this.reconcilers.get(job.jobId);
+    if (state) {
+      // Re-arm in place: the object identity is the ownership token an
+      // in-flight round checks against, and a re-arm is the same ownership.
+      clearTimeout(state.timer);
+      state.timer = timer;
+      return;
+    }
+    this.reconcilers.set(job.jobId, { timer, rounds: 0, candidateText: "", snapshotKey: "" });
+  }
+
+  /**
+   * A live event proves the run is alive right now, which invalidates every
+   * quiet round accumulated before it. Without this, two unrelated quiet gaps
+   * minutes apart — with real activity in between — would add up to the round
+   * cap and force a live run terminal.
+   */
+  private noteLiveActivity(jobId: string): void {
+    const state = this.reconcilers.get(jobId);
+    if (!state) return;
+    state.rounds = 0;
+    state.candidateText = "";
+    state.snapshotKey = "";
   }
 
   private clearReconciler(jobId: string): void {
@@ -436,7 +480,11 @@ export class SessionManager {
    * the job to `completed` — the terminal call here is bounded, not final.
    */
   private async reconcileQuietRun(job: Job): Promise<void> {
-    if (job.status !== "running") {
+    // Captured before anything can await: this object's identity is what
+    // proves, later on, that we still own the job.
+    const owner = this.reconcilers.get(job.jobId);
+    if (!owner) return;
+    if (job.status !== "running" || job.recovery) {
       this.clearReconciler(job.jobId);
       return;
     }
@@ -448,7 +496,7 @@ export class SessionManager {
       return;
     }
 
-    const round = (this.reconcilers.get(job.jobId)?.rounds ?? 0) + 1;
+    const round = owner.rounds + 1;
     pushLog(job, {
       ts: Date.now(),
       type: "recovery",
@@ -470,29 +518,54 @@ export class SessionManager {
       logDebug(
         `[job ${job.jobId}] reconcile threw: ${err instanceof Error ? err.message : String(err)}`,
       );
-      observation = { ok: false, changed: false, trailingText: "" };
+      observation = { ok: false, changed: false, trailingText: "", snapshotKey: "" };
     }
 
-    // chat() may have settled while we were sampling — it wins, it saw the
-    // real terminal event.
-    if (job.status !== "running") {
+    // The job may have changed hands while we were sampling. Two distinct
+    // cases, both fatal to this round: chat() settled and cleared the
+    // watchdog (possibly handing the job to recoverLateFinalText, which
+    // keeps status `running` while it long-polls), or the job went terminal
+    // outright. Acting on either would re-arm a watchdog nobody owns or
+    // stomp the new owner's outcome.
+    if (this.reconcilers.get(job.jobId) !== owner) return;
+    if (job.status !== "running" || job.recovery) {
       this.clearReconciler(job.jobId);
       return;
     }
 
-    if (observation.ok && observation.changed) {
+    // Progress means "moved at any point since the last round", not just
+    // "moved between this round's two samples": a run that advances one tool
+    // round per minute looks perfectly stable inside a single 15s window.
+    const advancedBetweenRounds =
+      owner.snapshotKey !== "" &&
+      observation.snapshotKey !== "" &&
+      observation.snapshotKey !== owner.snapshotKey;
+    if (observation.ok && (observation.changed || advancedBetweenRounds)) {
       pushLog(job, {
         ts: Date.now(),
         type: "recovery",
         text: "Upstream transcript is still advancing — the task is still running",
       });
-      const state = this.reconcilers.get(job.jobId);
-      if (state) state.rounds = 0;
+      owner.rounds = 0;
+      owner.candidateText = "";
+      owner.snapshotKey = observation.snapshotKey;
       this.scheduleReconcile(job, RECONCILE_QUIET_MS);
       return;
     }
 
-    if (observation.ok && observation.trailingText) {
+    // `completed` is never decided by a single round. chat.history exposes
+    // whatever the agent last wrote, and an active run routinely flashes an
+    // interim status line ("I'm tracing the live wiring now…") into the
+    // trailing-assistant slot and then works for minutes without returning
+    // to it — see the stability note in pollTranscriptForFinalText. Text
+    // only counts once the SAME text survives consecutive quiet rounds, or
+    // once the round cap is reached, both of which mean upstream has not
+    // moved for the whole accumulated window.
+    const textConfirmed =
+      observation.ok &&
+      observation.trailingText.length > 0 &&
+      (observation.trailingText === owner.candidateText || round >= RECONCILE_MAX_ROUNDS);
+    if (textConfirmed) {
       this.finalizeReconciled(job, "completed", observation.trailingText);
       return;
     }
@@ -508,8 +581,9 @@ export class SessionManager {
       return;
     }
 
-    const state = this.reconcilers.get(job.jobId);
-    if (state) state.rounds = round;
+    owner.rounds = round;
+    owner.candidateText = observation.ok ? observation.trailingText : "";
+    if (observation.ok) owner.snapshotKey = observation.snapshotKey;
     this.scheduleReconcile(job, RECONCILE_QUIET_MS);
   }
 

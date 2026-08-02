@@ -55,13 +55,13 @@ async function startFakeGateway(onRequest: RequestHandler) {
   };
 }
 
-const chatEvent = (runId: string, state: string, text?: string) =>
+const chatEvent = (runId: string, state: string, text?: string, sessionKey = "agent:main:main:thread:test") =>
   JSON.stringify({
     type: "event",
     event: "chat",
     payload: {
       runId,
-      sessionKey: "agent:main:main:thread:test",
+      sessionKey,
       state,
       ...(text === undefined ? {} : { message: { content: [{ type: "text", text }] } }),
     },
@@ -139,6 +139,22 @@ describe("OpenClawGateway.chat — run correlation across the send boundary", ()
     await expect(gateway.chat("agent:main:main:thread:test", "hi", 10_000)).resolves.toBe("our answer");
   });
 
+  it("keeps this run's final when unrelated sessions flood the socket before the acknowledgement", async () => {
+    // The pre-runId buffer is fed by ALL socket traffic. Another session's
+    // busy run must not be able to crowd out the one frame this call exists
+    // to receive.
+    const gateway = await harness((frame, socket) => {
+      if (frame.method !== "chat.send") return;
+      for (let i = 0; i < 600; i++) {
+        socket.send(chatEvent(`noisy-run-${i}`, "final", "someone else's answer", "agent:other:main:thread:noise"));
+      }
+      socket.send(chatEvent("run-5", "final", "our answer"));
+      socket.send(sendAck(frame.id, "run-5"));
+    });
+
+    await expect(gateway.chat("agent:main:main:thread:test", "hi", 10_000)).resolves.toBe("our answer");
+  });
+
   it("still handles the ordinary case where the acknowledgement precedes the events", async () => {
     const gateway = await harness((frame, socket) => {
       if (frame.method !== "chat.send") return;
@@ -194,11 +210,11 @@ describe("OpenClawGateway.reconcileRun — bounded read of upstream truth", () =
       );
     });
 
-    await expect(gateway.reconcileRun("agent:main:main:thread:test", { intervalMs: 1 })).resolves.toEqual({
-      ok: true,
-      changed: false,
-      trailingText: "here is the report",
-    });
+    const observation = await gateway.reconcileRun("agent:main:main:thread:test", { intervalMs: 1 });
+    expect(observation).toMatchObject({ ok: true, changed: false, trailingText: "here is the report" });
+    // Carried so a caller can compare successive observations for progress
+    // that happens between them, not just within one.
+    expect(observation.snapshotKey).not.toBe("");
   });
 
   it("reports a still-advancing transcript as changed", async () => {
@@ -236,11 +252,9 @@ describe("OpenClawGateway.reconcileRun — bounded read of upstream truth", () =
       );
     });
 
-    await expect(gateway.reconcileRun("agent:main:main:thread:test", { intervalMs: 1 })).resolves.toEqual({
-      ok: true,
-      changed: false,
-      trailingText: "",
-    });
+    const observation = await gateway.reconcileRun("agent:main:main:thread:test", { intervalMs: 1 });
+    expect(observation).toMatchObject({ ok: true, changed: false, trailingText: "" });
+    expect(observation.snapshotKey).not.toBe("");
   });
 
   it("reports not-ok when upstream can't be read — a failed read is not evidence of a finished run", async () => {

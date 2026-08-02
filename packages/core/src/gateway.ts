@@ -212,6 +212,13 @@ export type RunObservation = {
   changed: boolean;
   /** Visible trailing-assistant text at the last successful read; "" when the trailing entry carries none. */
   trailingText: string;
+  /**
+   * Snapshot key of the last successful read ("" when none succeeded).
+   * Exposed so a caller comparing successive observations can detect
+   * progress that happened BETWEEN them — a run that advances one tool round
+   * per minute looks stable inside any single observation window.
+   */
+  snapshotKey: string;
 };
 
 // ── Gateway client ───────────────────────────────────────────────────────────
@@ -497,16 +504,18 @@ export class OpenClawGateway {
     let previousKey: string | undefined;
     let changed = false;
     let trailingText = "";
+    let snapshotKey = "";
     for (let i = 0; i < samples; i++) {
       if (i > 0) await new Promise((r) => setTimeout(r, intervalMs));
       const sample = await this.readTranscriptSample(sessionKey);
       if (!sample) continue;
       successes += 1;
       trailingText = sample.trailingText;
+      snapshotKey = sample.snapshotKey;
       if (previousKey !== undefined && sample.snapshotKey !== previousKey) changed = true;
       previousKey = sample.snapshotKey;
     }
-    const observation: RunObservation = { ok: successes >= 2, changed, trailingText };
+    const observation: RunObservation = { ok: successes >= 2, changed, trailingText, snapshotKey };
     logDebug(
       `[openclaw-gateway] reconcile ${sessionKey.slice(-12)}: reads=${successes}/${samples} ` +
         `ok=${observation.ok} changed=${observation.changed} trailingLen=${observation.trailingText.length}`,
@@ -843,11 +852,20 @@ export class OpenClawGateway {
       };
 
       // Before the runId is known there is nothing to correlate on, so hold
-      // the frames instead of discarding them. The window is one RPC
-      // round-trip; the cap only exists so a stalled/failed send can't grow
-      // this without bound.
+      // the frames instead of discarding them. The buffer is fed by ALL
+      // socket traffic, including other sessions' runs, so it is narrowed
+      // twice: `chat` events carry a sessionKey and anything from a
+      // different session is dropped outright, and the cap evicts the OLDEST
+      // frame rather than refusing the newest — this run's terminal event is
+      // always the most recent thing it will ever buffer, so unrelated
+      // chatter can never push it out.
       const buffer = (frame: Frame) => {
-        if (bufferedFrames.length < MAX_PRE_RUNID_FRAMES) bufferedFrames.push(frame);
+        if (frame.event === "chat") {
+          const frameSessionKey = (frame.payload as { sessionKey?: string } | undefined)?.sessionKey;
+          if (typeof frameSessionKey === "string" && frameSessionKey !== sessionKey) return;
+        }
+        bufferedFrames.push(frame);
+        if (bufferedFrames.length > MAX_PRE_RUNID_FRAMES) bufferedFrames.shift();
       };
 
       this.subscribers.set(agentSubId, (frame) => {

@@ -12,36 +12,71 @@ import type { GatewayEvent } from "./types.ts";
  *
  * The quiet watchdog re-reads upstream truth (the persisted transcript) after
  * RECONCILE_QUIET_MS of live silence and turns the answer into a bounded
- * outcome. See SessionManager.reconcileQuietRun.
+ * outcome. Crucially it never decides `completed` from a single round: an
+ * active run routinely leaves an interim status line in the trailing-
+ * assistant slot and then works for minutes. See
+ * SessionManager.reconcileQuietRun.
  */
 
 const QUIET_MS = 120_000; // RECONCILE_QUIET_MS in session.ts
 const PAST_QUIET_MS = QUIET_MS + 1_000;
 
+const settled = (trailingText: string, snapshotKey = "settled-1"): RunObservation => ({
+  ok: true,
+  changed: false,
+  trailingText,
+  snapshotKey,
+});
+const advancing = (snapshotKey = "advancing-1"): RunObservation => ({
+  ok: true,
+  changed: true,
+  trailingText: "",
+  snapshotKey,
+});
+const unreadable = (): RunObservation => ({ ok: false, changed: false, trailingText: "", snapshotKey: "" });
+
+function deferred<T>() {
+  let resolve!: (v: T) => void;
+  const promise = new Promise<T>((r) => (resolve = r));
+  return { promise, resolve };
+}
+
+/**
+ * Fake gateway with per-call control over every chat() invocation (a single
+ * fixture can have two jobs in flight on one sessionKey) and a scripted
+ * sequence of reconciliation observations.
+ */
 function fakeGateway(
   opts: {
-    reconcile?: () => Promise<RunObservation>;
+    observations?: (RunObservation | (() => Promise<RunObservation>))[];
     pollTranscriptForFinalText?: () => Promise<string | undefined>;
   } = {},
 ) {
-  let onEventCb: ((e: GatewayEvent) => void) | undefined;
-  let resolveChat: ((v: string) => void) | undefined;
-  let rejectChat: ((e: Error) => void) | undefined;
+  const calls: {
+    sessionKey: string;
+    onEvent?: (e: GatewayEvent) => void;
+    resolve: (v: string) => void;
+    reject: (e: Error) => void;
+  }[] = [];
   const reconcileCalls: string[] = [];
+  let observationIndex = 0;
+
   const gateway = {
-    chat(_sessionKey: string, _message: string, _timeoutMs: number, onEvent?: (e: GatewayEvent) => void) {
-      onEventCb = onEvent;
+    chat(sessionKey: string, _message: string, _timeoutMs: number, onEvent?: (e: GatewayEvent) => void) {
       // Never settles on its own: every fixture here is about a run whose
       // terminal event never reaches the connector.
       return new Promise<string>((resolve, reject) => {
-        resolveChat = resolve;
-        rejectChat = reject;
+        calls.push({ sessionKey, onEvent, resolve, reject });
       });
     },
     async reconcileRun(sessionKey: string): Promise<RunObservation> {
       reconcileCalls.push(sessionKey);
-      if (opts.reconcile) return opts.reconcile();
-      return { ok: true, changed: true, trailingText: "" };
+      const scripted = opts.observations;
+      if (!scripted || scripted.length === 0) return advancing();
+      // The last entry repeats once the script runs out.
+      const next = scripted[Math.min(observationIndex, scripted.length - 1)];
+      observationIndex += 1;
+      return typeof next === "function" ? next() : next;
     },
     pollTranscriptForFinalText: opts.pollTranscriptForFinalText ?? (async () => undefined),
     close() {},
@@ -50,14 +85,15 @@ function fakeGateway(
   return {
     gateway,
     reconcileCalls,
-    emit: (e: GatewayEvent) => onEventCb?.(e),
-    finishChat: (text: string) => resolveChat?.(text),
-    failChat: (err: Error) => rejectChat?.(err),
+    emit: (e: GatewayEvent, call = 0) => calls[call]?.onEvent?.(e),
+    finishChat: (text: string, call = 0) => calls[call]?.resolve(text),
+    failChat: (err: Error, call = 0) => calls[call]?.reject(err),
   };
 }
 
 const toolEvent: GatewayEvent = { type: "tool", text: "Bash: pnpm test", toolName: "Bash", args: {} };
 const toolResultEvent: GatewayEvent = { type: "tool-result", text: "Bash done", toolName: "Bash", isError: false };
+const SENTINEL = "Stream finished with no response collected.";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -89,7 +125,6 @@ describe("completion reconciliation — the normal path is untouched", () => {
     const sessions = new SessionManager(ctrl.gateway);
     sessions.submitTask({ task: "long tool-heavy job" });
 
-    // Steady activity at half the quiet window, for well past it.
     for (let i = 0; i < 6; i++) {
       await vi.advanceTimersByTimeAsync(QUIET_MS / 2);
       ctrl.emit(toolEvent);
@@ -100,11 +135,9 @@ describe("completion reconciliation — the normal path is untouched", () => {
 });
 
 describe("completion reconciliation — a terminal event that never arrived", () => {
-  it("recovers the final response from the transcript and completes the job", async () => {
+  it("recovers the final response from the transcript, but only once it is confirmed by a second round", async () => {
     vi.useFakeTimers();
-    const ctrl = fakeGateway({
-      reconcile: async () => ({ ok: true, changed: false, trailingText: "the real answer" }),
-    });
+    const ctrl = fakeGateway({ observations: [settled("the real answer"), settled("the real answer")] });
     const sessions = new SessionManager(ctrl.gateway);
     const job = sessions.submitTask({ task: "tool-heavy job" });
 
@@ -113,23 +146,24 @@ describe("completion reconciliation — a terminal event that never arrived", ()
     // ...and then the live stream goes silent, terminal event never delivered.
     await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
 
+    // One quiet look at trailing text is not evidence the run finished.
+    expect(sessions.getJob(job.jobId)?.status).toBe("running");
+
+    await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
     const live = sessions.getJob(job.jobId)!;
     expect(live.status).toBe("completed");
     expect(live.summary).toBe("the real answer");
-    expect(ctrl.reconcileCalls).toEqual([job.sessionKey]);
+    expect(ctrl.reconcileCalls).toEqual([job.sessionKey, job.sessionKey]);
     expect(live.logs.some((l) => l.type === "recovery")).toBe(true);
   });
 
   it("settles to completed_no_summary when upstream is terminal with no visible text — after a bounded number of rounds", async () => {
     vi.useFakeTimers();
-    const ctrl = fakeGateway({
-      reconcile: async () => ({ ok: true, changed: false, trailingText: "" }),
-    });
+    const ctrl = fakeGateway({ observations: [settled("")] });
     const sessions = new SessionManager(ctrl.gateway);
     const job = sessions.submitTask({ task: "tool-heavy job" });
     ctrl.emit(toolEvent);
 
-    // One quiet round is not enough — a single stalled read shouldn't end a job.
     await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
     expect(sessions.getJob(job.jobId)?.status).toBe("running");
     expect(ctrl.reconcileCalls).toHaveLength(1);
@@ -137,15 +171,13 @@ describe("completion reconciliation — a terminal event that never arrived", ()
     await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
     const live = sessions.getJob(job.jobId)!;
     expect(live.status).toBe("completed_no_summary");
-    expect(live.summary).toBe("Stream finished with no response collected.");
+    expect(live.summary).toBe(SENTINEL);
     expect(ctrl.reconcileCalls).toHaveLength(2);
   });
 
   it("still ends the job when upstream can't be read at all — never indefinite running", async () => {
     vi.useFakeTimers();
-    const ctrl = fakeGateway({
-      reconcile: () => Promise.reject(new Error("gateway disconnected")),
-    });
+    const ctrl = fakeGateway({ observations: [unreadable()] });
     const sessions = new SessionManager(ctrl.gateway);
     const job = sessions.submitTask({ task: "tool-heavy job" });
     ctrl.emit(toolEvent);
@@ -158,29 +190,9 @@ describe("completion reconciliation — a terminal event that never arrived", ()
     expect(live.summary).toContain("could not be read");
   });
 
-  it("leaves a genuinely active run alone — an advancing transcript means still running, indefinitely", async () => {
-    vi.useFakeTimers();
-    const ctrl = fakeGateway({
-      // Quiet on the live stream, but upstream is visibly still writing.
-      reconcile: async () => ({ ok: true, changed: true, trailingText: "" }),
-    });
-    const sessions = new SessionManager(ctrl.gateway);
-    const job = sessions.submitTask({ task: "long quiet thinking job" });
-    ctrl.emit(toolEvent);
-
-    for (let round = 0; round < 4; round++) {
-      await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
-      expect(sessions.getJob(job.jobId)?.status).toBe("running");
-    }
-    // Every round re-armed the watchdog rather than counting toward the cap.
-    expect(ctrl.reconcileCalls).toHaveLength(4);
-  });
-
   it("waits a full quiet window on a continued session that has produced no events yet", async () => {
     vi.useFakeTimers();
-    const ctrl = fakeGateway({
-      reconcile: async () => ({ ok: true, changed: false, trailingText: "" }),
-    });
+    const ctrl = fakeGateway({ observations: [settled("")] });
     const sessions = new SessionManager(ctrl.gateway);
     // A supplied sessionKey means no initial log entry, so lastEventAt stays
     // 0 — the quiet clock has to fall back to startedAt rather than reading
@@ -195,12 +207,152 @@ describe("completion reconciliation — a terminal event that never arrived", ()
   });
 });
 
-describe("completion reconciliation — interaction with the abandoned live stream", () => {
-  it("a late live final upgrades a job reconciled to completed_no_summary", async () => {
+describe("completion reconciliation — an active run is never mistaken for a finished one", () => {
+  it("leaves a genuinely active run alone — an advancing transcript means still running, indefinitely", async () => {
     vi.useFakeTimers();
+    const ctrl = fakeGateway({ observations: [advancing()] });
+    const sessions = new SessionManager(ctrl.gateway);
+    const job = sessions.submitTask({ task: "long quiet thinking job" });
+    ctrl.emit(toolEvent);
+
+    for (let round = 0; round < 4; round++) {
+      await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
+      expect(sessions.getJob(job.jobId)?.status).toBe("running");
+    }
+    expect(ctrl.reconcileCalls).toHaveLength(4);
+  });
+
+  it("does not complete on an interim status line the run later moves past", async () => {
+    vi.useFakeTimers();
+    // The documented hazard: chat.history exposes whatever the agent last
+    // wrote. A run can flash a short status line, keep working for minutes,
+    // and only then produce its real answer.
     const ctrl = fakeGateway({
-      reconcile: async () => ({ ok: true, changed: false, trailingText: "" }),
+      observations: [
+        settled("I'm tracing the live wiring now…", "k1"),
+        advancing("k2"),
+        settled("the real answer", "k3"),
+        settled("the real answer", "k3"),
+      ],
     });
+    const sessions = new SessionManager(ctrl.gateway);
+    const job = sessions.submitTask({ task: "tool-heavy job" });
+    ctrl.emit(toolEvent);
+
+    // Rounds 1-4: the interim line is seen but never confirmed; the run then
+    // visibly advances (k2, k3), which resets the accumulated evidence each
+    // time. Nothing here may finalize the job.
+    for (let round = 0; round < 4; round++) {
+      await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
+      expect(sessions.getJob(job.jobId)?.status).toBe("running");
+    }
+
+    // Only when the real answer repeats against an unmoved transcript.
+    await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
+    const live = sessions.getJob(job.jobId)!;
+    expect(live.status).toBe("completed");
+    // Never the status line — the interim text was never confirmed.
+    expect(live.summary).toBe("the real answer");
+  });
+
+  it("treats progress BETWEEN rounds as activity, even when each round looks internally stable", async () => {
+    vi.useFakeTimers();
+    // A run advancing one slow tool round at a time looks unchanged inside
+    // any single 15s observation window; only the cross-round snapshot
+    // comparison reveals it.
+    const ctrl = fakeGateway({
+      observations: [settled("", "round-1"), settled("", "round-2"), settled("", "round-3")],
+    });
+    const sessions = new SessionManager(ctrl.gateway);
+    const job = sessions.submitTask({ task: "slow tool loop" });
+    ctrl.emit(toolEvent);
+
+    for (let round = 0; round < 3; round++) {
+      await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
+      expect(sessions.getJob(job.jobId)?.status).toBe("running");
+    }
+  });
+
+  it("resets accumulated quiet rounds when live activity arrives between them", async () => {
+    vi.useFakeTimers();
+    const ctrl = fakeGateway({ observations: [settled("")] });
+    const sessions = new SessionManager(ctrl.gateway);
+    const job = sessions.submitTask({ task: "bursty job" });
+    ctrl.emit(toolEvent);
+
+    // Quiet gap #1 — one round against the cap.
+    await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
+    expect(sessions.getJob(job.jobId)?.status).toBe("running");
+
+    // Real activity: the run is demonstrably alive, so the earlier quiet
+    // round must not still count toward forcing it terminal.
+    ctrl.emit(toolEvent);
+
+    await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
+    expect(sessions.getJob(job.jobId)?.status).toBe("running");
+
+    // Only two genuinely consecutive quiet rounds end it.
+    await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
+    expect(sessions.getJob(job.jobId)?.status).toBe("completed_no_summary");
+  });
+});
+
+describe("completion reconciliation — handing the job off safely", () => {
+  it("an in-flight round that loses ownership to late-recovery neither finalizes nor re-arms", async () => {
+    vi.useFakeTimers();
+    const reconcileGate = deferred<RunObservation>();
+    const recoveryGate = deferred<string | undefined>();
+    const ctrl = fakeGateway({
+      // The blocked round is the SECOND one, so it is a round that would
+      // otherwise reach the cap and finalize the job — the case where losing
+      // ownership silently costs the caller the real answer.
+      observations: [settled(""), () => reconcileGate.promise],
+      pollTranscriptForFinalText: () => recoveryGate.promise,
+    });
+    const sessions = new SessionManager(ctrl.gateway);
+    const job = sessions.submitTask({ task: "tool-heavy job" });
+    ctrl.emit(toolEvent);
+
+    await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
+    expect(sessions.getJob(job.jobId)?.status).toBe("running");
+
+    // Round two starts and blocks on the transcript read.
+    await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
+    expect(ctrl.reconcileCalls).toHaveLength(2);
+
+    // Meanwhile chat() resolves with the empty sentinel: the watchdog is
+    // cleared and recoverLateFinalText takes ownership, keeping the job
+    // `running` while it long-polls.
+    ctrl.finishChat(SENTINEL);
+    await vi.advanceTimersByTimeAsync(0);
+    const live = sessions.getJob(job.jobId)!;
+    expect(live.status).toBe("running");
+    expect(live.recovery).toBeDefined();
+
+    // The stale round now comes back with a verdict that would, on its own,
+    // have forced the job terminal at the round cap.
+    reconcileGate.resolve(settled(""));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(live.status).toBe("running");
+    expect(live.summary).toBeUndefined();
+    expect(live.recovery).toBeDefined();
+
+    // ...and it must not have re-armed a watchdog it no longer owns.
+    await vi.advanceTimersByTimeAsync(4 * PAST_QUIET_MS);
+    expect(ctrl.reconcileCalls).toHaveLength(2);
+
+    // Late recovery, still the owner, finishes the job. A stale round that
+    // had marked it terminal would have made recovery drop this answer.
+    recoveryGate.resolve("the recovered answer");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.status).toBe("completed");
+    expect(live.summary).toBe("the recovered answer");
+  });
+
+  it("a late live final upgrades a reconciled completed_no_summary", async () => {
+    vi.useFakeTimers();
+    const ctrl = fakeGateway({ observations: [settled("")] });
     const sessions = new SessionManager(ctrl.gateway);
     const job = sessions.submitTask({ task: "tool-heavy job" });
     ctrl.emit(toolEvent);
@@ -217,15 +369,42 @@ describe("completion reconciliation — interaction with the abandoned live stre
     expect(live.summary).toBe("the answer, arriving very late");
   });
 
+  it("a late live final never overwrites the continuation state of a newer job on the same session", async () => {
+    vi.useFakeTimers();
+    const ctrl = fakeGateway({ observations: [settled("")] });
+    const sessions = new SessionManager(ctrl.gateway);
+    const sessionKey = "agent:main:main:thread:handoff";
+    const first = sessions.submitTask({ task: "first ask", sessionKey });
+    ctrl.emit(toolEvent);
+
+    await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
+    await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
+    expect(sessions.getJob(first.jobId)?.status).toBe("completed_no_summary");
+
+    // The session is free again, so the caller starts new work on it.
+    const second = sessions.submitTask({ task: "second ask", sessionKey });
+    expect(second.status).toBe("running");
+
+    // Only now does the abandoned first stream deliver its answer.
+    ctrl.finishChat("the stale first answer", 0);
+    await vi.advanceTimersByTimeAsync(0);
+
+    // The old job records its own outcome...
+    expect(sessions.getJob(first.jobId)?.summary).toBe("the stale first answer");
+    // ...but the session still belongs to the job that is actually running.
+    const continuation = sessions.getSessionState(sessionKey);
+    expect(continuation?.lastJobId).toBe(second.jobId);
+    expect(continuation?.lastSummary).not.toBe("the stale first answer");
+  });
+
   it("the abandoned live stream timing out does not overwrite a reconciled completion", async () => {
     vi.useFakeTimers();
-    const ctrl = fakeGateway({
-      reconcile: async () => ({ ok: true, changed: false, trailingText: "the real answer" }),
-    });
+    const ctrl = fakeGateway({ observations: [settled("the real answer"), settled("the real answer")] });
     const sessions = new SessionManager(ctrl.gateway);
     const job = sessions.submitTask({ task: "tool-heavy job" });
     ctrl.emit(toolEvent);
 
+    await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
     await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
     expect(sessions.getJob(job.jobId)?.status).toBe("completed");
 
@@ -242,12 +421,11 @@ describe("completion reconciliation — interaction with the abandoned live stre
 describe("completion reconciliation — caller-visible effects", () => {
   it("repeated check_task calls after a reconciled completion are idempotent", async () => {
     vi.useFakeTimers();
-    const ctrl = fakeGateway({
-      reconcile: async () => ({ ok: true, changed: false, trailingText: "the real answer" }),
-    });
+    const ctrl = fakeGateway({ observations: [settled("the real answer"), settled("the real answer")] });
     const sessions = new SessionManager(ctrl.gateway);
     const job = sessions.submitTask({ task: "tool-heavy job" });
     ctrl.emit(toolEvent);
+    await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
     await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
 
     const callsAfterReconcile = ctrl.reconcileCalls.length;
@@ -270,7 +448,7 @@ describe("completion reconciliation — caller-visible effects", () => {
   it("repeated check_task calls after a reconciled completed_no_summary stay stable", async () => {
     vi.useFakeTimers();
     const ctrl = fakeGateway({
-      reconcile: async () => ({ ok: true, changed: false, trailingText: "" }),
+      observations: [settled("")],
       pollTranscriptForFinalText: async () => undefined,
     });
     const sessions = new SessionManager(ctrl.gateway);
@@ -289,9 +467,7 @@ describe("completion reconciliation — caller-visible effects", () => {
 
   it("releases the busy-session guard once the job is reconciled terminal", async () => {
     vi.useFakeTimers();
-    const ctrl = fakeGateway({
-      reconcile: async () => ({ ok: true, changed: false, trailingText: "the real answer" }),
-    });
+    const ctrl = fakeGateway({ observations: [settled("the real answer"), settled("the real answer")] });
     const sessions = new SessionManager(ctrl.gateway);
     const sessionKey = "agent:main:main:thread:busy-release";
     const first = sessions.submitTask({ task: "first ask", sessionKey });
@@ -303,6 +479,7 @@ describe("completion reconciliation — caller-visible effects", () => {
     expect(blocked.status).toBe("error");
     expect(blocked.errorInfo?.message).toBe("session busy");
 
+    await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
     await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
     expect(sessions.getJob(first.jobId)?.status).toBe("completed");
 

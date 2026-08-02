@@ -40,7 +40,7 @@ vi.mock("./gateway.ts", () => {
       },
       close() {},
       pollTranscriptForFinalText: () => Promise.resolve(undefined),
-      reconcileRun: () => Promise.resolve({ ok: true, changed: true, trailingText: "" }),
+      reconcileRun: () => Promise.resolve({ ok: true, changed: true, trailingText: "", snapshotKey: "active" }),
     };
   }
   return { OpenClawGateway: FakeOpenClawGateway };

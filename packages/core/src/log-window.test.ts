@@ -22,7 +22,7 @@ function controllableGateway() {
       });
     },
     close() {},
-    reconcileRun: async () => ({ ok: true, changed: true, trailingText: "" }),
+    reconcileRun: async () => ({ ok: true, changed: true, trailingText: "", snapshotKey: "active" }),
   } as unknown as OpenClawGateway;
   return {
     gateway,

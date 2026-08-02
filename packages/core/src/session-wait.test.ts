@@ -14,7 +14,7 @@ function fakeGateway(chatImpl: (sessionKey: string, message: string, timeoutMs: 
     close: () => {},
     // Quiet-watchdog surface: "upstream is still advancing", so a job these
     // fixtures leave running stays running instead of being reconciled.
-    reconcileRun: async () => ({ ok: true, changed: true, trailingText: "" }),
+    reconcileRun: async () => ({ ok: true, changed: true, trailingText: "", snapshotKey: "active" }),
   } as unknown as OpenClawGateway;
 }
 
