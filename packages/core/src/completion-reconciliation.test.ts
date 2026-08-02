@@ -171,37 +171,42 @@ describe("completion reconciliation — a terminal event that never arrived", ()
     expect(live.logs.some((l) => l.type === "recovery")).toBe(true);
   });
 
-  it("settles to completed_no_summary when upstream is terminal with no visible text — after a bounded number of rounds", async () => {
+  it("never terminates on silence alone — upstream showing no text is not evidence the run ended", async () => {
     vi.useFakeTimers();
+    // An empty trailing slot is exactly what a run composing its final
+    // answer looks like: openclaw writes the assistant message only once it
+    // is complete, so the transcript sits on the last toolResult the whole
+    // time. No number of stable rounds may turn that into a terminal status.
     const ctrl = fakeGateway({ observations: [settled("")] });
     const sessions = new SessionManager(ctrl.gateway);
     const job = sessions.submitTask({ task: "tool-heavy job" });
     emitToolRound(ctrl);
 
-    await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
-    expect(sessions.getJob(job.jobId)?.status).toBe("running");
-    expect(ctrl.reconcileCalls).toHaveLength(1);
-
-    await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
-    const live = sessions.getJob(job.jobId)!;
-    expect(live.status).toBe("completed_no_summary");
-    expect(live.summary).toBe(SENTINEL);
-    expect(ctrl.reconcileCalls).toHaveLength(2);
+    for (let round = 0; round < 6; round++) {
+      await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
+      expect(sessions.getJob(job.jobId)?.status).toBe("running");
+    }
+    expect(ctrl.reconcileCalls).toHaveLength(6);
+    expect(sessions.getJob(job.jobId)?.summary).toBeUndefined();
   });
 
-  it("still ends the job when upstream can't be read at all — never indefinite running", async () => {
+  it("an unreadable upstream never forces a terminal status — chat()'s own timeout remains the bound", async () => {
     vi.useFakeTimers();
     const ctrl = fakeGateway({ observations: [unreadable()] });
     const sessions = new SessionManager(ctrl.gateway);
     const job = sessions.submitTask({ task: "tool-heavy job" });
     emitToolRound(ctrl);
 
-    await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
-    await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
+    for (let round = 0; round < 4; round++) {
+      await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
+      expect(sessions.getJob(job.jobId)?.status).toBe("running");
+    }
 
-    const live = sessions.getJob(job.jobId)!;
-    expect(live.status).toBe("completed_no_summary");
-    expect(live.summary).toContain("could not be read");
+    // Boundedness is not lost, it is just owned by the layer that can
+    // actually tell the difference: chat() times out and ends the job.
+    ctrl.failChat(new Error("OpenClaw task timed out"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sessions.getJob(job.jobId)?.status).toBe("error");
   });
 
   it("waits a full quiet window on a continued session that has produced no events yet", async () => {
@@ -364,33 +369,93 @@ describe("completion reconciliation — an active run is never mistaken for a fi
 
     await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
     const live = sessions.getJob(job.jobId)!;
-    // Bounded and self-healing: the lazy terminal recheck upgrades this to
-    // `completed` later if the text really was final.
-    expect(live.status).toBe("completed_no_summary");
-    expect(live.summary).not.toContain("tracing the live wiring");
+    expect(live.status).toBe("running");
+    expect(live.summary).toBeUndefined();
   });
 
   it("resets accumulated quiet rounds when live activity arrives between them", async () => {
     vi.useFakeTimers();
-    const ctrl = fakeGateway({ observations: [settled("")] });
+    const ctrl = fakeGateway({ observations: [settled("the answer")] });
     const sessions = new SessionManager(ctrl.gateway);
     const job = sessions.submitTask({ task: "bursty job" });
     emitToolRound(ctrl);
 
-    // Quiet gap #1 — one round against the cap.
+    // Quiet round #1 banks "the answer" as a confirmation candidate.
     await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
     expect(sessions.getJob(job.jobId)?.status).toBe("running");
 
-    // Real activity: the run is demonstrably alive, so the earlier quiet
-    // round must not still count toward forcing it terminal.
+    // Real activity proves the run moved on, so that candidate is stale and
+    // must not pair with a later sighting to confirm a completion.
     emitToolRound(ctrl);
 
     await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
     expect(sessions.getJob(job.jobId)?.status).toBe("running");
 
-    // Only two genuinely consecutive quiet rounds end it.
+    // Two fresh consecutive sightings are needed after the activity.
     await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
-    expect(sessions.getJob(job.jobId)?.status).toBe("completed_no_summary");
+    expect(sessions.getJob(job.jobId)?.status).toBe("completed");
+    expect(sessions.getJob(job.jobId)?.summary).toBe("the answer");
+  });
+});
+
+describe("completion reconciliation — the live job 9f21545a shape", () => {
+  it("never terminates a healthy run that goes silent for 21 minutes while composing its final answer", async () => {
+    vi.useFakeTimers();
+    // Reproduced from live evidence (job 9f21545a-7998-4b49-8a82-a60b541faa13,
+    // 2026-08-02): 20 tool rounds with every start matched by a result, then
+    // 20.9 minutes with zero live events and a transcript frozen on the last
+    // toolResult — openclaw's chat.history for that session carried only
+    // ["toolResult","assistant"] roles and every tool-calling assistant
+    // message had visibleTextLen 0, so trailing assistant text was "" the
+    // whole time. Then the run returned a 6942-char report and completed
+    // normally. Nothing was missing: no dropped tool-result, no dropped
+    // lifecycle event, no gateway disconnect.
+    const LONG_REPORT = "## Objective A — second cleanup complete\n\n" + "x".repeat(6900);
+    const ctrl = fakeGateway({ observations: [settled("", "frozen-on-toolresult")] });
+    const sessions = new SessionManager(ctrl.gateway);
+    const job = sessions.submitTask({ task: "audit disk usage across the fleet" });
+    for (let i = 0; i < 20; i++) emitToolRound(ctrl);
+
+    // Ten quiet windows — far longer than the observed 20.9-minute silence.
+    for (let round = 0; round < 10; round++) {
+      await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
+      const live = sessions.getJob(job.jobId)!;
+      expect(live.status).toBe("running");
+      expect(live.summary).toBeUndefined();
+    }
+
+    // The session guard must hold for the entire composition window: a
+    // colliding chat.send would abort the run that is still writing.
+    const colliding = sessions.submitTask({ task: "colliding ask", sessionKey: job.sessionKey });
+    expect(colliding.errorInfo?.message).toBe("session busy");
+
+    ctrl.finishChat(LONG_REPORT);
+    await vi.advanceTimersByTimeAsync(0);
+    const live = sessions.getJob(job.jobId)!;
+    expect(live.status).toBe("completed");
+    expect(live.summary).toBe(LONG_REPORT);
+  });
+
+  it("re-reads a provisional reconciled completion on a later poll and corrects its summary", async () => {
+    vi.useFakeTimers();
+    // A reconciled `completed` is inferred from a transcript read, never from
+    // a terminal event, so it must not be treated as settled truth the way a
+    // live completion is.
+    const ctrl = fakeGateway({
+      observations: [settled("an early guess")],
+      pollTranscriptForFinalText: async () => "the corrected final answer",
+    });
+    const sessions = new SessionManager(ctrl.gateway);
+    const job = sessions.submitTask({ task: "tool-heavy job" });
+    emitToolRound(ctrl);
+
+    await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
+    await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
+    expect(sessions.getJob(job.jobId)?.summary).toBe("an early guess");
+
+    const polled = await sessions.waitForJob(job.jobId, 0, undefined, "wait", 1_000);
+    expect(polled?.status).toBe("completed");
+    expect(polled?.summary).toBe("the corrected final answer");
   });
 });
 
@@ -447,12 +512,17 @@ describe("completion reconciliation — handing the job off safely", () => {
     expect(live.summary).toBe("the recovered answer");
   });
 
-  it("a round that overlaps live activity is stale — it must not finalize a demonstrably live run", async () => {
+  it("a round that overlaps live activity is stale — its observation must not be written back", async () => {
     vi.useFakeTimers();
     const gate = deferred<RunObservation>();
-    // Round 1 banks a quiet round; round 2 is the one that would reach the
-    // cap — and it is blocked when the run proves it is still alive.
-    const ctrl = fakeGateway({ observations: [settled(""), () => gate.promise] });
+    // Round 1 banks "T" as a confirmation candidate. Round 2 is blocked when
+    // live activity lands, which resets that candidate — so round 2's
+    // observation predates the run moving on and must not be written back
+    // into the reconciler state, or it would pair with round 3 and complete
+    // the job a round early on evidence older than the activity.
+    const ctrl = fakeGateway({
+      observations: [settled("T", "k1"), () => gate.promise, settled("T", "k1")],
+    });
     const sessions = new SessionManager(ctrl.gateway);
     const job = sessions.submitTask({ task: "tool-heavy job" });
     emitToolRound(ctrl);
@@ -460,51 +530,35 @@ describe("completion reconciliation — handing the job off safely", () => {
     await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
     expect(sessions.getJob(job.jobId)?.status).toBe("running");
 
+    // Round two starts and blocks on the transcript read.
     await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
     expect(ctrl.reconcileCalls).toHaveLength(2);
 
-    // Live event lands while the transcript read is still in flight, after
-    // the round already captured its round number.
+    // Live event lands while that read is still in flight.
     emitToolRound(ctrl);
-
-    // The now-stale observation comes back with a verdict that, taken at
-    // face value, reaches the round cap.
-    gate.resolve(settled(""));
+    gate.resolve(settled("T", "k1"));
     await vi.advanceTimersByTimeAsync(0);
+    expect(sessions.getJob(job.jobId)?.status).toBe("running");
 
-    const live = sessions.getJob(job.jobId)!;
-    expect(live.status).toBe("running");
-    expect(live.summary).toBeUndefined();
+    // Round three is the FIRST post-activity sighting of "T". Had the stale
+    // round seeded the candidate, this would confirm and complete here.
+    await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
+    expect(sessions.getJob(job.jobId)?.status).toBe("running");
+    expect(sessions.getJob(job.jobId)?.summary).toBeUndefined();
 
-    // ...and the busy-session guard is still held, so nothing can collide
-    // with the run that is genuinely still going.
+    // The busy-session guard is held throughout.
     const colliding = sessions.submitTask({ task: "colliding ask", sessionKey: job.sessionKey });
-    expect(colliding.status).toBe("error");
     expect(colliding.errorInfo?.message).toBe("session busy");
-  });
 
-  it("a late live final upgrades a reconciled completed_no_summary", async () => {
-    vi.useFakeTimers();
-    const ctrl = fakeGateway({ observations: [settled("")] });
-    const sessions = new SessionManager(ctrl.gateway);
-    const job = sessions.submitTask({ task: "tool-heavy job" });
-    emitToolRound(ctrl);
-
+    // Two genuinely post-activity sightings do complete it.
     await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
-    await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
-    expect(sessions.getJob(job.jobId)?.status).toBe("completed_no_summary");
-
-    ctrl.finishChat("the answer, arriving very late");
-    await vi.advanceTimersByTimeAsync(0);
-
-    const live = sessions.getJob(job.jobId)!;
-    expect(live.status).toBe("completed");
-    expect(live.summary).toBe("the answer, arriving very late");
+    expect(sessions.getJob(job.jobId)?.status).toBe("completed");
+    expect(sessions.getJob(job.jobId)?.summary).toBe("T");
   });
 
   it("a late live final never overwrites the continuation state of a newer job on the same session", async () => {
     vi.useFakeTimers();
-    const ctrl = fakeGateway({ observations: [settled("")] });
+    const ctrl = fakeGateway({ observations: [settled("recovered text")] });
     const sessions = new SessionManager(ctrl.gateway);
     const sessionKey = "agent:main:main:thread:handoff";
     const first = sessions.submitTask({ task: "first ask", sessionKey });
@@ -512,7 +566,7 @@ describe("completion reconciliation — handing the job off safely", () => {
 
     await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
     await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
-    expect(sessions.getJob(first.jobId)?.status).toBe("completed_no_summary");
+    expect(sessions.getJob(first.jobId)?.status).toBe("completed");
 
     // The session is free again, so the caller starts new work on it.
     const second = sessions.submitTask({ task: "second ask", sessionKey });
@@ -537,15 +591,17 @@ describe("completion reconciliation — handing the job off safely", () => {
     // sessionKey. The old job's lazy recheck must not read (and claim) the
     // new run's answer.
     const pollSpy = vi.fn(async () => "the newer job's answer");
-    const ctrl = fakeGateway({ observations: [settled("")], pollTranscriptForFinalText: pollSpy });
+    const ctrl = fakeGateway({ observations: [settled("first answer")], pollTranscriptForFinalText: pollSpy });
     const sessions = new SessionManager(ctrl.gateway);
     const sessionKey = "agent:main:main:thread:supersede";
     const first = sessions.submitTask({ task: "first ask", sessionKey });
     emitToolRound(ctrl);
 
+    // A reconciled completion is provisional, so it stays eligible for the
+    // lazy transcript recheck — which makes the ownership guard load-bearing.
     await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
     await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
-    expect(sessions.getJob(first.jobId)?.status).toBe("completed_no_summary");
+    expect(sessions.getJob(first.jobId)?.status).toBe("completed");
 
     const second = sessions.submitTask({ task: "second ask", sessionKey });
     expect(second.status).toBe("running");
@@ -554,7 +610,7 @@ describe("completion reconciliation — handing the job off safely", () => {
     await sessions.waitForJob(first.jobId, 0, undefined, "wait", 1_000);
 
     expect(pollSpy).not.toHaveBeenCalled();
-    expect(sessions.getJob(first.jobId)?.status).toBe("completed_no_summary");
+    expect(sessions.getJob(first.jobId)?.summary).toBe("first answer");
     expect(sessions.getJob(first.jobId)?.summary).not.toBe("the newer job's answer");
     expect(sessions.getSessionState(sessionKey)?.lastJobId).toBe(second.jobId);
   });
@@ -609,6 +665,9 @@ describe("completion reconciliation — caller-visible effects", () => {
 
   it("repeated check_task calls after a reconciled completed_no_summary stay stable", async () => {
     vi.useFakeTimers();
+    // completed_no_summary is still reachable — from the live stream itself
+    // resolving with the sentinel, where chat() HAS delivered a terminal
+    // event and recoverLateFinalText then finds nothing.
     const ctrl = fakeGateway({
       observations: [settled("")],
       pollTranscriptForFinalText: async () => undefined,
@@ -616,8 +675,9 @@ describe("completion reconciliation — caller-visible effects", () => {
     const sessions = new SessionManager(ctrl.gateway);
     const job = sessions.submitTask({ task: "tool-heavy job" });
     emitToolRound(ctrl);
-    await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
-    await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
+    ctrl.finishChat(SENTINEL);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sessions.getJob(job.jobId)?.status).toBe("completed_no_summary");
 
     for (let i = 0; i < 3; i++) {
       const polled = await sessions.waitForJob(job.jobId, 0, undefined, "wait", 45_000);

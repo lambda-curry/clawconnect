@@ -54,10 +54,6 @@ export const RECONCILE_QUIET_MS = readEnvMs("CLAWCONNECT_RECONCILE_QUIET_MS", 12
 // Gap between the two transcript reads a single reconciliation round takes.
 // Long enough that a run still writing will visibly move between them.
 const RECONCILE_SAMPLE_INTERVAL_MS = readEnvMs("CLAWCONNECT_RECONCILE_SAMPLE_INTERVAL_MS", 15_000);
-// Reconciliation rounds without upstream progress before the job is forced
-// terminal. Bounded on purpose: "we can't tell" must still end the job, not
-// leave it running forever. A round that sees upstream advance resets this.
-export const RECONCILE_MAX_ROUNDS = 2;
 
 /**
  * Job.logs is authoritative full history — server-retained, never trimmed or
@@ -173,7 +169,7 @@ export class SessionManager {
     string,
     {
       timer: ReturnType<typeof setTimeout>;
-      /** Consecutive quiet rounds that saw no upstream progress — see RECONCILE_MAX_ROUNDS. Reset by live activity. */
+      /** Consecutive quiet rounds that saw no upstream progress. Diagnostic only — no cap forces a terminal outcome. Reset by live activity. */
       rounds: number;
       /**
        * Bumped on every live event. A reconciliation round captures it before
@@ -579,7 +575,7 @@ export class SessionManager {
       type: "recovery",
       text:
         `No live activity for ${Math.round(quietSinceMs / 1000)}s — reconciling against the ` +
-        `upstream transcript (round ${attemptedRound}/${RECONCILE_MAX_ROUNDS})`,
+        `upstream transcript (round ${attemptedRound})`,
     });
     logDebug(
       `[job ${job.jobId}] quiet for ${Math.round(quietSinceMs / 1000)}s — reconciling (round ${attemptedRound})`,
@@ -669,17 +665,18 @@ export class SessionManager {
       return;
     }
 
-    if (round >= RECONCILE_MAX_ROUNDS) {
-      this.finalizeReconciled(
-        job,
-        "completed_no_summary",
-        observation.ok
-          ? "Stream finished with no response collected."
-          : "Stream ended and the upstream transcript could not be read; completing without a summary.",
-      );
-      return;
-    }
-
+    // No terminal decision from absence. Upstream showing nothing is NOT
+    // evidence the run ended: openclaw writes the final assistant message
+    // only when it is complete, so a model composing a long answer leaves
+    // the transcript frozen on the last toolResult and emits no live events
+    // for as long as it takes. Live job 9f21545a did exactly that for 20.9
+    // minutes and then returned a 6942-char report — an earlier version of
+    // this code would have declared it completed_no_summary at ~4.5 minutes,
+    // 16 minutes before its real answer existed, releasing the session guard
+    // while it was still working. `completed` still requires positive
+    // evidence (confirmed trailing text, above); everything else keeps
+    // waiting, bounded by chat()'s TIMEOUT_MS exactly as it was before
+    // reconciliation existed.
     owner.rounds = round;
     owner.candidateText = observation.ok ? observation.trailingText : "";
     if (observation.ok) owner.snapshotKey = observation.snapshotKey;
@@ -879,6 +876,9 @@ export class SessionManager {
     // The poll above takes seconds, so re-check ownership: a new job may have
     // claimed the session while it ran.
     if (this.latestJobBySession.get(job.sessionKey) !== job.jobId) return;
+    // A stable transcript read has now independently confirmed this text, so
+    // the outcome stops being provisional and stops being re-read.
+    this.provisionalOutcomes.delete(job.jobId);
     job.lastEventAt = Date.now();
     job.status = "completed";
     job.summary = recovered;
@@ -997,7 +997,14 @@ export class SessionManager {
       // completed_no_summary or error. Re-read the transcript on each poll
       // (rate-limited) so a later check_task can surface a late-arriving
       // response without requiring the caller to re-submit the task.
-      if (job.status === "completed_no_summary" || job.status === "error") {
+      // Provisional outcomes are included: a reconciled `completed` was
+      // inferred from a transcript read, not from a terminal event, so it
+      // stays eligible for re-reading until a poll confirms it.
+      if (
+        job.status === "completed_no_summary" ||
+        job.status === "error" ||
+        this.provisionalOutcomes.has(job.jobId)
+      ) {
         await this.maybeRecoverTerminalJob(job);
       }
       logDebug(
