@@ -628,8 +628,9 @@ describe("completion reconciliation — the live job 9f21545a shape", () => {
     expect(sessions.getJob(job.jobId)?.summary).toBe("the corrected final from the transcript");
   });
 
-  // Two re-reads can genuinely overlap: the cooldown is 20s but a read runs up
-  // to ~35s (four attempts, each with its own 20s RPC timeout). Whichever
+  // Two re-reads can genuinely overlap: the cooldown is 20s but a read can run
+  // ~32s — its 12s budget is only checked between attempts, so one slow
+  // chat.history (20s RPC timeout) overruns it. Whichever
   // STARTED first is the older observation and must lose — and it must lose on
   // BOTH resolution orders. Comparing outcomes alone cannot express that: it
   // only detects "somebody wrote", not "somebody newer", so it fixes whichever

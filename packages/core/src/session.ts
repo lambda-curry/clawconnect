@@ -927,10 +927,12 @@ export class SessionManager {
     // Two independent things can beat this read to the answer, and they need
     // two different tests. Both are captured before the await.
     //
-    // 1. A NEWER round of this same method. Reads can overlap: the cooldown is
-    //    RECHECK_COOLDOWN_MS but a read runs up to ~35s (four attempts, each
-    //    with its own 20s RPC timeout). lastRecheckAt is stamped per read, so
-    //    a changed value means a later read exists — and this one is then the
+    // 1. A NEWER round of this same method. Reads can outlive the cooldown and
+    //    so overlap: the poll's own budget is attempts*intervalMs (12s here),
+    //    but it is only checked BETWEEN attempts, so a single slow chat.history
+    //    — its RPC timeout is 20s — overruns it, to ~32s worst case against a
+    //    RECHECK_COOLDOWN_MS of 20s. lastRecheckAt is stamped per read, so a
+    //    changed value means a later read exists — and this one is then the
     //    older observation and must lose, whichever of the two resolves first.
     //    Comparing outcomes cannot express that: it only says "somebody wrote",
     //    not "somebody newer".
