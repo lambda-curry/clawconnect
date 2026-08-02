@@ -65,7 +65,7 @@ describe("formatLifecycleEventText", () => {
   });
 });
 
-describe("classifyUpstreamRun — openclaw's sessionInfo run-state flags", () => {
+describe("classifyUpstreamRun — liveness only, never a termination receipt", () => {
   const RUN = "d4f49586-2fb7-4de4-879e-bb1ca611261f";
 
   it("reports active when our runId is listed", () => {
@@ -74,18 +74,22 @@ describe("classifyUpstreamRun — openclaw's sessionInfo run-state flags", () =>
     expect(classifyUpstreamRun({ hasActiveRun: true, activeRunIds: [RUN] }, RUN)).toBe("active");
   });
 
-  it("reports terminal when nothing is running", () => {
-    expect(classifyUpstreamRun({ hasActiveRun: false, activeRunIds: [] }, RUN)).toBe("terminal");
-  });
-
-  it("reports terminal when the only active runs belong to someone else", () => {
-    expect(classifyUpstreamRun({ hasActiveRun: true, activeRunIds: ["other-run"] }, RUN)).toBe("terminal");
-  });
-
-  it("stays active when upstream claims a run but names none", () => {
-    // sessionInfo.hasActiveRun ORs in projected runs it cannot enumerate, so
-    // an unnamed active run must not be read as ours having finished.
+  it("reports active whenever upstream claims any run, named or not", () => {
+    // activeRunIds omits queued turns, hidden runs, and restart-redispatched
+    // runs by design, so a run of ours can be live yet unnamed.
     expect(classifyUpstreamRun({ hasActiveRun: true, activeRunIds: [] }, RUN)).toBe("active");
+    expect(classifyUpstreamRun({ hasActiveRun: true, activeRunIds: ["someone-else"] }, RUN)).toBe("active");
+  });
+
+  it("NEVER reports terminal — absence of an active run is not proof a run ended", () => {
+    // hasActiveRun is a latch: openclaw clears projectSessionActive on any
+    // lifecycle end/error, including the per-attempt `end` this connector
+    // already handles mid-run, and refuses to re-register the runId. A live
+    // run therefore goes permanently invisible here. Reading that as
+    // terminal would release the busy guard and let a resubmit abort the
+    // still-running job.
+    expect(classifyUpstreamRun({ hasActiveRun: false, activeRunIds: [] }, RUN)).toBe("unknown");
+    expect(classifyUpstreamRun({ hasActiveRun: false, activeRunIds: ["other"] }, RUN)).toBe("unknown");
   });
 
   it("is unknown when the field is absent, malformed, or sessionInfo is missing", () => {
@@ -96,8 +100,8 @@ describe("classifyUpstreamRun — openclaw's sessionInfo run-state flags", () =>
     expect(classifyUpstreamRun("not-an-object", RUN)).toBe("unknown");
   });
 
-  it("still classifies without a runId to correlate against", () => {
-    expect(classifyUpstreamRun({ hasActiveRun: false }, undefined)).toBe("terminal");
+  it("still reports active without a runId to correlate against", () => {
     expect(classifyUpstreamRun({ hasActiveRun: true, activeRunIds: ["x"] }, undefined)).toBe("active");
+    expect(classifyUpstreamRun({ hasActiveRun: false }, undefined)).toBe("unknown");
   });
 });

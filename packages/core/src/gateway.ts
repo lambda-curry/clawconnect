@@ -213,18 +213,22 @@ export type RunObservation = {
   /** Visible trailing-assistant text at the last successful read; "" when the trailing entry carries none. */
   trailingText: string;
   /**
-   * What upstream says about the run itself, independent of the transcript.
-   * `active` and `terminal` are POSITIVE evidence from openclaw's
-   * `sessionInfo.hasActiveRun`/`activeRunIds`; `unknown` means the field was
-   * absent or unreadable and nothing may be concluded from it.
+   * Liveness only. `active` is positive evidence from openclaw's
+   * `sessionInfo.hasActiveRun`/`activeRunIds` that execution is ongoing;
+   * everything else is `unknown`.
    *
-   * This is the only signal that separates "the run ended writing nothing"
-   * from "the model is composing a long answer" — both of which look like a
-   * frozen transcript. Verified on the wire 2026-08-02: during a sleeping
-   * run, hasActiveRun stayed true with the runId listed while the transcript
-   * sat at one user message; on completion it flipped to false/[].
+   * Deliberately one-directional. `hasActiveRun` is a LATCH, not a state:
+   * openclaw sets `projectSessionActive` true only at registration
+   * (chat-abort.ts) and clears it on ANY lifecycle end/error — including the
+   * per-attempt `lifecycle:end` this connector already documents as firing
+   * mid-run (see recoverLateFinalText). Re-registration of the same runId is
+   * refused, so once cleared a live run is invisible for the rest of its
+   * life. Absence therefore proves nothing, and is never read as terminal.
+   * Being wrong in the `active` direction only costs a longer wait, which is
+   * the pre-existing behavior; being wrong in the terminal direction would
+   * abort a live run via the released busy guard.
    */
-  upstream: "active" | "terminal" | "unknown";
+  upstream: "active" | "unknown";
   /**
    * Snapshot key of the last successful read ("" when none succeeded).
    * Exposed so a caller comparing successive observations can detect
@@ -241,12 +245,12 @@ export type RunObservation = {
  * as optional and anything unrecognized degrades to "unknown" rather than
  * being guessed at.
  *
- *   our runId listed in activeRunIds        → active
- *   hasActiveRun === false                  → terminal (nothing in flight)
- *   activeRunIds non-empty, ours absent     → terminal (someone else's run)
- *   hasActiveRun true, activeRunIds empty   → active (upstream ORs in
- *                                             projected runs it can't name)
- *   field missing / wrong type              → unknown
+ *   our runId listed in activeRunIds → active
+ *   hasActiveRun === true            → active (ours may be one it can't name;
+ *                                      queued turns, hidden runs and
+ *                                      restart-redispatched runs are all
+ *                                      absent from activeRunIds by design)
+ *   anything else                    → unknown
  */
 export function classifyUpstreamRun(
   sessionInfo: unknown,
@@ -258,13 +262,7 @@ export function classifyUpstreamRun(
     ? info.activeRunIds.filter((id): id is string => typeof id === "string")
     : undefined;
   if (runId && ids?.includes(runId)) return "active";
-  if (info.hasActiveRun === false) return "terminal";
-  if (info.hasActiveRun === true) {
-    // Named runs that aren't ours mean ours is done; an unnamed active run
-    // is ambiguous, so stay conservative and call it active.
-    if (runId && ids && ids.length > 0) return "terminal";
-    return "active";
-  }
+  if (info.hasActiveRun === true) return "active";
   return "unknown";
 }
 

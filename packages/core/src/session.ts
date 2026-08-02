@@ -154,6 +154,12 @@ export class SessionManager {
    */
   private provisionalOutcomes = new Set<string>();
   /**
+   * openclaw's runId per job, once chat.send has returned one. Kept outside
+   * the reconciler state so it cannot be lost to callback/arming order —
+   * onRunId can fire before or after the watchdog is armed.
+   */
+  private upstreamRunIds = new Map<string, string>();
+  /**
    * Live quiet-watchdogs, keyed by jobId. Present only while a job is
    * `running` with a live chat() still outstanding; cleared the moment the
    * job goes terminal or chat() settles (after which recoverLateFinalText
@@ -189,8 +195,6 @@ export class SessionManager {
       candidateText: string;
       /** Transcript snapshot key from the previous quiet round, for detecting progress BETWEEN rounds. */
       snapshotKey: string;
-      /** openclaw's runId for this job's chat.send, once known — the correlation key for upstream run state. */
-      runId?: string;
     }
   >();
 
@@ -360,8 +364,7 @@ export class SessionManager {
           // openclaw's handle for this run. Reconciliation correlates against
           // it so "is THIS run still going?" is answered by upstream rather
           // than inferred from transcript stillness.
-          const state = this.reconcilers.get(jobId);
-          if (state) state.runId = runId;
+          this.upstreamRunIds.set(jobId, runId);
           logDebug(`[job ${jobId.slice(0, 8)}] upstream runId ${runId}`);
         },
       )
@@ -533,6 +536,7 @@ export class SessionManager {
   }
 
   private clearReconciler(jobId: string): void {
+    this.upstreamRunIds.delete(jobId);
     const state = this.reconcilers.get(jobId);
     if (!state) return;
     clearTimeout(state.timer);
@@ -616,7 +620,7 @@ export class SessionManager {
       observation = await this.gateway.reconcileRun(job.sessionKey, {
         samples: 2,
         intervalMs: RECONCILE_SAMPLE_INTERVAL_MS,
-        runId: owner.runId,
+        runId: this.upstreamRunIds.get(job.jobId),
       });
     } catch (err) {
       logDebug(
@@ -674,24 +678,10 @@ export class SessionManager {
       return;
     }
 
-    // Upstream says the run is over. That is positive evidence, so no
-    // multi-round inference is needed: whatever the transcript holds now is
-    // final. An interim status line can only mislead us while the run is
-    // still going, and upstream has just ruled that out. This is what turns
-    // a lost terminal event into a ~2-minute outcome instead of the
-    // 30-minute live timeout that produced job 3a2619f9's error.
-    if (observation.ok && observation.upstream === "terminal") {
-      if (observation.trailingText.length > 0) {
-        this.finalizeReconciled(job, observation.trailingText);
-      } else {
-        this.finalizeReconciled(job, "", "completed_no_summary");
-      }
-      return;
-    }
-
-    // Everything below is the fallback for `unknown` upstream — an openclaw
-    // that doesn't report run state. It infers from transcript behaviour
-    // alone and so stays deliberately conservative.
+    // NOTE: there is deliberately no terminal branch here. `hasActiveRun`
+    // going false is not a termination receipt — see classifyUpstreamRun.
+    // Absence still never ends a job; only confirmed text or chat() itself
+    // does.
     //
     // Progress means "moved at any point since the last round", not just
     // "moved between this round's two samples": a run that advances one tool

@@ -187,6 +187,33 @@ describe("OpenClawGateway.chat — run correlation across the send boundary", ()
     expect(seen).toHaveLength(1);
   });
 
+  it("hands the runId to onRunId before replaying anything", async () => {
+    // The correlation key for upstream run state. A fake gateway cannot
+    // cover this, so it is asserted against the real chat() path.
+    const gateway = await harness((frame, socket) => {
+      if (frame.method !== "chat.send") return;
+      socket.send(agentToolEvent("run-9", "Bash"));
+      socket.send(sendAck(frame.id, "run-9"));
+      socket.send(chatEvent("run-9", "final", "done"));
+    });
+
+    const seenRunIds: string[] = [];
+    const seenEvents: GatewayEvent[] = [];
+    const reply = await gateway.chat(
+      "agent:main:main:thread:test",
+      "hi",
+      10_000,
+      (e) => seenEvents.push(e),
+      (runId) => seenRunIds.push(runId),
+    );
+
+    expect(reply).toBe("done");
+    expect(seenRunIds).toEqual(["run-9"]);
+    // Ordering matters: a reconciliation racing the replay must already be
+    // able to name the run, so the id lands before buffered events flush.
+    expect(seenEvents).toHaveLength(1);
+  });
+
   it("rejects when the send itself fails, without stranding the caller", async () => {
     const gateway = await harness((frame, socket) => {
       if (frame.method !== "chat.send") return;
