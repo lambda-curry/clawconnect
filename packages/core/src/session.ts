@@ -9,7 +9,7 @@ import { classifyError } from "./errors.ts";
 import { OpenClawGateway, type RunObservation } from "./gateway.ts";
 import type { JobStore, PersistedJob } from "./job-store.ts";
 import { projectLogWindow } from "./log-projection.ts";
-import type { CheckMode, ContinuationState, Job, JobSnapshot, JobStatus, LogEntry, NextAction, TaskInput } from "./types.ts";
+import type { CheckMode, ContinuationState, GatewayEvent, Job, JobSnapshot, JobStatus, LogEntry, NextAction, TaskInput } from "./types.ts";
 
 function readEnvMs(name: string, fallbackMs: number): number {
   const raw = process.env[name];
@@ -150,6 +150,14 @@ export class SessionManager {
   /** Every real (non-busy-rejected) jobId ever submitted under a sessionKey, oldest first. Backs get_session(mode:"tasks"). */
   private jobHistoryBySession = new Map<string, string[]>();
   /**
+   * Jobs whose terminal status was decided by reconciliation rather than by
+   * a real terminal event. Such an outcome is a bounded inference, never
+   * ground truth, so a live final that arrives afterwards overwrites it —
+   * including a reconciled `completed`, whose summary may be text the run
+   * had merely written on its way past.
+   */
+  private provisionalOutcomes = new Set<string>();
+  /**
    * Live quiet-watchdogs, keyed by jobId. Present only while a job is
    * `running` with a live chat() still outstanding; cleared the moment the
    * job goes terminal or chat() settles (after which recoverLateFinalText
@@ -174,6 +182,13 @@ export class SessionManager {
        * routinely land in the same millisecond.
        */
       activityGeneration: number;
+      /**
+       * Tool calls started but not yet finished. A long tool call produces
+       * live events only at its start and its result, and freezes the
+       * transcript in between — so an outstanding count is the one piece of
+       * positive evidence that silence does NOT mean the run is over.
+       */
+      outstandingTools: number;
       /** Trailing assistant text from the previous quiet round; a repeat of it is what promotes a run to `completed`. */
       candidateText: string;
       /** Transcript snapshot key from the previous quiet round, for detecting progress BETWEEN rounds. */
@@ -327,7 +342,7 @@ export class SessionManager {
     this.gateway
       .chat(sessionKey, message, TIMEOUT_MS, (event) => {
         job.lastEventAt = Date.now();
-        this.noteLiveActivity(jobId);
+        this.noteLiveActivity(jobId, event);
         pushLog(job, {
           ts: Date.now(),
           type: event.type,
@@ -347,10 +362,14 @@ export class SessionManager {
           const noSummary = !reply || reply === "Stream finished with no response collected.";
           if (job.status !== "running") {
             // Reconciliation already finalized this job while chat() was
-            // still pending. A late live reply is only worth acting on when
-            // it carries text the job doesn't have — then it's an upgrade,
-            // never a downgrade of an already-summarized job.
-            if (!noSummary && job.status === "completed_no_summary") {
+            // still pending — but that outcome was an inference, and this is
+            // the run's actual terminal text. It replaces a provisional
+            // outcome of either kind, including a reconciled `completed`
+            // whose summary may be text the run had merely written on its
+            // way past. An outcome that came from a real terminal event is
+            // never provisional and is left alone.
+            if (!noSummary && this.provisionalOutcomes.has(jobId)) {
+              this.provisionalOutcomes.delete(jobId);
               job.lastEventAt = Date.now();
               job.status = "completed";
               job.summary = reply;
@@ -370,7 +389,9 @@ export class SessionManager {
                 });
               }
               this.persistActiveJobs();
-              logDebug(`[job ${jobId}] late live final upgraded reconciled job to completed`);
+              logDebug(
+                `[job ${jobId}] late live final replaced the provisional reconciled outcome`,
+              );
             }
             return;
           }
@@ -436,7 +457,18 @@ export class SessionManager {
    */
   private scheduleReconcile(job: Job, delayMs: number): void {
     if (job.status !== "running") return;
-    const timer = setTimeout(() => void this.reconcileQuietRun(job), delayMs);
+    // The round is fire-and-forget, so an unexpected throw inside it would
+    // surface as an unhandledRejection and take the connector down — losing
+    // the whole in-memory jobs map. Contain it: drop the watchdog for this
+    // job and let the chat() timeout remain its outer bound.
+    const timer = setTimeout(() => {
+      this.reconcileQuietRun(job).catch((err: unknown) => {
+        logDebug(
+          `[job ${job.jobId}] reconcile round threw: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        this.clearReconciler(job.jobId);
+      });
+    }, delayMs);
     // Never a reason to hold the process open — a pending reconciliation is
     // always recoverable from the transcript on the next check_task.
     timer.unref?.();
@@ -452,6 +484,7 @@ export class SessionManager {
       timer,
       rounds: 0,
       activityGeneration: 0,
+      outstandingTools: 0,
       candidateText: "",
       snapshotKey: "",
     });
@@ -463,7 +496,7 @@ export class SessionManager {
    * minutes apart — with real activity in between — would add up to the round
    * cap and force a live run terminal.
    */
-  private noteLiveActivity(jobId: string): void {
+  private noteLiveActivity(jobId: string, event: GatewayEvent): void {
     const state = this.reconcilers.get(jobId);
     if (!state) return;
     state.rounds = 0;
@@ -472,6 +505,12 @@ export class SessionManager {
     // Invalidates any round currently awaiting a transcript read, which
     // captured this value before it changed.
     state.activityGeneration += 1;
+    if (event.type === "tool") state.outstandingTools += 1;
+    // Floored: a `tool` start frame lost in a reconnect window would
+    // otherwise drive this negative and permanently mask later tool work.
+    else if (event.type === "tool-result") {
+      state.outstandingTools = Math.max(0, state.outstandingTools - 1);
+    }
   }
 
   private clearReconciler(jobId: string): void {
@@ -509,6 +548,24 @@ export class SessionManager {
     const quietSinceMs = Date.now() - Math.max(job.lastEventAt, job.startedAt);
     if (quietSinceMs < RECONCILE_QUIET_MS) {
       this.scheduleReconcile(job, RECONCILE_QUIET_MS - quietSinceMs);
+      return;
+    }
+
+    // A tool call that started and has not returned is positive evidence the
+    // run is alive, and it explains the silence completely: live events fire
+    // at a tool's start and its result and nowhere in between, and the
+    // transcript stays frozen on whatever the agent wrote before calling it.
+    // Two stable samples across a ten-minute Bash therefore say nothing —
+    // promoting that frozen text to `completed` would freeze the wrong
+    // summary AND release the session guard out from under live work.
+    // Nothing upstream can tell us more than we already know, so this
+    // doesn't even spend the transcript read.
+    if (owner.outstandingTools > 0) {
+      logDebug(
+        `[job ${job.jobId}] quiet for ${Math.round(quietSinceMs / 1000)}s but ` +
+          `${owner.outstandingTools} tool call(s) still in flight — not reconciling`,
+      );
+      this.scheduleReconcile(job, RECONCILE_QUIET_MS);
       return;
     }
 
@@ -636,6 +693,7 @@ export class SessionManager {
     summary: string,
   ): void {
     this.clearReconciler(job.jobId);
+    this.provisionalOutcomes.add(job.jobId);
     job.lastEventAt = Date.now();
     job.status = status;
     job.summary = summary;

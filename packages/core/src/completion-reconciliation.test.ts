@@ -96,6 +96,18 @@ function fakeGateway(
 
 const toolEvent: GatewayEvent = { type: "tool", text: "Bash: pnpm test", toolName: "Bash", args: {} };
 const toolResultEvent: GatewayEvent = { type: "tool-result", text: "Bash done", toolName: "Bash", isError: false };
+
+/**
+ * A COMPLETE tool round. Real streams pair every tool start with a result;
+ * the interval between the two is where a long-running tool lives, and
+ * reconciliation deliberately refuses to finalize inside it. Fixtures about
+ * a run that went quiet AFTER doing work must therefore close the round —
+ * emitting a bare start models a tool that never returns.
+ */
+const emitToolRound = (ctrl: ReturnType<typeof fakeGateway>) => {
+  ctrl.emit(toolEvent);
+  ctrl.emit(toolResultEvent);
+};
 const SENTINEL = "Stream finished with no response collected.";
 
 afterEach(() => {
@@ -130,7 +142,7 @@ describe("completion reconciliation — the normal path is untouched", () => {
 
     for (let i = 0; i < 6; i++) {
       await vi.advanceTimersByTimeAsync(QUIET_MS / 2);
-      ctrl.emit(toolEvent);
+      emitToolRound(ctrl);
     }
 
     expect(ctrl.reconcileCalls).toHaveLength(0);
@@ -144,8 +156,7 @@ describe("completion reconciliation — a terminal event that never arrived", ()
     const sessions = new SessionManager(ctrl.gateway);
     const job = sessions.submitTask({ task: "tool-heavy job" });
 
-    ctrl.emit(toolEvent);
-    ctrl.emit(toolResultEvent);
+    emitToolRound(ctrl);
     // ...and then the live stream goes silent, terminal event never delivered.
     await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
 
@@ -165,7 +176,7 @@ describe("completion reconciliation — a terminal event that never arrived", ()
     const ctrl = fakeGateway({ observations: [settled("")] });
     const sessions = new SessionManager(ctrl.gateway);
     const job = sessions.submitTask({ task: "tool-heavy job" });
-    ctrl.emit(toolEvent);
+    emitToolRound(ctrl);
 
     await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
     expect(sessions.getJob(job.jobId)?.status).toBe("running");
@@ -183,7 +194,7 @@ describe("completion reconciliation — a terminal event that never arrived", ()
     const ctrl = fakeGateway({ observations: [unreadable()] });
     const sessions = new SessionManager(ctrl.gateway);
     const job = sessions.submitTask({ task: "tool-heavy job" });
-    ctrl.emit(toolEvent);
+    emitToolRound(ctrl);
 
     await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
     await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
@@ -216,13 +227,75 @@ describe("completion reconciliation — an active run is never mistaken for a fi
     const ctrl = fakeGateway({ observations: [advancing()] });
     const sessions = new SessionManager(ctrl.gateway);
     const job = sessions.submitTask({ task: "long quiet thinking job" });
-    ctrl.emit(toolEvent);
+    emitToolRound(ctrl);
 
     for (let round = 0; round < 4; round++) {
       await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
       expect(sessions.getJob(job.jobId)?.status).toBe("running");
     }
     expect(ctrl.reconcileCalls).toHaveLength(4);
+  });
+
+  it("never finalizes while a tool call is still in flight — a long tool is not a finished run", async () => {
+    vi.useFakeTimers();
+    // The blocking shape: the agent writes a status line, calls a long tool,
+    // and the stream goes quiet. Live events fire only at the tool's start
+    // and result, and chat.history stays frozen on the status line — so
+    // every sample looks "settled" for as long as the tool runs.
+    const ctrl = fakeGateway({ observations: [settled("I'm tracing the live wiring now…")] });
+    const sessions = new SessionManager(ctrl.gateway);
+    const job = sessions.submitTask({ task: "tool-heavy job" });
+
+    // Tool starts. Deliberately no result — it is still executing.
+    ctrl.emit(toolEvent);
+
+    for (let round = 0; round < 4; round++) {
+      await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
+      const live = sessions.getJob(job.jobId)!;
+      expect(live.status).toBe("running");
+      expect(live.summary).toBeUndefined();
+    }
+    // Knowing a tool is outstanding, there is nothing upstream can add.
+    expect(ctrl.reconcileCalls).toHaveLength(0);
+
+    // The busy guard is still held: a colliding submit here would abort the
+    // live run mid-tool.
+    const colliding = sessions.submitTask({ task: "colliding ask", sessionKey: job.sessionKey });
+    expect(colliding.status).toBe("error");
+    expect(colliding.errorInfo?.message).toBe("session busy");
+
+    // The tool finally returns and the run delivers its real answer.
+    ctrl.emit(toolResultEvent);
+    ctrl.finishChat("the real answer, after the long tool");
+    await vi.advanceTimersByTimeAsync(0);
+
+    const live = sessions.getJob(job.jobId)!;
+    expect(live.status).toBe("completed");
+    expect(live.summary).toBe("the real answer, after the long tool");
+  });
+
+  it("a reconciled completion is provisional — a late live final replaces its summary", async () => {
+    vi.useFakeTimers();
+    // Belt to the tool-tracking brace: when reconciliation completes a job
+    // from text that turns out not to have been final, the run's real
+    // terminal text must still win rather than being refused as a
+    // "downgrade" of an already-summarized job.
+    const ctrl = fakeGateway({ observations: [settled("interim line"), settled("interim line")] });
+    const sessions = new SessionManager(ctrl.gateway);
+    const job = sessions.submitTask({ task: "tool-heavy job" });
+    emitToolRound(ctrl);
+
+    await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
+    await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
+    expect(sessions.getJob(job.jobId)?.status).toBe("completed");
+    expect(sessions.getJob(job.jobId)?.summary).toBe("interim line");
+
+    ctrl.finishChat("the real final answer");
+    await vi.advanceTimersByTimeAsync(0);
+
+    const live = sessions.getJob(job.jobId)!;
+    expect(live.status).toBe("completed");
+    expect(live.summary).toBe("the real final answer");
   });
 
   it("does not complete on an interim status line the run later moves past", async () => {
@@ -240,7 +313,7 @@ describe("completion reconciliation — an active run is never mistaken for a fi
     });
     const sessions = new SessionManager(ctrl.gateway);
     const job = sessions.submitTask({ task: "tool-heavy job" });
-    ctrl.emit(toolEvent);
+    emitToolRound(ctrl);
 
     // Rounds 1-4: the interim line is seen but never confirmed; the run then
     // visibly advances (k2, k3), which resets the accumulated evidence each
@@ -268,7 +341,7 @@ describe("completion reconciliation — an active run is never mistaken for a fi
     });
     const sessions = new SessionManager(ctrl.gateway);
     const job = sessions.submitTask({ task: "slow tool loop" });
-    ctrl.emit(toolEvent);
+    emitToolRound(ctrl);
 
     for (let round = 0; round < 3; round++) {
       await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
@@ -284,7 +357,7 @@ describe("completion reconciliation — an active run is never mistaken for a fi
     const ctrl = fakeGateway({ observations: [unreadable(), settled("I'm tracing the live wiring now…")] });
     const sessions = new SessionManager(ctrl.gateway);
     const job = sessions.submitTask({ task: "tool-heavy job" });
-    ctrl.emit(toolEvent);
+    emitToolRound(ctrl);
 
     await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
     expect(sessions.getJob(job.jobId)?.status).toBe("running");
@@ -302,7 +375,7 @@ describe("completion reconciliation — an active run is never mistaken for a fi
     const ctrl = fakeGateway({ observations: [settled("")] });
     const sessions = new SessionManager(ctrl.gateway);
     const job = sessions.submitTask({ task: "bursty job" });
-    ctrl.emit(toolEvent);
+    emitToolRound(ctrl);
 
     // Quiet gap #1 — one round against the cap.
     await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
@@ -310,7 +383,7 @@ describe("completion reconciliation — an active run is never mistaken for a fi
 
     // Real activity: the run is demonstrably alive, so the earlier quiet
     // round must not still count toward forcing it terminal.
-    ctrl.emit(toolEvent);
+    emitToolRound(ctrl);
 
     await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
     expect(sessions.getJob(job.jobId)?.status).toBe("running");
@@ -335,7 +408,7 @@ describe("completion reconciliation — handing the job off safely", () => {
     });
     const sessions = new SessionManager(ctrl.gateway);
     const job = sessions.submitTask({ task: "tool-heavy job" });
-    ctrl.emit(toolEvent);
+    emitToolRound(ctrl);
 
     await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
     expect(sessions.getJob(job.jobId)?.status).toBe("running");
@@ -382,7 +455,7 @@ describe("completion reconciliation — handing the job off safely", () => {
     const ctrl = fakeGateway({ observations: [settled(""), () => gate.promise] });
     const sessions = new SessionManager(ctrl.gateway);
     const job = sessions.submitTask({ task: "tool-heavy job" });
-    ctrl.emit(toolEvent);
+    emitToolRound(ctrl);
 
     await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
     expect(sessions.getJob(job.jobId)?.status).toBe("running");
@@ -392,7 +465,7 @@ describe("completion reconciliation — handing the job off safely", () => {
 
     // Live event lands while the transcript read is still in flight, after
     // the round already captured its round number.
-    ctrl.emit(toolEvent);
+    emitToolRound(ctrl);
 
     // The now-stale observation comes back with a verdict that, taken at
     // face value, reaches the round cap.
@@ -415,7 +488,7 @@ describe("completion reconciliation — handing the job off safely", () => {
     const ctrl = fakeGateway({ observations: [settled("")] });
     const sessions = new SessionManager(ctrl.gateway);
     const job = sessions.submitTask({ task: "tool-heavy job" });
-    ctrl.emit(toolEvent);
+    emitToolRound(ctrl);
 
     await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
     await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
@@ -435,7 +508,7 @@ describe("completion reconciliation — handing the job off safely", () => {
     const sessions = new SessionManager(ctrl.gateway);
     const sessionKey = "agent:main:main:thread:handoff";
     const first = sessions.submitTask({ task: "first ask", sessionKey });
-    ctrl.emit(toolEvent);
+    emitToolRound(ctrl);
 
     await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
     await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
@@ -468,7 +541,7 @@ describe("completion reconciliation — handing the job off safely", () => {
     const sessions = new SessionManager(ctrl.gateway);
     const sessionKey = "agent:main:main:thread:supersede";
     const first = sessions.submitTask({ task: "first ask", sessionKey });
-    ctrl.emit(toolEvent);
+    emitToolRound(ctrl);
 
     await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
     await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
@@ -491,7 +564,7 @@ describe("completion reconciliation — handing the job off safely", () => {
     const ctrl = fakeGateway({ observations: [settled("the real answer"), settled("the real answer")] });
     const sessions = new SessionManager(ctrl.gateway);
     const job = sessions.submitTask({ task: "tool-heavy job" });
-    ctrl.emit(toolEvent);
+    emitToolRound(ctrl);
 
     await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
     await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
@@ -513,7 +586,7 @@ describe("completion reconciliation — caller-visible effects", () => {
     const ctrl = fakeGateway({ observations: [settled("the real answer"), settled("the real answer")] });
     const sessions = new SessionManager(ctrl.gateway);
     const job = sessions.submitTask({ task: "tool-heavy job" });
-    ctrl.emit(toolEvent);
+    emitToolRound(ctrl);
     await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
     await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
 
@@ -542,7 +615,7 @@ describe("completion reconciliation — caller-visible effects", () => {
     });
     const sessions = new SessionManager(ctrl.gateway);
     const job = sessions.submitTask({ task: "tool-heavy job" });
-    ctrl.emit(toolEvent);
+    emitToolRound(ctrl);
     await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
     await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
 
@@ -560,7 +633,7 @@ describe("completion reconciliation — caller-visible effects", () => {
     const sessions = new SessionManager(ctrl.gateway);
     const sessionKey = "agent:main:main:thread:busy-release";
     const first = sessions.submitTask({ task: "first ask", sessionKey });
-    ctrl.emit(toolEvent);
+    emitToolRound(ctrl);
 
     // While it's running, a second submit on the same session is refused —
     // a colliding chat.send would abort the in-flight run.
