@@ -628,35 +628,51 @@ describe("completion reconciliation — the live job 9f21545a shape", () => {
     expect(sessions.getJob(job.jobId)?.summary).toBe("the corrected final from the transcript");
   });
 
-  it("never lets an older overlapping re-read clobber a newer one that already landed", async () => {
-    vi.useFakeTimers();
-    // Two re-reads can genuinely overlap: the cooldown is 20s but a read can
-    // run ~35s (four attempts, each with its own 20s RPC timeout). Whichever
-    // STARTED first is the older observation and must lose, regardless of
-    // which resolves last.
-    const firstRead = deferred<string | undefined>();
-    const secondRead = deferred<string | undefined>();
-    let reads = 0;
-    const { sessions, job } = await reconcileToProvisionalCompleted("an early guess", () =>
-      ++reads === 1 ? firstRead.promise : secondRead.promise,
-    );
+  // Two re-reads can genuinely overlap: the cooldown is 20s but a read runs up
+  // to ~35s (four attempts, each with its own 20s RPC timeout). Whichever
+  // STARTED first is the older observation and must lose — and it must lose on
+  // BOTH resolution orders. Comparing outcomes alone cannot express that: it
+  // only detects "somebody wrote", not "somebody newer", so it fixes whichever
+  // ordering it happens to see and silently inverts the other.
+  for (const olderResolvesFirst of [false, true]) {
+    it(`never lets an older overlapping re-read win when it resolves ${olderResolvesFirst ? "first" : "last"}`, async () => {
+      vi.useFakeTimers();
+      const firstRead = deferred<string | undefined>();
+      const secondRead = deferred<string | undefined>();
+      let reads = 0;
+      const { sessions, job } = await reconcileToProvisionalCompleted("an early guess", () =>
+        ++reads === 1 ? firstRead.promise : secondRead.promise,
+      );
 
-    const pollingA = sessions.waitForJob(job.jobId, 0, undefined, "wait", 1_000);
-    await vi.advanceTimersByTimeAsync(0);
-    await vi.advanceTimersByTimeAsync(21_000); // past the recheck cooldown
-    const pollingB = sessions.waitForJob(job.jobId, 0, undefined, "wait", 1_000);
-    await vi.advanceTimersByTimeAsync(0);
-    expect(reads).toBe(2);
+      const pollingA = sessions.waitForJob(job.jobId, 0, undefined, "wait", 1_000);
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(21_000); // past the recheck cooldown
+      const pollingB = sessions.waitForJob(job.jobId, 0, undefined, "wait", 1_000);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(reads).toBe(2);
 
-    secondRead.resolve("the newer, complete answer");
-    await pollingB;
-    await vi.advanceTimersByTimeAsync(0);
-    firstRead.resolve("older partial text");
-    await pollingA;
-    await vi.advanceTimersByTimeAsync(0);
+      const settleOlder = async () => {
+        firstRead.resolve("older partial text");
+        await pollingA;
+      };
+      const settleNewer = async () => {
+        secondRead.resolve("the newer, complete answer");
+        await pollingB;
+      };
+      if (olderResolvesFirst) {
+        await settleOlder();
+        await vi.advanceTimersByTimeAsync(0);
+        await settleNewer();
+      } else {
+        await settleNewer();
+        await vi.advanceTimersByTimeAsync(0);
+        await settleOlder();
+      }
+      await vi.advanceTimersByTimeAsync(0);
 
-    expect(sessions.getJob(job.jobId)?.summary).toBe("the newer, complete answer");
-  });
+      expect(sessions.getJob(job.jobId)?.summary).toBe("the newer, complete answer");
+    });
+  }
 
   it("still lets a later real live final replace an outcome a transcript re-read already corrected", async () => {
     vi.useFakeTimers();

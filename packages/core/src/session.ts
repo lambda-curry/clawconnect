@@ -924,12 +924,22 @@ export class SessionManager {
     const last = job.lastRecheckAt ?? 0;
     if (Date.now() - last < RECHECK_COOLDOWN_MS) return;
     job.lastRecheckAt = Date.now();
-    // Captured before the read, which takes seconds. While a job is terminal
-    // its outcome is written by exactly two things: chat()'s late-final
-    // replacement, and another round of this same method. Either one means
-    // somebody newer has already answered, so comparing the VALUE afterwards
-    // is an exact "was I superseded while reading?" test — and unlike a flag,
-    // it does not fire when chat() settles carrying nothing to supersede with.
+    // Two independent things can beat this read to the answer, and they need
+    // two different tests. Both are captured before the await.
+    //
+    // 1. A NEWER round of this same method. Reads can overlap: the cooldown is
+    //    RECHECK_COOLDOWN_MS but a read runs up to ~35s (four attempts, each
+    //    with its own 20s RPC timeout). lastRecheckAt is stamped per read, so
+    //    a changed value means a later read exists — and this one is then the
+    //    older observation and must lose, whichever of the two resolves first.
+    //    Comparing outcomes cannot express that: it only says "somebody wrote",
+    //    not "somebody newer".
+    const recheckStartedAt = job.lastRecheckAt;
+    // 2. chat()'s late-final replacement. While a job is terminal that is the
+    //    only other writer of its outcome, so comparing the VALUE is an exact
+    //    "was I superseded?" test — and unlike a flag it does not fire when
+    //    chat() settles carrying nothing to supersede with (a reject, or the
+    //    no-summary sentinel).
     const summaryAtStart = job.summary;
     const statusAtStart = job.status;
     let recovered: string | undefined;
@@ -952,19 +962,17 @@ export class SessionManager {
     // The poll above takes seconds, so re-check ownership: a new job may have
     // claimed the session while it ran.
     if (this.latestJobBySession.get(job.sessionKey) !== job.jobId) return;
-    // ...and the outcome itself may have been rewritten while it ran — by the
-    // run's own live final, or by a longer-running sibling re-read. This read
-    // was already in flight when that happened, so it is the strictly older
-    // observation and must lose. Writing it back would also be PERMANENT
-    // against a live final: chat() settling retires the provisional flag, so
-    // nothing replaces the summary again and no later poll re-reads it.
-    //
-    // Deliberately compares the value, not provisional membership. A chat()
-    // that settles by rejecting, or with the no-summary sentinel, retires that
-    // flag while writing no answer at all — and this read's correction is then
-    // the best evidence available, so it must still be allowed to land.
+    // A newer read started while this one was in flight, so this one is the
+    // older observation no matter which of them resolves first.
+    if (job.lastRecheckAt !== recheckStartedAt) {
+      logDebug(`[job ${job.jobId}] lazy-recheck superseded by a newer read — discarding the older one`);
+      return;
+    }
+    // ...or the run's own live final landed while this read ran. Writing over
+    // that would be PERMANENT: chat() settling retires the provisional flag,
+    // so nothing replaces the summary again and no later poll re-reads it.
     if (job.summary !== summaryAtStart || job.status !== statusAtStart) {
-      logDebug(`[job ${job.jobId}] lazy-recheck superseded while reading — discarding the stale read`);
+      logDebug(`[job ${job.jobId}] lazy-recheck superseded by the live final — discarding the stale read`);
       return;
     }
     // Did this read actually heal anything? Either it brought text the job
