@@ -924,6 +924,11 @@ export class SessionManager {
     const last = job.lastRecheckAt ?? 0;
     if (Date.now() - last < RECHECK_COOLDOWN_MS) return;
     job.lastRecheckAt = Date.now();
+    // Captured before the read, which takes seconds. chat()'s handlers are the
+    // ONLY things that remove a job from provisionalOutcomes, so losing this
+    // membership across the await is an exact signal that the live stream
+    // settled while we were reading.
+    const provisionalAtStart = this.provisionalOutcomes.has(job.jobId);
     let recovered: string | undefined;
     try {
       recovered = await this.gateway.pollTranscriptForFinalText(job.sessionKey, {
@@ -944,6 +949,16 @@ export class SessionManager {
     // The poll above takes seconds, so re-check ownership: a new job may have
     // claimed the session while it ran.
     if (this.latestJobBySession.get(job.sessionKey) !== job.jobId) return;
+    // ...and chat() may have settled while it ran. This read was already in
+    // flight when that happened, so it describes a transcript from before the
+    // run delivered its terminal text — a strictly older inference than the
+    // answer now on the job. Writing it back would not just be wrong, it would
+    // be PERMANENT: chat() settling already retired the provisional flag, so
+    // nothing can replace the summary again and no later poll re-reads it.
+    if (provisionalAtStart && !this.provisionalOutcomes.has(job.jobId)) {
+      logDebug(`[job ${job.jobId}] lazy-recheck superseded by the live final — discarding the stale read`);
+      return;
+    }
     // Did this read actually heal anything? Either it brought text the job
     // did not have, or it moved a non-success terminal status to completed.
     // Re-reading the SAME text off a still-frozen transcript is NOT

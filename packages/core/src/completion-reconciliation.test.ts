@@ -540,6 +540,46 @@ describe("completion reconciliation — the live job 9f21545a shape", () => {
     expect(pollSpy).toHaveBeenCalledTimes(1);
   });
 
+  it("never lets a re-read that was already in flight clobber the live final that landed during it", async () => {
+    vi.useFakeTimers();
+    // Reviewer blocker D2, the ordering sibling of D1. The re-read guard only
+    // re-checked session ownership across its await, not whether the outcome
+    // had changed underneath it — so a read that started BEFORE the run
+    // delivered its terminal text could still write that older inference back
+    // on top of it. Permanently: chat() settling has already retired the
+    // provisional flag, so nothing replaces the summary again and no later
+    // poll re-reads it.
+    const readGate = deferred<string | undefined>();
+    const { ctrl, sessions, job } = await reconcileToProvisionalCompleted(
+      "an early guess",
+      () => readGate.promise,
+    );
+
+    // A lazy re-check starts and blocks on the transcript read.
+    const polling = sessions.waitForJob(job.jobId, 0, undefined, "wait", 1_000);
+    await vi.advanceTimersByTimeAsync(0);
+
+    // While it is in flight, the run's real final answer arrives on chat().
+    ctrl.finishChat("the real final answer");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sessions.getJob(job.jobId)?.summary).toBe("the real final answer");
+
+    // The stale read now resolves, carrying transcript text from before the
+    // run finished. It must be discarded, not written back.
+    readGate.resolve("stale text from the transcript");
+    await polling;
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sessions.getJob(job.jobId)?.summary).toBe("the real final answer");
+
+    // ...and it must still be the real answer once the cooldown has passed —
+    // the damage this guards against is permanent, not transient.
+    await vi.advanceTimersByTimeAsync(21_000);
+    await sessions.waitForJob(job.jobId, 0, undefined, "wait", 1_000);
+    const live = sessions.getJob(job.jobId)!;
+    expect(live.status).toBe("completed");
+    expect(live.summary).toBe("the real final answer");
+  });
+
   it("still lets a later real live final replace an outcome a transcript re-read already corrected", async () => {
     vi.useFakeTimers();
     // Reviewer blocker D1. The re-read is itself an inference; the live final
