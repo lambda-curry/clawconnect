@@ -125,6 +125,13 @@ interface Frame {
   method?: string;
 }
 
+/**
+ * Ceiling on frames held between subscribing and learning the runId (see
+ * `chat`). One RPC round-trip's worth of events is a handful; this only
+ * bounds the pathological case where the send never comes back.
+ */
+const MAX_PRE_RUNID_FRAMES = 500;
+
 interface ChatEventPayload {
   runId: string;
   sessionKey: string;
@@ -160,6 +167,52 @@ export function formatLifecycleEventText(phase: unknown): string {
   const normalized = typeof phase === "string" && phase.trim() ? phase.trim() : "unknown";
   return `Agent lifecycle: ${normalized}`;
 }
+
+/**
+ * Trailing-assistant scan of a `chat.history` message list, newest-first.
+ * Skips assistant messages with no visible text (thinking-only / tool-only
+ * turns) — they don't carry the report — but stops at the first
+ * non-assistant entry: the agent's final visible answer is the last
+ * assistant text after the last tool round, and walking past a toolResult
+ * into older preamble would return stale content.
+ */
+export function trailingAssistantText(messages: unknown[]): string {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (!m || typeof m !== "object" || (m as Record<string, unknown>).role !== "assistant") break;
+    const text = extractAssistantMessageText(m as Record<string, unknown>);
+    if (text) return text;
+  }
+  return "";
+}
+
+/**
+ * Cheap change-detector for one transcript read: role and visible-text
+ * length of the last entry, plus the entry count. Two reads that produce the
+ * same key mean the transcript did not advance between them.
+ */
+export function transcriptSnapshotKey(messages: unknown[]): string {
+  const last = messages[messages.length - 1];
+  if (!last || typeof last !== "object") return `empty:${messages.length}`;
+  const role = (last as Record<string, unknown>).role;
+  const roleLabel = typeof role === "string" ? role : "?";
+  return `${roleLabel}:${extractAssistantMessageText(last as Record<string, unknown>).length}:${messages.length}`;
+}
+
+/**
+ * What upstream truth says about a run whose live stream has gone quiet.
+ * Deliberately an observation, not a verdict: the caller (SessionManager)
+ * owns the bounded policy that turns repeated observations into a terminal
+ * job status.
+ */
+export type RunObservation = {
+  /** True when at least two transcript reads succeeded — enough to judge. */
+  ok: boolean;
+  /** True when the transcript advanced between reads: the run is still producing. */
+  changed: boolean;
+  /** Visible trailing-assistant text at the last successful read; "" when the trailing entry carries none. */
+  trailingText: string;
+};
 
 // ── Gateway client ───────────────────────────────────────────────────────────
 
@@ -395,6 +448,73 @@ export class OpenClawGateway {
   }
 
   /**
+   * One `chat.history` read, reduced to the two things every caller needs:
+   * whether the transcript moved (`snapshotKey`) and what the agent's last
+   * visible answer is (`trailingText`). Returns null when the read failed —
+   * callers decide whether that's fatal.
+   *
+   * maxChars is passed explicitly: the gateway otherwise truncates each
+   * history message to 8k chars, which would clip the long reports these
+   * reads exist to recover.
+   */
+  private async readTranscriptSample(
+    sessionKey: string,
+  ): Promise<{ snapshotKey: string; trailingText: string } | null> {
+    try {
+      const res = (await this.sendRpc(
+        "chat.history",
+        { sessionKey, limit: 20, maxChars: 200_000 },
+        20_000,
+      )) as { messages?: unknown };
+      const messages = Array.isArray(res?.messages) ? res.messages : [];
+      return {
+        snapshotKey: transcriptSnapshotKey(messages),
+        trailingText: trailingAssistantText(messages),
+      };
+    } catch (err) {
+      logDebug("[openclaw-gateway] transcript read failed:", (err as Error).message);
+      return null;
+    }
+  }
+
+  /**
+   * Bounded read of upstream truth for a run whose live event stream has gone
+   * quiet. Takes `samples` transcript reads `intervalMs` apart and reports
+   * whether the transcript is still advancing and what the trailing assistant
+   * text is — nothing more. The live `chat` stream is not consulted: the whole
+   * point is that it may have dropped the terminal event.
+   *
+   * Requires two successful reads before claiming `ok`; a single read can't
+   * distinguish "not moving" from "we only looked once".
+   */
+  async reconcileRun(
+    sessionKey: string,
+    options: { samples?: number; intervalMs?: number } = {},
+  ): Promise<RunObservation> {
+    const samples = Math.max(2, options.samples ?? 2);
+    const intervalMs = options.intervalMs ?? 15_000;
+    let successes = 0;
+    let previousKey: string | undefined;
+    let changed = false;
+    let trailingText = "";
+    for (let i = 0; i < samples; i++) {
+      if (i > 0) await new Promise((r) => setTimeout(r, intervalMs));
+      const sample = await this.readTranscriptSample(sessionKey);
+      if (!sample) continue;
+      successes += 1;
+      trailingText = sample.trailingText;
+      if (previousKey !== undefined && sample.snapshotKey !== previousKey) changed = true;
+      previousKey = sample.snapshotKey;
+    }
+    const observation: RunObservation = { ok: successes >= 2, changed, trailingText };
+    logDebug(
+      `[openclaw-gateway] reconcile ${sessionKey.slice(-12)}: reads=${successes}/${samples} ` +
+        `ok=${observation.ok} changed=${observation.changed} trailingLen=${observation.trailingText.length}`,
+    );
+    return observation;
+  }
+
+  /**
    * Fallback for when the live chat stream produces no final text: read the
    * persisted session transcript via `chat.history` and return the most recent
    * assistant message's visible text. Returns "" if nothing usable is found or
@@ -514,74 +634,39 @@ export class OpenClawGateway {
         logDebug(`[poll ${diagId}] exit: shouldAbort=true after sleep at attempt=${attempt}`);
         return stableTrailingText;
       }
-      try {
-        // maxChars is passed explicitly: the gateway otherwise truncates each
-        // history message to 8k chars, which would clip the long reports this
-        // fallback exists to recover.
-        const res = (await this.sendRpc(
-          "chat.history",
-          { sessionKey, limit: 20, maxChars: 200_000 },
-          20_000,
-        )) as { messages?: unknown };
-        const messages = Array.isArray(res?.messages) ? res.messages : [];
-        // Trailing-assistant scan, newest-first. Skip assistant messages with
-        // no visible text (thinking-only / tool-only turns) — they don't
-        // contain the report — but DO stop at the first non-assistant entry.
-        // The agent's final visible answer is the last assistant text after
-        // the last tool round; walking past a toolResult into older preamble
-        // would return stale content.
-        let currentTrailingText = "";
-        for (let i = messages.length - 1; i >= 0; i--) {
-          const m = messages[i];
-          if (!m || typeof m !== "object" || (m as Record<string, unknown>).role !== "assistant") {
-            break;
-          }
-          const text = extractAssistantMessageText(m as Record<string, unknown>);
-          if (text) {
-            currentTrailingText = text;
-            break;
-          }
+      const sample = await this.readTranscriptSample(sessionKey);
+      if (!sample) continue;
+      const { snapshotKey, trailingText: currentTrailingText } = sample;
+      logDebug(
+        `[poll ${diagId}] attempt=${attempt} snapshotKey=${snapshotKey} ` +
+          `trailingLen=${currentTrailingText.length} stableCount=${stableCount} ` +
+          `prevKey=${lastSnapshotKey || "(empty)"}`,
+      );
+      if (snapshotKey === lastSnapshotKey) {
+        stableCount += 1;
+        // Stability is only a valid "run is done" signal when the trailing
+        // entry actually has visible assistant text. A stable toolResult /
+        // thinking-only trailing entry just means the agent is between
+        // tool rounds, doing a model_call — which can take 30+ seconds
+        // even on healthy runs. Returning empty here would mark a still-
+        // active run as completed_no_summary.
+        //
+        // Keep polling on stable-but-empty; the idle-timeout (`idleTimeoutMs`,
+        // typically minutes) is the right signal that the agent has gone
+        // silent without ever writing a visible answer.
+        if (stableCount >= stableThreshold && currentTrailingText.length > 0) {
+          stableTrailingText = currentTrailingText;
+          logDebug(
+            `[poll ${diagId}] exit: stable+text after ${stableCount} polls, text=${stableTrailingText.length} chars`,
+          );
+          return stableTrailingText;
         }
-        const lastMsg = messages[messages.length - 1];
-        const snapshotKey =
-          lastMsg && typeof lastMsg === "object"
-            ? `${(lastMsg as Record<string, unknown>).role ?? "?"}:${
-                extractAssistantMessageText(lastMsg as Record<string, unknown>).length
-              }:${messages.length}`
-            : `empty:${messages.length}`;
-        logDebug(
-          `[poll ${diagId}] attempt=${attempt} snapshotKey=${snapshotKey} ` +
-            `trailingLen=${currentTrailingText.length} stableCount=${stableCount} ` +
-            `prevKey=${lastSnapshotKey || "(empty)"}`,
-        );
-        if (snapshotKey === lastSnapshotKey) {
-          stableCount += 1;
-          // Stability is only a valid "run is done" signal when the trailing
-          // entry actually has visible assistant text. A stable toolResult /
-          // thinking-only trailing entry just means the agent is between
-          // tool rounds, doing a model_call — which can take 30+ seconds
-          // even on healthy runs. Returning empty here would mark a still-
-          // active run as completed_no_summary.
-          //
-          // Keep polling on stable-but-empty; the idle-timeout (`idleTimeoutMs`,
-          // typically minutes) is the right signal that the agent has gone
-          // silent without ever writing a visible answer.
-          if (stableCount >= stableThreshold && currentTrailingText.length > 0) {
-            stableTrailingText = currentTrailingText;
-            logDebug(
-              `[poll ${diagId}] exit: stable+text after ${stableCount} polls, text=${stableTrailingText.length} chars`,
-            );
-            return stableTrailingText;
-          }
-        } else {
-          stableCount = 1;
-          lastSnapshotKey = snapshotKey;
-          // Transcript moved — the run is genuinely active. Reset the idle
-          // clock so we don't give up while it's still producing.
-          lastChangeAt = Date.now();
-        }
-      } catch (err) {
-        logDebug("[openclaw-gateway] transcript fallback attempt failed:", (err as Error).message);
+      } else {
+        stableCount = 1;
+        lastSnapshotKey = snapshotKey;
+        // Transcript moved — the run is genuinely active. Reset the idle
+        // clock so we don't give up while it's still producing.
+        lastChangeAt = Date.now();
       }
     }
     // Timeout exhausted without observing stability. Return whatever we last
@@ -594,6 +679,16 @@ export class OpenClawGateway {
   /**
    * Send a message to a session and wait for the final response.
    * Returns the text of the assistant reply.
+   *
+   * Subscribes BEFORE `chat.send` and correlates afterwards. openclaw starts
+   * emitting the run's `agent`/`chat` events the moment it accepts the send,
+   * which can be before the send's response — carrying the runId — gets back
+   * to us; several frames can also arrive in a single socket read and be
+   * dispatched synchronously ahead of any continuation. Registering the
+   * listeners after the send therefore drops whatever landed in that window,
+   * and a dropped terminal `chat` event leaves this promise hanging until
+   * `timeoutMs` — which is what pins a finished job in `running`. Everything
+   * seen before the runId is known is buffered and replayed against it.
    */
   async chat(
     sessionKey: string,
@@ -605,18 +700,11 @@ export class OpenClawGateway {
 
     const idempotencyKey = randomUUID();
 
-    const sendResult = (await this.sendRpc(
-      "chat.send",
-      { sessionKey, message, idempotencyKey },
-      30_000,
-    )) as {
-      runId?: string;
-    };
-    const runId = sendResult?.runId;
-    if (!runId) throw new Error("chat.send did not return a runId");
-
     return new Promise<string>((resolve, reject) => {
       const subId = randomUUID();
+      const agentSubId = randomUUID();
+      let runId: string | undefined;
+      const bufferedFrames: Frame[] = [];
       let accumulated = "";
       // SFR-message-veto: when the agent calls OpenClaw's generic `message`
       // tool, the body it intended for the caller lives in the tool args and
@@ -627,6 +715,8 @@ export class OpenClawGateway {
       // Capture the tool-args text here so we can prefer it as the run_task
       // reply, mirroring services/linear-agent/src/linear-stream.ts.
       let messageToolReply = "";
+      // Track agent stream events for logs + text fallback
+      let agentStreamText = "";
 
       const extractText = (blocks: Array<{ type: string; text?: string; thinking?: string }>) =>
         blocks
@@ -635,21 +725,21 @@ export class OpenClawGateway {
           .join("");
 
       const timer = setTimeout(() => {
-        this.subscribers.delete(subId);
-        this.subscribers.delete(agentSubId);
+        cleanup();
         reject(new Error("OpenClaw task timed out"));
       }, timeoutMs);
 
-      // Track agent stream events for logs + text fallback
-      let agentStreamText = "";
-      const agentSubId = randomUUID();
-      this.subscribers.set(agentSubId, (frame) => {
-        if (frame.type !== "event" || frame.event !== "agent") return;
-        const p = frame.payload as {
-          runId?: string;
-          stream?: string;
-          data?: Record<string, unknown>;
-        };
+      const cleanup = () => {
+        clearTimeout(timer);
+        this.subscribers.delete(subId);
+        this.subscribers.delete(agentSubId);
+      };
+
+      const handleAgentEvent = (p: {
+        runId?: string;
+        stream?: string;
+        data?: Record<string, unknown>;
+      }) => {
         if (p.runId !== runId) return;
 
         if (p.stream === "assistant" && p.data?.text) {
@@ -691,20 +781,16 @@ export class OpenClawGateway {
             });
           }
         }
-      });
+      };
 
-      this.subscribers.set(subId, (frame) => {
-        if (frame.type !== "event" || frame.event !== "chat") return;
-        const payload = frame.payload as ChatEventPayload;
+      const handleChatEvent = (payload: ChatEventPayload) => {
         if (payload.runId !== runId) return;
 
         if (payload.state === "delta") {
           const text = extractText(payload.message?.content ?? []);
           if (text) accumulated = text; // each delta is cumulative, not incremental
         } else if (payload.state === "final") {
-          clearTimeout(timer);
-          this.subscribers.delete(subId);
-          this.subscribers.delete(agentSubId);
+          cleanup();
           const blocks = payload.message?.content ?? [];
           logDebug(
             "[openclaw-gateway] final blocks:",
@@ -740,17 +826,72 @@ export class OpenClawGateway {
             );
           }
         } else if (payload.state === "aborted") {
-          clearTimeout(timer);
-          this.subscribers.delete(subId);
-          this.subscribers.delete(agentSubId);
+          cleanup();
           reject(new Error("OpenClaw task aborted"));
         } else if (payload.state === "error") {
-          clearTimeout(timer);
-          this.subscribers.delete(subId);
-          this.subscribers.delete(agentSubId);
+          cleanup();
           reject(new Error(payload.errorMessage ?? "OpenClaw task error"));
         }
+      };
+
+      const dispatch = (frame: Frame) => {
+        if (frame.event === "agent") {
+          handleAgentEvent(frame.payload as { runId?: string; stream?: string; data?: Record<string, unknown> });
+        } else if (frame.event === "chat") {
+          handleChatEvent(frame.payload as ChatEventPayload);
+        }
+      };
+
+      // Before the runId is known there is nothing to correlate on, so hold
+      // the frames instead of discarding them. The window is one RPC
+      // round-trip; the cap only exists so a stalled/failed send can't grow
+      // this without bound.
+      const buffer = (frame: Frame) => {
+        if (bufferedFrames.length < MAX_PRE_RUNID_FRAMES) bufferedFrames.push(frame);
+      };
+
+      this.subscribers.set(agentSubId, (frame) => {
+        if (frame.type !== "event" || frame.event !== "agent") return;
+        if (runId === undefined) {
+          buffer(frame);
+          return;
+        }
+        handleAgentEvent(frame.payload as { runId?: string; stream?: string; data?: Record<string, unknown> });
       });
+
+      this.subscribers.set(subId, (frame) => {
+        if (frame.type !== "event" || frame.event !== "chat") return;
+        if (runId === undefined) {
+          buffer(frame);
+          return;
+        }
+        handleChatEvent(frame.payload as ChatEventPayload);
+      });
+
+      this.sendRpc("chat.send", { sessionKey, message, idempotencyKey }, 30_000).then(
+        (sendResult) => {
+          const id = (sendResult as { runId?: string } | undefined)?.runId;
+          if (!id) {
+            cleanup();
+            reject(new Error("chat.send did not return a runId"));
+            return;
+          }
+          runId = id;
+          // splice before dispatching: a buffered `final` runs cleanup and
+          // resolves, and nothing should be left queued behind it.
+          const replay = bufferedFrames.splice(0);
+          if (replay.length > 0) {
+            logDebug(
+              `[openclaw-gateway] replaying ${replay.length} frame(s) that arrived before runId ${id}`,
+            );
+          }
+          for (const frame of replay) dispatch(frame);
+        },
+        (err: Error) => {
+          cleanup();
+          reject(err);
+        },
+      );
     });
   }
 }

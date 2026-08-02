@@ -6,7 +6,7 @@ import {
   deriveNextStep,
 } from "./artifacts.ts";
 import { classifyError } from "./errors.ts";
-import { OpenClawGateway } from "./gateway.ts";
+import { OpenClawGateway, type RunObservation } from "./gateway.ts";
 import type { JobStore, PersistedJob } from "./job-store.ts";
 import { projectLogWindow } from "./log-projection.ts";
 import type { CheckMode, ContinuationState, Job, JobSnapshot, JobStatus, LogEntry, NextAction, TaskInput } from "./types.ts";
@@ -42,6 +42,22 @@ const MAX_WAIT_MS = readEnvMs("CLAWCONNECT_CHECK_MAX_WAIT_MS", 120_000);
 // bursts of tool calls (an agent looping through several tool uses in a
 // couple hundred ms) collapse into one wake instead of one per event.
 const COSMETIC_POLL_DEBOUNCE_MS = readEnvMs("CLAWCONNECT_COSMETIC_POLL_DEBOUNCE_MS", 400);
+// How long the live event stream has to be silent before we stop trusting it
+// and go ask upstream what actually happened. Production evidence: a
+// tool-heavy run streams tool/tool-result events normally and then simply
+// stops — the terminal `chat` event never arrives (dropped in a reconnect
+// window, or lost to a cleared gateway buffer) — so chat() stays pending and
+// the job sits in `running` until TIMEOUT_MS turns it into a bogus error.
+// Sized to clear a long model_call between tool rounds, which produces no
+// live events but is not a finished run.
+const RECONCILE_QUIET_MS = readEnvMs("CLAWCONNECT_RECONCILE_QUIET_MS", 120_000);
+// Gap between the two transcript reads a single reconciliation round takes.
+// Long enough that a run still writing will visibly move between them.
+const RECONCILE_SAMPLE_INTERVAL_MS = readEnvMs("CLAWCONNECT_RECONCILE_SAMPLE_INTERVAL_MS", 15_000);
+// Reconciliation rounds without upstream progress before the job is forced
+// terminal. Bounded on purpose: "we can't tell" must still end the job, not
+// leave it running forever. A round that sees upstream advance resets this.
+const RECONCILE_MAX_ROUNDS = 2;
 
 /**
  * Job.logs is authoritative full history — server-retained, never trimmed or
@@ -133,6 +149,14 @@ export class SessionManager {
   private sessions = new Map<string, ContinuationState>();
   /** Every real (non-busy-rejected) jobId ever submitted under a sessionKey, oldest first. Backs get_session(mode:"tasks"). */
   private jobHistoryBySession = new Map<string, string[]>();
+  /**
+   * Live quiet-watchdogs, keyed by jobId. Present only while a job is
+   * `running` with a live chat() still outstanding; cleared the moment the
+   * job goes terminal or chat() settles (after which recoverLateFinalText
+   * owns the job). `rounds` counts consecutive reconciliations that saw no
+   * upstream progress — see RECONCILE_MAX_ROUNDS.
+   */
+  private reconcilers = new Map<string, { timer: ReturnType<typeof setTimeout>; rounds: number }>();
 
   constructor(
     private readonly gateway: OpenClawGateway,
@@ -293,8 +317,33 @@ export class SessionManager {
       })
       .then(
         (reply) => {
-          job.lastEventAt = Date.now();
+          // chat() settled: the live stream answered for itself, so the quiet
+          // watchdog has nothing left to reconcile.
+          this.clearReconciler(jobId);
           const noSummary = !reply || reply === "Stream finished with no response collected.";
+          if (job.status !== "running") {
+            // Reconciliation already finalized this job while chat() was
+            // still pending. A late live reply is only worth acting on when
+            // it carries text the job doesn't have — then it's an upgrade,
+            // never a downgrade of an already-summarized job.
+            if (!noSummary && job.status === "completed_no_summary") {
+              job.lastEventAt = Date.now();
+              job.status = "completed";
+              job.summary = reply;
+              extractPatternsFromSummary(artifacts, reply);
+              this.sessions.set(sessionKey, {
+                sessionKey,
+                lastJobId: jobId,
+                lastSummary: reply.slice(0, 500),
+                artifacts,
+                recommendedNextStep: deriveNextStep(artifacts, job.status),
+              });
+              this.persistActiveJobs();
+              logDebug(`[job ${jobId}] late live final upgraded reconciled job to completed`);
+            }
+            return;
+          }
+          job.lastEventAt = Date.now();
           if (noSummary) {
             // Don't mark the job terminal yet — on long / compaction-heavy
             // runs the agent's real final answer can land minutes after the
@@ -322,6 +371,11 @@ export class SessionManager {
           );
         },
         (err) => {
+          this.clearReconciler(jobId);
+          // A job reconciliation already finished keeps its outcome: chat()
+          // rejecting afterwards is the abandoned live stream timing out, not
+          // new information about the run.
+          if (job.status !== "running") return;
           job.lastEventAt = Date.now();
           job.status = "error";
           job.error = err instanceof Error ? err.message : String(err);
@@ -338,7 +392,155 @@ export class SessionManager {
         },
       );
 
+    this.scheduleReconcile(job, RECONCILE_QUIET_MS);
+
     return job;
+  }
+
+  /**
+   * (Re)arm the quiet-watchdog for a running job. Deliberately not re-armed
+   * per event: the timer re-checks `lastEventAt` when it fires and reschedules
+   * itself for the remaining quiet time, so a busy run costs one timer, not
+   * one per tool call.
+   */
+  private scheduleReconcile(job: Job, delayMs: number): void {
+    if (job.status !== "running") return;
+    const state = this.reconcilers.get(job.jobId);
+    if (state) clearTimeout(state.timer);
+    const timer = setTimeout(() => void this.reconcileQuietRun(job), delayMs);
+    // Never a reason to hold the process open — a pending reconciliation is
+    // always recoverable from the transcript on the next check_task.
+    timer.unref?.();
+    this.reconcilers.set(job.jobId, { timer, rounds: state?.rounds ?? 0 });
+  }
+
+  private clearReconciler(jobId: string): void {
+    const state = this.reconcilers.get(jobId);
+    if (!state) return;
+    clearTimeout(state.timer);
+    this.reconcilers.delete(jobId);
+  }
+
+  /**
+   * The live stream has been silent for RECONCILE_QUIET_MS. Ask upstream what
+   * actually happened and turn the answer into a bounded outcome:
+   *
+   *   upstream still advancing  → stay `running` (and reset the round count)
+   *   upstream settled, has text → `completed` with that text
+   *   upstream settled, no text  → `completed_no_summary` (after MAX_ROUNDS)
+   *   upstream unreadable        → `completed_no_summary` (after MAX_ROUNDS)
+   *
+   * The last two cases are why this exists: a run whose terminal event never
+   * reached us must still end. `maybeRecoverTerminalJob` keeps re-reading the
+   * transcript on later polls, so a text that lands afterwards still upgrades
+   * the job to `completed` — the terminal call here is bounded, not final.
+   */
+  private async reconcileQuietRun(job: Job): Promise<void> {
+    if (job.status !== "running") {
+      this.clearReconciler(job.jobId);
+      return;
+    }
+    // lastEventAt is 0 until the first event on a continued session, so fall
+    // back to startedAt rather than treating the job as infinitely quiet.
+    const quietSinceMs = Date.now() - Math.max(job.lastEventAt, job.startedAt);
+    if (quietSinceMs < RECONCILE_QUIET_MS) {
+      this.scheduleReconcile(job, RECONCILE_QUIET_MS - quietSinceMs);
+      return;
+    }
+
+    const round = (this.reconcilers.get(job.jobId)?.rounds ?? 0) + 1;
+    pushLog(job, {
+      ts: Date.now(),
+      type: "recovery",
+      text:
+        `No live activity for ${Math.round(quietSinceMs / 1000)}s — reconciling against the ` +
+        `upstream transcript (round ${round}/${RECONCILE_MAX_ROUNDS})`,
+    });
+    logDebug(
+      `[job ${job.jobId}] quiet for ${Math.round(quietSinceMs / 1000)}s — reconciling (round ${round})`,
+    );
+
+    let observation: RunObservation;
+    try {
+      observation = await this.gateway.reconcileRun(job.sessionKey, {
+        samples: 2,
+        intervalMs: RECONCILE_SAMPLE_INTERVAL_MS,
+      });
+    } catch (err) {
+      logDebug(
+        `[job ${job.jobId}] reconcile threw: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      observation = { ok: false, changed: false, trailingText: "" };
+    }
+
+    // chat() may have settled while we were sampling — it wins, it saw the
+    // real terminal event.
+    if (job.status !== "running") {
+      this.clearReconciler(job.jobId);
+      return;
+    }
+
+    if (observation.ok && observation.changed) {
+      pushLog(job, {
+        ts: Date.now(),
+        type: "recovery",
+        text: "Upstream transcript is still advancing — the task is still running",
+      });
+      const state = this.reconcilers.get(job.jobId);
+      if (state) state.rounds = 0;
+      this.scheduleReconcile(job, RECONCILE_QUIET_MS);
+      return;
+    }
+
+    if (observation.ok && observation.trailingText) {
+      this.finalizeReconciled(job, "completed", observation.trailingText);
+      return;
+    }
+
+    if (round >= RECONCILE_MAX_ROUNDS) {
+      this.finalizeReconciled(
+        job,
+        "completed_no_summary",
+        observation.ok
+          ? "Stream finished with no response collected."
+          : "Stream ended and the upstream transcript could not be read; completing without a summary.",
+      );
+      return;
+    }
+
+    const state = this.reconcilers.get(job.jobId);
+    if (state) state.rounds = round;
+    this.scheduleReconcile(job, RECONCILE_QUIET_MS);
+  }
+
+  /** Apply a reconciled terminal outcome to a job that the live stream abandoned. */
+  private finalizeReconciled(
+    job: Job,
+    status: "completed" | "completed_no_summary",
+    summary: string,
+  ): void {
+    this.clearReconciler(job.jobId);
+    job.lastEventAt = Date.now();
+    job.status = status;
+    job.summary = summary;
+    if (status === "completed") extractPatternsFromSummary(job.artifacts, summary);
+    pushLog(job, {
+      ts: Date.now(),
+      type: "recovery",
+      text:
+        status === "completed"
+          ? "Recovered the final response from the upstream transcript after the live stream went quiet"
+          : "Upstream shows the run is no longer active and left no visible response",
+    });
+    this.sessions.set(job.sessionKey, {
+      sessionKey: job.sessionKey,
+      lastJobId: job.jobId,
+      lastSummary: summary.slice(0, 500),
+      artifacts: job.artifacts,
+      recommendedNextStep: deriveNextStep(job.artifacts, status),
+    });
+    this.persistActiveJobs();
+    logDebug(`[job ${job.jobId}] reconciled to ${status} (${summary.length} chars)`);
   }
 
   /**

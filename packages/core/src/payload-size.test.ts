@@ -28,6 +28,7 @@ vi.mock("./gateway.ts", () => {
       },
       close() {},
       pollTranscriptForFinalText: () => Promise.resolve(undefined),
+      reconcileRun: () => Promise.resolve({ ok: true, changed: true, trailingText: "" }),
     };
   }
   return { OpenClawGateway: FakeOpenClawGateway };

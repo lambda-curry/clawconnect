@@ -28,10 +28,12 @@ class FakeJobStore implements JobStore {
 function fakeGateway(opts: {
   chat?: (sessionKey: string, message: string, timeoutMs: number) => Promise<string>;
   pollTranscriptForFinalText?: () => Promise<string | undefined>;
+  reconcileRun?: () => Promise<{ ok: boolean; changed: boolean; trailingText: string }>;
 }): OpenClawGateway {
   return {
     chat: opts.chat ?? (() => new Promise<string>(() => {})),
     pollTranscriptForFinalText: opts.pollTranscriptForFinalText ?? (async () => undefined),
+    reconcileRun: opts.reconcileRun ?? (async () => ({ ok: true, changed: true, trailingText: "" })),
   } as unknown as OpenClawGateway;
 }
 

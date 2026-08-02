@@ -9,7 +9,13 @@ import type { OpenClawGateway } from "./gateway.ts";
  * docs/architecture/2026-07-27-multi-client-compatibility.md §7.
  */
 function fakeGateway(chatImpl: (sessionKey: string, message: string, timeoutMs: number) => Promise<string>) {
-  return { chat: chatImpl, close: () => {} } as unknown as OpenClawGateway;
+  return {
+    chat: chatImpl,
+    close: () => {},
+    // Quiet-watchdog surface: "upstream is still advancing", so a job these
+    // fixtures leave running stays running instead of being reconciled.
+    reconcileRun: async () => ({ ok: true, changed: true, trailingText: "" }),
+  } as unknown as OpenClawGateway;
 }
 
 function neverResolvingGateway() {
