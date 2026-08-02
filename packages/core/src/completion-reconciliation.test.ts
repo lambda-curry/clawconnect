@@ -580,6 +580,84 @@ describe("completion reconciliation — the live job 9f21545a shape", () => {
     expect(live.summary).toBe("the real final answer");
   });
 
+  it("still applies an in-flight re-read's correction when chat() rejects while it is reading", async () => {
+    vi.useFakeTimers();
+    // The superseded-while-reading guard must key on the OUTCOME changing, not
+    // on the provisional flag being retired. A chat() that rejects retires the
+    // flag while producing no answer at all, so there is nothing to be
+    // superseded BY — and this read's correction is the best evidence the job
+    // will ever get. Suppressing it here would be permanent.
+    const readGate = deferred<string | undefined>();
+    const { ctrl, sessions, job } = await reconcileToProvisionalCompleted(
+      "an early guess",
+      () => readGate.promise,
+    );
+
+    const polling = sessions.waitForJob(job.jobId, 0, undefined, "wait", 1_000);
+    await vi.advanceTimersByTimeAsync(0);
+    ctrl.failChat(new Error("OpenClaw task timed out"));
+    await vi.advanceTimersByTimeAsync(0);
+
+    readGate.resolve("the corrected final from the transcript");
+    await polling;
+    await vi.advanceTimersByTimeAsync(0);
+    const live = sessions.getJob(job.jobId)!;
+    expect(live.status).toBe("completed");
+    expect(live.summary).toBe("the corrected final from the transcript");
+    expect(live.error).toBeUndefined();
+  });
+
+  it("still applies an in-flight re-read's correction when chat() settles with the sentinel while it is reading", async () => {
+    vi.useFakeTimers();
+    // Same rule, the other empty settlement: the sentinel carries no answer,
+    // so it supersedes nothing and must not suppress the read.
+    const readGate = deferred<string | undefined>();
+    const { ctrl, sessions, job } = await reconcileToProvisionalCompleted(
+      "an early guess",
+      () => readGate.promise,
+    );
+
+    const polling = sessions.waitForJob(job.jobId, 0, undefined, "wait", 1_000);
+    await vi.advanceTimersByTimeAsync(0);
+    ctrl.finishChat(SENTINEL);
+    await vi.advanceTimersByTimeAsync(0);
+
+    readGate.resolve("the corrected final from the transcript");
+    await polling;
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sessions.getJob(job.jobId)?.summary).toBe("the corrected final from the transcript");
+  });
+
+  it("never lets an older overlapping re-read clobber a newer one that already landed", async () => {
+    vi.useFakeTimers();
+    // Two re-reads can genuinely overlap: the cooldown is 20s but a read can
+    // run ~35s (four attempts, each with its own 20s RPC timeout). Whichever
+    // STARTED first is the older observation and must lose, regardless of
+    // which resolves last.
+    const firstRead = deferred<string | undefined>();
+    const secondRead = deferred<string | undefined>();
+    let reads = 0;
+    const { sessions, job } = await reconcileToProvisionalCompleted("an early guess", () =>
+      ++reads === 1 ? firstRead.promise : secondRead.promise,
+    );
+
+    const pollingA = sessions.waitForJob(job.jobId, 0, undefined, "wait", 1_000);
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(21_000); // past the recheck cooldown
+    const pollingB = sessions.waitForJob(job.jobId, 0, undefined, "wait", 1_000);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(reads).toBe(2);
+
+    secondRead.resolve("the newer, complete answer");
+    await pollingB;
+    await vi.advanceTimersByTimeAsync(0);
+    firstRead.resolve("older partial text");
+    await pollingA;
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(sessions.getJob(job.jobId)?.summary).toBe("the newer, complete answer");
+  });
+
   it("still lets a later real live final replace an outcome a transcript re-read already corrected", async () => {
     vi.useFakeTimers();
     // Reviewer blocker D1. The re-read is itself an inference; the live final

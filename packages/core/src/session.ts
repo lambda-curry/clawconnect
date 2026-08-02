@@ -924,11 +924,14 @@ export class SessionManager {
     const last = job.lastRecheckAt ?? 0;
     if (Date.now() - last < RECHECK_COOLDOWN_MS) return;
     job.lastRecheckAt = Date.now();
-    // Captured before the read, which takes seconds. chat()'s handlers are the
-    // ONLY things that remove a job from provisionalOutcomes, so losing this
-    // membership across the await is an exact signal that the live stream
-    // settled while we were reading.
-    const provisionalAtStart = this.provisionalOutcomes.has(job.jobId);
+    // Captured before the read, which takes seconds. While a job is terminal
+    // its outcome is written by exactly two things: chat()'s late-final
+    // replacement, and another round of this same method. Either one means
+    // somebody newer has already answered, so comparing the VALUE afterwards
+    // is an exact "was I superseded while reading?" test — and unlike a flag,
+    // it does not fire when chat() settles carrying nothing to supersede with.
+    const summaryAtStart = job.summary;
+    const statusAtStart = job.status;
     let recovered: string | undefined;
     try {
       recovered = await this.gateway.pollTranscriptForFinalText(job.sessionKey, {
@@ -949,14 +952,19 @@ export class SessionManager {
     // The poll above takes seconds, so re-check ownership: a new job may have
     // claimed the session while it ran.
     if (this.latestJobBySession.get(job.sessionKey) !== job.jobId) return;
-    // ...and chat() may have settled while it ran. This read was already in
-    // flight when that happened, so it describes a transcript from before the
-    // run delivered its terminal text — a strictly older inference than the
-    // answer now on the job. Writing it back would not just be wrong, it would
-    // be PERMANENT: chat() settling already retired the provisional flag, so
-    // nothing can replace the summary again and no later poll re-reads it.
-    if (provisionalAtStart && !this.provisionalOutcomes.has(job.jobId)) {
-      logDebug(`[job ${job.jobId}] lazy-recheck superseded by the live final — discarding the stale read`);
+    // ...and the outcome itself may have been rewritten while it ran — by the
+    // run's own live final, or by a longer-running sibling re-read. This read
+    // was already in flight when that happened, so it is the strictly older
+    // observation and must lose. Writing it back would also be PERMANENT
+    // against a live final: chat() settling retires the provisional flag, so
+    // nothing replaces the summary again and no later poll re-reads it.
+    //
+    // Deliberately compares the value, not provisional membership. A chat()
+    // that settles by rejecting, or with the no-summary sentinel, retires that
+    // flag while writing no answer at all — and this read's correction is then
+    // the best evidence available, so it must still be allowed to land.
+    if (job.summary !== summaryAtStart || job.status !== statusAtStart) {
+      logDebug(`[job ${job.jobId}] lazy-recheck superseded while reading — discarding the stale read`);
       return;
     }
     // Did this read actually heal anything? Either it brought text the job
