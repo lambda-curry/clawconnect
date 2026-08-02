@@ -167,6 +167,13 @@ export class SessionManager {
       timer: ReturnType<typeof setTimeout>;
       /** Consecutive quiet rounds that saw no upstream progress — see RECONCILE_MAX_ROUNDS. Reset by live activity. */
       rounds: number;
+      /**
+       * Bumped on every live event. A reconciliation round captures it before
+       * awaiting and compares afterwards, so activity that lands mid-round is
+       * detected. A timestamp cannot do this job: several tool events
+       * routinely land in the same millisecond.
+       */
+      activityGeneration: number;
       /** Trailing assistant text from the previous quiet round; a repeat of it is what promotes a run to `completed`. */
       candidateText: string;
       /** Transcript snapshot key from the previous quiet round, for detecting progress BETWEEN rounds. */
@@ -441,7 +448,13 @@ export class SessionManager {
       state.timer = timer;
       return;
     }
-    this.reconcilers.set(job.jobId, { timer, rounds: 0, candidateText: "", snapshotKey: "" });
+    this.reconcilers.set(job.jobId, {
+      timer,
+      rounds: 0,
+      activityGeneration: 0,
+      candidateText: "",
+      snapshotKey: "",
+    });
   }
 
   /**
@@ -456,6 +469,9 @@ export class SessionManager {
     state.rounds = 0;
     state.candidateText = "";
     state.snapshotKey = "";
+    // Invalidates any round currently awaiting a transcript read, which
+    // captured this value before it changed.
+    state.activityGeneration += 1;
   }
 
   private clearReconciler(jobId: string): void {
@@ -496,16 +512,20 @@ export class SessionManager {
       return;
     }
 
-    const round = owner.rounds + 1;
+    // Only for the log line — the round that actually decides anything is
+    // recomputed after the await, once mid-round activity has been ruled out.
+    const attemptedRound = owner.rounds + 1;
+    // Captured before anything can await, alongside the ownership token.
+    const activityGenerationAtStart = owner.activityGeneration;
     pushLog(job, {
       ts: Date.now(),
       type: "recovery",
       text:
         `No live activity for ${Math.round(quietSinceMs / 1000)}s — reconciling against the ` +
-        `upstream transcript (round ${round}/${RECONCILE_MAX_ROUNDS})`,
+        `upstream transcript (round ${attemptedRound}/${RECONCILE_MAX_ROUNDS})`,
     });
     logDebug(
-      `[job ${job.jobId}] quiet for ${Math.round(quietSinceMs / 1000)}s — reconciling (round ${round})`,
+      `[job ${job.jobId}] quiet for ${Math.round(quietSinceMs / 1000)}s — reconciling (round ${attemptedRound})`,
     );
 
     let observation: RunObservation;
@@ -532,6 +552,25 @@ export class SessionManager {
       this.clearReconciler(job.jobId);
       return;
     }
+
+    // A live event during the read is proof the run is alive, and it already
+    // reset the round count — but this round captured its round number
+    // before that happened. Acting on it would let a stale count reach the
+    // cap and mark a demonstrably live job terminal, freeing the
+    // busy-session guard out from under a run that is still going.
+    if (owner.activityGeneration !== activityGenerationAtStart) {
+      pushLog(job, {
+        ts: Date.now(),
+        type: "recovery",
+        text: "Live activity arrived while reconciling — the task is still running",
+      });
+      logDebug(`[job ${job.jobId}] reconcile round superseded by live activity — rescheduling`);
+      this.scheduleReconcile(job, RECONCILE_QUIET_MS);
+      return;
+    }
+
+    // Recomputed now that the observation is known to be current.
+    const round = owner.rounds + 1;
 
     // Progress means "moved at any point since the last round", not just
     // "moved between this round's two samples": a run that advances one tool

@@ -374,6 +374,42 @@ describe("completion reconciliation — handing the job off safely", () => {
     expect(live.summary).toBe("the recovered answer");
   });
 
+  it("a round that overlaps live activity is stale — it must not finalize a demonstrably live run", async () => {
+    vi.useFakeTimers();
+    const gate = deferred<RunObservation>();
+    // Round 1 banks a quiet round; round 2 is the one that would reach the
+    // cap — and it is blocked when the run proves it is still alive.
+    const ctrl = fakeGateway({ observations: [settled(""), () => gate.promise] });
+    const sessions = new SessionManager(ctrl.gateway);
+    const job = sessions.submitTask({ task: "tool-heavy job" });
+    ctrl.emit(toolEvent);
+
+    await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
+    expect(sessions.getJob(job.jobId)?.status).toBe("running");
+
+    await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
+    expect(ctrl.reconcileCalls).toHaveLength(2);
+
+    // Live event lands while the transcript read is still in flight, after
+    // the round already captured its round number.
+    ctrl.emit(toolEvent);
+
+    // The now-stale observation comes back with a verdict that, taken at
+    // face value, reaches the round cap.
+    gate.resolve(settled(""));
+    await vi.advanceTimersByTimeAsync(0);
+
+    const live = sessions.getJob(job.jobId)!;
+    expect(live.status).toBe("running");
+    expect(live.summary).toBeUndefined();
+
+    // ...and the busy-session guard is still held, so nothing can collide
+    // with the run that is genuinely still going.
+    const colliding = sessions.submitTask({ task: "colliding ask", sessionKey: job.sessionKey });
+    expect(colliding.status).toBe("error");
+    expect(colliding.errorInfo?.message).toBe("session busy");
+  });
+
   it("a late live final upgrades a reconciled completed_no_summary", async () => {
     vi.useFakeTimers();
     const ctrl = fakeGateway({ observations: [settled("")] });
