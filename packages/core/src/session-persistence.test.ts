@@ -168,3 +168,38 @@ describe("SessionManager restart persistence", () => {
     expect(sessions.getJobHistory(persistedRunning.sessionKey).map((j) => j.jobId)).toEqual([persistedRunning.jobId]);
   });
 });
+
+describe("SessionManager rehydration — a store with two entries on one session", () => {
+  it("does not let the superseded job adopt the newer run's answer", async () => {
+    // rehydrateFromStore registers every persisted job as its session's latest
+    // in file order and starts a recovery poll for each, so two entries sharing
+    // a sessionKey leave the FIRST job `running` while the SECOND owns the
+    // session — both polling the same transcript. Without the ownership check
+    // in recoverLateFinalText's continuation, the older job adopts the newer
+    // run's answer and repoints the session at itself.
+    //
+    // The live writer cannot produce a duplicate (busy guard + whole-file
+    // overwrite), but load() does no validation beyond Array.isArray, so a
+    // hand-edited, legacy or truncated store file can. This is why the check
+    // is defensive rather than dead.
+    const sessionKey = "agent:main:main:thread:shared";
+    const store = new FakeJobStore([
+      { jobId: "job-a", sessionKey, startedAt: 1_000, lastEventAt: 2_000, pollCount: 0, prompt: { task: "older" } },
+      { jobId: "job-b", sessionKey, startedAt: 3_000, lastEventAt: 4_000, pollCount: 0, prompt: { task: "newer" } },
+    ]);
+    const sessions = new SessionManager(
+      fakeGateway({ pollTranscriptForFinalText: async () => "text belonging to the newer run" }),
+      "main",
+      store,
+    );
+    await new Promise((r) => setTimeout(r, 20));
+
+    // job-b owns the session and may claim the transcript.
+    expect(sessions.resolveJob("job-b")?.status).toBe("completed");
+    expect(sessions.resolveJob("job-b")?.summary).toBe("text belonging to the newer run");
+    // job-a does not own it, so it must not.
+    expect(sessions.resolveJob("job-a")?.status).toBe("running");
+    expect(sessions.resolveJob("job-a")?.summary).toBeUndefined();
+    expect(sessions.getSessionState(sessionKey)?.lastJobId).toBe("job-b");
+  });
+});

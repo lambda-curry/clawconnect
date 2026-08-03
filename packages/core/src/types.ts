@@ -57,6 +57,15 @@ export type JobRecoveryState = {
 };
 
 /**
+ * What `chat()` resolves with when a run ended without producing visible text,
+ * and the summary such a job carries. Lives here — not in gateway.ts, which
+ * produces it, nor session.ts, which tests for it — because two copies would
+ * let a change on one side silently break the comparison on the other, and
+ * because gateway.ts is mocked wholesale by several test files.
+ */
+export const NO_SUMMARY_SENTINEL = "Stream finished with no response collected.";
+
+/**
  * The original submitted task, stored so it can be retrieved later (e.g. for
  * diagnostics or "what did I actually ask for" recall). Deliberately never
  * included in JobSnapshot / telemetry — only exposed through the dedicated

@@ -1,7 +1,8 @@
+import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { RECONCILE_QUIET_MS, SessionManager } from "./session.ts";
 import type { OpenClawGateway, RunObservation } from "./gateway.ts";
-import type { GatewayEvent } from "./types.ts";
+import { NO_SUMMARY_SENTINEL, type GatewayEvent } from "./types.ts";
 
 /**
  * Bounded completion reconciliation: what happens to a job whose live chat
@@ -130,7 +131,9 @@ const emitToolRound = (ctrl: ReturnType<typeof fakeGateway>) => {
   ctrl.emit(toolEvent);
   ctrl.emit(toolResultEvent);
 };
-const SENTINEL = "Stream finished with no response collected.";
+// The real constant, not a copy — so a change to it fails here rather than
+// silently decoupling the fixtures from what the connector actually emits.
+const SENTINEL = NO_SUMMARY_SENTINEL;
 
 afterEach(() => {
   vi.useRealTimers();
@@ -672,6 +675,28 @@ describe("completion reconciliation — the live job 9f21545a shape", () => {
     expect(reads).toBe(2);
   });
 
+  it("clears the in-flight flag when the read throws, so the job can still be re-read", async () => {
+    vi.useFakeTimers();
+    // The flag is reset in a `finally` precisely so a throwing read cannot
+    // strand it. Without that, one transient chat.history failure would wedge
+    // the job out of ever being re-read again — permanently, and silently.
+    let reads = 0;
+    const { sessions, job } = await reconcileToProvisionalCompleted("an early guess", async () => {
+      reads += 1;
+      if (reads === 1) throw new Error("chat.history blew up");
+      return "the recovered answer";
+    });
+
+    await sessions.waitForJob(job.jobId, 0, undefined, "wait", 1_000);
+    expect(reads).toBe(1);
+    expect(sessions.getJob(job.jobId)?.summary).toBe("an early guess");
+
+    await vi.advanceTimersByTimeAsync(21_000); // past the recheck cooldown
+    await sessions.waitForJob(job.jobId, 0, undefined, "wait", 1_000);
+    expect(reads).toBe(2);
+    expect(sessions.getJob(job.jobId)?.summary).toBe("the recovered answer");
+  });
+
   it("discards a stale read even when the live final carried byte-identical text", async () => {
     vi.useFakeTimers();
     // The version counter exists for exactly this: comparing summary values
@@ -1038,5 +1063,32 @@ describe("completion reconciliation — caller-visible effects", () => {
     const next = sessions.submitTask({ task: "third ask", sessionKey });
     expect(next.status).toBe("running");
     expect(next.errorInfo).toBeUndefined();
+  });
+});
+
+describe("completion reconciliation — the one-writer invariant is enforced, not remembered", () => {
+  it("nothing outside setOutcome assigns a job's outcome fields", () => {
+    // The version guard in maybeRecoverTerminalJob is only sound if EVERY
+    // outcome write bumps the version, and the only thing that bumps it is
+    // setOutcome. A stray `job.status = ...` added later would silently punch
+    // a hole in that guard and no behavioural test would notice — the race it
+    // protects against needs precise interleaving to reproduce.
+    //
+    // So assert it structurally. Object-literal construction (`status: "..."`)
+    // is deliberately not matched: those build a fresh Job, they don't rewrite
+    // a live one's outcome.
+    const source = readFileSync(new URL("./session.ts", import.meta.url), "utf8");
+    const start = source.indexOf("private setOutcome(");
+    expect(start).toBeGreaterThan(-1);
+    const end = source.indexOf("\n  }\n", start);
+    expect(end).toBeGreaterThan(start);
+    const outside = (source.slice(0, start) + source.slice(end))
+      // Comments legitimately mention these assignments; only code counts.
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/\/\/.*$/gm, "");
+    const strays = [...outside.matchAll(/\bjob\.(status|summary|error|errorInfo)\s*=(?!=)/g)].map(
+      (m) => m[0],
+    );
+    expect(strays).toEqual([]);
   });
 });

@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import WebSocket from "ws";
-import type { GatewayConfig, GatewayEvent } from "./types.ts";
+import { NO_SUMMARY_SENTINEL, type GatewayConfig, type GatewayEvent } from "./types.ts";
 
 function logDebug(message: string, ...args: unknown[]): void {
   console.error(message, ...args);
@@ -902,8 +902,8 @@ export class OpenClawGateway {
             logDebug("[openclaw-gateway] no live final text — trying transcript fallback");
             this.fetchTranscriptFinalText(sessionKey).then(
               (transcriptText) =>
-                resolve(transcriptText || "Stream finished with no response collected."),
-              () => resolve("Stream finished with no response collected."),
+                resolve(transcriptText || NO_SUMMARY_SENTINEL),
+              () => resolve(NO_SUMMARY_SENTINEL),
             );
           }
         } else if (payload.state === "aborted") {

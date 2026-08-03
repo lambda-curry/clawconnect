@@ -9,7 +9,7 @@ import { classifyError } from "./errors.ts";
 import { OpenClawGateway, type RunObservation } from "./gateway.ts";
 import type { JobStore, PersistedJob } from "./job-store.ts";
 import { projectLogWindow } from "./log-projection.ts";
-import type { CheckMode, ContinuationState, GatewayEvent, Job, JobSnapshot, JobStatus, LogEntry, NextAction, TaskInput } from "./types.ts";
+import { NO_SUMMARY_SENTINEL, type CheckMode, type ContinuationState, type GatewayEvent, type Job, type JobSnapshot, type JobStatus, type LogEntry, type NextAction, type TaskInput } from "./types.ts";
 
 function readEnvMs(name: string, fallbackMs: number): number {
   const raw = process.env[name];
@@ -54,10 +54,6 @@ export const RECONCILE_QUIET_MS = readEnvMs("CLAWCONNECT_RECONCILE_QUIET_MS", 12
 // Gap between the two transcript reads a single reconciliation round takes.
 // Long enough that a run still writing will visibly move between them.
 const RECONCILE_SAMPLE_INTERVAL_MS = readEnvMs("CLAWCONNECT_RECONCILE_SAMPLE_INTERVAL_MS", 15_000);
-// The summary a job carries when its run ended without producing visible
-// text. Also the exact string chat() resolves with in that case, which is how
-// the live stream reports "finished, nothing to say".
-const NO_SUMMARY_SENTINEL = "Stream finished with no response collected.";
 
 /**
  * Job.logs is authoritative full history — server-retained, never trimmed or
@@ -467,18 +463,17 @@ export class SessionManager {
             return;
           }
           job.lastEventAt = Date.now();
-          this.setOutcome(job, "error", undefined);
-          job.error = err instanceof Error ? err.message : String(err);
-          job.errorInfo = classifyError(job.error);
+          const message = err instanceof Error ? err.message : String(err);
+          this.setOutcome(job, "error", undefined, message);
           this.sessions.set(sessionKey, {
             sessionKey,
             lastJobId: jobId,
-            lastSummary: job.error,
+            lastSummary: message,
             artifacts,
             recommendedNextStep: deriveNextStep(artifacts, "error"),
           });
           this.persistActiveJobs();
-          logDebug(`[job ${jobId}] error (${job.errorInfo.category}): ${job.error}`);
+          logDebug(`[job ${jobId}] error (${classifyError(message).category}): ${message}`);
         },
       );
 
@@ -833,10 +828,12 @@ export class SessionManager {
       .then(
         (recovered) => {
           if (job.status !== "running") return;
-          // Same ownership check its two siblings make before touching
-          // continuation state. Unreachable while the busy guard holds (a
-          // `running` job is necessarily its session's latest), so it is
-          // uniformity rather than a live fix — and untested for that reason.
+          // Same ownership check its two siblings make. Reachable: a job
+          // store carrying two entries for one sessionKey makes both jobs
+          // `running` with only the later one owning the session, and this
+          // poll then adopts the newer run's answer for the older job. The
+          // live writer cannot produce that (busy guard + whole-file
+          // overwrite), but a hand-edited, legacy or truncated store can.
           if (this.latestJobBySession.get(sessionKey) !== jobId) return;
           job.lastEventAt = Date.now();
           if (recovered && recovered.length > 0) {
@@ -904,9 +901,16 @@ export class SessionManager {
    * "an outcome write is a version bump"; enforcing it by construction is why
    * this exists rather than a comment asking future callers to remember.
    */
-  private setOutcome(job: Job, status: JobStatus, summary: string | undefined): void {
+  private setOutcome(
+    job: Job,
+    status: JobStatus,
+    summary: string | undefined,
+    error?: string,
+  ): void {
     job.status = status;
     job.summary = summary;
+    job.error = error;
+    job.errorInfo = error === undefined ? undefined : classifyError(error);
     job.outcomeVersion = (job.outcomeVersion ?? 0) + 1;
   }
 
@@ -1004,8 +1008,6 @@ export class SessionManager {
     if (healed) this.recheckSettled.add(job.jobId);
     job.lastEventAt = Date.now();
     this.setOutcome(job, "completed", recovered);
-    job.error = undefined;
-    job.errorInfo = undefined;
     extractPatternsFromSummary(job.artifacts, recovered);
     this.sessions.set(job.sessionKey, {
       sessionKey: job.sessionKey,
