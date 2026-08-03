@@ -1070,25 +1070,38 @@ describe("completion reconciliation — the one-writer invariant is enforced, no
   it("nothing outside setOutcome assigns a job's outcome fields", () => {
     // The version guard in maybeRecoverTerminalJob is only sound if EVERY
     // outcome write bumps the version, and the only thing that bumps it is
-    // setOutcome. A stray `job.status = ...` added later would silently punch
-    // a hole in that guard and no behavioural test would notice — the race it
-    // protects against needs precise interleaving to reproduce.
+    // setOutcome. A stray write added later would silently punch a hole in
+    // that guard and no behavioural test would notice — the race it protects
+    // against needs precise interleaving to reproduce. So assert it
+    // structurally.
     //
-    // So assert it structurally. Object-literal construction (`status: "..."`)
-    // is deliberately not matched: those build a fresh Job, they don't rewrite
-    // a live one's outcome.
+    // What this deliberately does NOT catch, so nobody mistakes it for proof:
+    // Object.assign(job, …), computed access job["status"], and writes in
+    // other files. Catching those needs a real parse; this is a tripwire for
+    // the ordinary case, not a proof of the invariant.
     const source = readFileSync(new URL("./session.ts", import.meta.url), "utf8");
     const start = source.indexOf("private setOutcome(");
     expect(start).toBeGreaterThan(-1);
     const end = source.indexOf("\n  }\n", start);
     expect(end).toBeGreaterThan(start);
-    const outside = (source.slice(0, start) + source.slice(end))
-      // Comments legitimately mention these assignments; only code counts.
+    const code = (source.slice(0, start) + source.slice(end))
+      // Strings BEFORE comments: a "//" inside a URL literal, or a "/*" inside
+      // a string, would otherwise blank out real code after it and hide a
+      // stray write. Order matters here and is the reason this is spelled out.
+      .replace(/`(?:[^`\\]|\\.)*`/g, '""')
+      .replace(/'(?:[^'\\\n]|\\.)*'/g, '""')
+      .replace(/"(?:[^"\\\n]|\\.)*"/g, '""')
       .replace(/\/\*[\s\S]*?\*\//g, "")
       .replace(/\/\/.*$/gm, "");
-    const strays = [...outside.matchAll(/\bjob\.(status|summary|error|errorInfo)\s*=(?!=)/g)].map(
-      (m) => m[0],
-    );
+    // Any receiver, not just `job` — an alias (`const j = job; j.status = …`)
+    // punches the same hole. Compound forms (??=, ||=, +=) too.
+    const strays = code
+      .split("\n")
+      .map((line, i) => ({ line: line.trim(), n: i + 1 }))
+      .filter(({ line }) =>
+        /[\w$)\]]\s*\.\s*(status|summary|error|errorInfo)\s*(\?\?|\|\||&&|\+|-)?=(?!=)/.test(line),
+      )
+      .map(({ line, n }) => `line ${n}: ${line}`);
     expect(strays).toEqual([]);
   });
 });

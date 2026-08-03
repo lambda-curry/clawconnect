@@ -74,6 +74,15 @@ describe("classifyUpstreamRun — liveness only, never a termination receipt", (
     expect(classifyUpstreamRun({ hasActiveRun: true, activeRunIds: [RUN] }, RUN)).toBe("active");
   });
 
+  it("reports active when our runId is listed even though the latch has been cleared", () => {
+    // The one input the runId-correlation clause alone decides. Every other
+    // `active` fixture also sets hasActiveRun:true, which masks it — deleting
+    // the clause used to leave the whole suite green. hasActiveRun is a latch
+    // cleared by any per-attempt lifecycle end, so this is exactly the
+    // mid-run shape: the flag is stale, our run is still named.
+    expect(classifyUpstreamRun({ hasActiveRun: false, activeRunIds: [RUN] }, RUN)).toBe("active");
+  });
+
   it("reports active whenever upstream claims any run, named or not", () => {
     // activeRunIds omits queued turns, hidden runs, and restart-redispatched
     // runs by design, so a run of ours can be live yet unnamed.
