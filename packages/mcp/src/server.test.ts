@@ -3,6 +3,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import { createMcpServer, defaultFormatCheckTask } from "./server.ts";
+import { AgentSessionRuntimeRegistry } from "@clawconnect/core";
 import type { AgentRegistry, CheckTaskResult, FleetAdapter, JobSnapshot } from "@clawconnect/core";
 
 /**
@@ -290,5 +291,22 @@ describe("production entrypoint wiring — FleetAdapter", () => {
     const fake: FleetAdapter = { isLive: async () => false, readTerminalHandoff: async () => null };
     const { pool } = createMcpServer({ registry: fakeRegistry(), fleetAdapter: fake });
     expect(pool.forAgent("test-agent").sessions.hasFleetAdapter()).toBe(true);
+  });
+
+  /**
+   * Same failure mode, one layer up: a registered runtime nothing can
+   * dispatch to looks exactly like a working integration until a delegation
+   * needs it.
+   */
+  it("createMcpServer passes a host's agent-session runtime registry through to every agent", () => {
+    const runtimes = new AgentSessionRuntimeRegistry();
+    runtimes.register({ id: "t3-fleet", provider: "anthropic-claude-code", inspect: async () => ({ state: "running" }) });
+    const { pool } = createMcpServer({ registry: fakeRegistry(), agentSessionRuntimes: runtimes });
+    expect(pool.forAgent("test-agent").sessions.hasAgentSessionRuntime("t3-fleet")).toBe(true);
+  });
+
+  it("createMcpServer leaves claude-fleet the only reachable runtime when no registry is supplied", () => {
+    const { pool } = createMcpServer({ registry: fakeRegistry() });
+    expect(pool.forAgent("test-agent").sessions.hasAgentSessionRuntime("t3-fleet")).toBe(false);
   });
 });

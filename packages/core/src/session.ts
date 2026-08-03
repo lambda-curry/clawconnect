@@ -6,9 +6,20 @@ import {
   deriveNextStep,
 } from "./artifacts.ts";
 import { classifyError } from "./errors.ts";
-import type { FleetAdapter, FleetHandoff } from "./fleet-adapter.ts";
+import {
+  dispatchAgentSession,
+  isBlockedAgentSessionState,
+  isCompletedTurnState,
+  normalizeAgentSessionObservation,
+  type AgentSessionRef,
+  type AgentSessionRequest,
+  type AgentSessionRuntime,
+  type AgentSessionRuntimeRegistry,
+  type AgentSessionStatus,
+} from "./agent-session.ts";
+import { CLAUDE_FLEET_RUNTIME_ID, fleetAdapterRuntime, type FleetAdapter } from "./fleet-adapter.ts";
 import type { FleetAttachmentStore } from "./fleet-attachment-store.ts";
-import { parseFleetDirective } from "./fleet-handoff.ts";
+import { parseSessionHandoff } from "./fleet-handoff.ts";
 import { OpenClawGateway, type RunObservation } from "./gateway.ts";
 import type { JobStore, PersistedJob } from "./job-store.ts";
 import { projectLogWindow } from "./log-projection.ts";
@@ -80,6 +91,18 @@ const RECONCILE_SAMPLE_INTERVAL_MS = readEnvMs("CLAWCONNECT_RECONCILE_SAMPLE_INT
 // capped (matches the existing, unbounded convention for every other
 // terminal path in this file).
 export const FLEET_RESULT_SUMMARY_MAX = 2_000;
+
+function capResultText(text: string): string {
+  return text.length > FLEET_RESULT_SUMMARY_MAX ? `${text.slice(0, FLEET_RESULT_SUMMARY_MAX - 1)}…` : text;
+}
+
+/**
+ * The durable pointer stored alongside a capped result, so the full text stays
+ * re-derivable from the runtime rather than duplicated unbounded here.
+ */
+function attachmentOutputRef(record: FleetAttachmentRecord): string {
+  return record.worktree ? `${record.handle}:${record.worktree}` : record.handle;
+}
 
 /**
  * Job.logs is authoritative full history — server-retained, never trimmed or
@@ -272,6 +295,13 @@ export class SessionManager {
    * docs/architecture/2026-08-02-managed-fleet-attachment-plan.md.
    */
   private fleetAttachments = new Map<string, SessionFleetState>();
+  /**
+   * Source of the monotonic write token stamped on every runtime observation.
+   * A dispatch takes one BEFORE calling out; the write-back refuses anything
+   * that isn't strictly newer than what the record already carries — see
+   * FleetAttachmentRecord.observationToken.
+   */
+  private observationSeq = 0;
 
   constructor(
     private readonly gateway: OpenClawGateway,
@@ -279,6 +309,7 @@ export class SessionManager {
     private readonly store?: JobStore,
     private readonly fleetStore?: FleetAttachmentStore,
     private readonly fleetAdapter?: FleetAdapter,
+    private readonly runtimes?: AgentSessionRuntimeRegistry,
   ) {
     if (store) this.rehydrateFromStore(store);
     if (fleetStore) this.rehydrateFleetFromStore(fleetStore);
@@ -381,6 +412,156 @@ export class SessionManager {
     return this.fleetAdapter !== undefined;
   }
 
+  /** True when a host registered callbacks for `runtimeId`. Wiring assertion only — it exposes no sessions. */
+  hasAgentSessionRuntime(runtimeId: string): boolean {
+    return this.runtimes?.has(runtimeId) === true;
+  }
+
+  /**
+   * The neutral view of one attachment handed to a runtime callback —
+   * deliberately not the record itself, so a host never sees ClawConnect's
+   * lineage ids, delegated turn tokens, or stored results. Lineage statuses
+   * ("superseded"/"detached") are not part of the neutral vocabulary and are
+   * dropped rather than reported as a session state a runtime should reason
+   * about.
+   */
+  private agentSessionRef(record: FleetAttachmentRecord): AgentSessionRef {
+    const lastKnownState =
+      record.status === "superseded" || record.status === "detached" ? undefined : record.status;
+    return {
+      runtime: record.runtime,
+      provider: record.provider,
+      sessionId: record.handle,
+      providerSessionId: record.providerSessionId,
+      host: record.host,
+      remoteUrl: record.remoteUrl,
+      metadata: record.metadata,
+      lastKnownState,
+    };
+  }
+
+  /**
+   * Which runtime answers for this record: a host-registered one if there is
+   * one, otherwise the built-in claude-fleet adapter presented through the
+   * same seam. A host that registers "claude-fleet" itself deliberately wins —
+   * a host driving Fleet through its own transport knows more than a local
+   * tmux probe does.
+   *
+   * A map lookup on ONE id. There is no path from here to a runtime's session
+   * list, because the callback seam defines no such callback.
+   */
+  private resolveRuntime(record: FleetAttachmentRecord): AgentSessionRuntime | undefined {
+    const registered = this.runtimes?.get(record.runtime);
+    if (registered) return registered;
+    if (record.runtime === CLAUDE_FLEET_RUNTIME_ID && this.fleetAdapter) {
+      return fleetAdapterRuntime(this.fleetAdapter, record);
+    }
+    return undefined;
+  }
+
+  /**
+   * Run ONE operation against this conversation's ONE current attachment and
+   * fold the answer back into the record.
+   *
+   * Returns the runtime's answer even when the write-back is refused: the
+   * caller asked a question and the answer is still the answer, but a stale
+   * answer is never allowed to become durable state (see
+   * applyAgentSessionStatus). Returns undefined only when there is nothing
+   * attached — there is no branch here that looks at any other session.
+   */
+  async runAgentSessionOp(sessionKey: string, request: AgentSessionRequest): Promise<AgentSessionStatus | undefined> {
+    const record = this.getFleetAttachment(sessionKey);
+    if (!record) return undefined;
+    const token = ++this.observationSeq;
+    const attachmentId = record.id;
+    const delegatedTurnId = record.delegatedTurnId;
+    const status = await dispatchAgentSession(this.resolveRuntime(record), this.agentSessionRef(record), request, {
+      now: Date.now(),
+    });
+    this.applyAgentSessionStatus(sessionKey, attachmentId, delegatedTurnId, token, status);
+    return status;
+  }
+
+  /**
+   * The one guarded write-back for everything a runtime reports. Three
+   * independent checks, each closing a different way a slow answer can be
+   * wrong by the time it lands:
+   *
+   *   - identity: the attachment must still be this conversation's CURRENT one
+   *     (a detach or replace during the call invalidates the answer);
+   *   - delegation: it must still be delegated to the same parent turn, so a
+   *     read started for one turn cannot write state a later turn owns;
+   *   - token: no NEWER observation may already have been written, so two
+   *     reads of the same attachment on the same turn can't finish out of
+   *     order and roll the record back.
+   *
+   * A read that failed teaches nothing about the SESSION, only about our
+   * ability to ask — so it records `error` and touches nothing else. That is
+   * what keeps a stored "needs_input" from being erased by a service outage.
+   */
+  private applyAgentSessionStatus(
+    sessionKey: string,
+    attachmentId: string,
+    delegatedTurnId: string | undefined,
+    token: number,
+    status: AgentSessionStatus,
+  ): boolean {
+    const fresh = this.getCurrentFleetAttachmentIfUnchanged(sessionKey, attachmentId);
+    if (!fresh) return false;
+    if (fresh.delegatedTurnId !== delegatedTurnId) return false;
+    if (token <= (fresh.observationToken ?? 0)) return false;
+
+    const now = Date.now();
+    if (status.error) {
+      this.writeFleetAttachment(sessionKey, attachmentId, {
+        observationToken: token,
+        error: status.error,
+        lastObservedAt: now,
+      });
+      return true;
+    }
+
+    // "unavailable"/"unknown" describe the read, not the session, and never
+    // become a stored status. A liveness-only observation (the built-in
+    // claude-fleet probe, which reports no state at all) may still promote the
+    // uninformative initial "starting" — and only that, evaluated against the
+    // FRESH record, so a status Clawdy reported while the probe was in flight
+    // is never clobbered by a bare liveness bit.
+    const reported = status.state === "unavailable" || status.state === "unknown" ? undefined : status.state;
+    const promoted = !reported && status.alive === true && fresh.status === "starting" ? "running" : undefined;
+    const nextStatus = reported ?? promoted;
+    const observedAt = status.lastEventAt ?? status.termination?.at ?? now;
+
+    this.writeFleetAttachment(sessionKey, attachmentId, {
+      observationToken: token,
+      lastObservedAt: now,
+      error: undefined,
+      ...(nextStatus ? { status: nextStatus } : {}),
+      ...(status.providerSessionId ? { providerSessionId: status.providerSessionId } : {}),
+      ...(status.host ? { host: status.host } : {}),
+      ...(status.remoteUrl ? { remoteUrl: status.remoteUrl } : {}),
+      ...(status.metadata ? { metadata: status.metadata } : {}),
+      ...(status.alive !== undefined ? { alive: status.alive } : {}),
+      ...(status.startedAt !== undefined ? { startedAt: status.startedAt } : {}),
+      ...(status.lastEventAt !== undefined ? { lastEventAt: status.lastEventAt } : {}),
+      ...(status.latestResponse ? { latestResponse: capResultText(status.latestResponse) } : {}),
+      ...(status.termination ? { termination: status.termination } : {}),
+      // normalizeAgentSessionObservation only ever produces finalResponse in a
+      // completed-turn state, so this cannot store a running session's partial
+      // answer as the turn's result.
+      ...(status.finalResponse
+        ? {
+            lastResult: {
+              summary: capResultText(status.finalResponse),
+              outputRef: attachmentOutputRef(fresh),
+              observedAt,
+            },
+          }
+        : {}),
+    });
+    return true;
+  }
+
   /**
    * The session's current attachment, or undefined if it has never attached,
    * is currently detached, or the persisted record is malformed (a
@@ -423,15 +604,30 @@ export class SessionManager {
   ): FleetAttachmentRecord {
     const state = this.fleetAttachments.get(sessionKey) ?? { sessionKey, attachments: {} };
     const previous = state.currentAttachmentId ? state.attachments?.[state.currentAttachmentId] : undefined;
+    const runtime = directive.runtime ?? CLAUDE_FLEET_RUNTIME_ID;
+
+    // An "attach" naming the session that is ALREADY current is a
+    // re-statement, not a new delegation target — which is exactly what
+    // happens when Clawdy passes the runtime's own <agent-session> marker
+    // through on every turn. Minting a fresh record for it would supersede a
+    // live attachment with an identical copy of itself and grow the lineage
+    // one entry per turn, so it folds into a refresh instead. An explicit
+    // "replace" always mints, because it is a stated lineage decision and
+    // carries its own reason.
+    if (directive.op === "attach" && previous && previous.runtime === runtime && previous.handle === directive.handle) {
+      return this.refreshCurrentFleetAttachment(sessionKey, jobId, previous, directive);
+    }
 
     const record: FleetAttachmentRecord = {
       id: randomUUID(),
-      runtime: "claude-fleet",
+      runtime,
+      provider: directive.provider,
       handle: directive.handle,
       providerSessionId: directive.providerSessionId,
       host: directive.host,
       worktree: directive.worktree,
       remoteUrl: directive.remoteUrl,
+      ...(directive.metadata ? { metadata: directive.metadata } : {}),
       attachedAt: Date.now(),
       status: directive.status ?? "starting",
       // The turn that is dispatching THIS attach/replace is, by construction,
@@ -456,6 +652,42 @@ export class SessionManager {
         (previous ? `, superseding ${previous.handle} (${previous.id.slice(0, 8)})` : ""),
     );
     return record;
+  }
+
+  /**
+   * Folds a re-stated attach into the record that is already current: it keeps
+   * its id, lineage, and attach time, and learns whatever the new statement
+   * knows that the old one didn't. `delegatedTurnId` is re-stamped
+   * unconditionally — re-stating the attachment on a new turn IS that turn
+   * delegating to it, the same claim a fresh attach makes.
+   *
+   * Only fills in fields the statement actually carries: a marker that omits
+   * `remoteUrl` is not asserting the session has none.
+   */
+  private refreshCurrentFleetAttachment(
+    sessionKey: string,
+    jobId: string,
+    current: FleetAttachmentRecord,
+    directive: Extract<FleetDirective, { op: "attach" | "replace" }>,
+  ): FleetAttachmentRecord {
+    this.writeFleetAttachment(sessionKey, current.id, {
+      delegatedTurnId: jobId,
+      lastObservedAt: Date.now(),
+      ...(directive.provider ? { provider: directive.provider } : {}),
+      ...(directive.providerSessionId ? { providerSessionId: directive.providerSessionId } : {}),
+      ...(directive.host ? { host: directive.host } : {}),
+      ...(directive.worktree ? { worktree: directive.worktree } : {}),
+      ...(directive.remoteUrl ? { remoteUrl: directive.remoteUrl } : {}),
+      ...(directive.metadata ? { metadata: { ...current.metadata, ...directive.metadata } } : {}),
+      // Same reasoning as applyFleetObservation's explicit-status write: a
+      // re-stated marker is the newest thing anyone has told us about this
+      // session, so an older read still in flight must not land on top of it.
+      ...(directive.status ? { status: directive.status, observationToken: ++this.observationSeq } : {}),
+    });
+    logDebug(
+      `[agent-session] session ${sessionKey.slice(-12)} re-stated ${current.runtime}/${current.handle} (${current.id.slice(0, 8)}), delegated to job ${jobId.slice(0, 8)}`,
+    );
+    return this.getFleetAttachment(sessionKey) ?? current;
   }
 
   private detachFleet(sessionKey: string, reason: string): FleetAttachmentRecord | undefined {
@@ -500,11 +732,6 @@ export class SessionManager {
     return state.attachments?.[attachmentId];
   }
 
-  /** Boolean form of getCurrentFleetAttachmentIfUnchanged, for callers that don't need the record itself. */
-  private isStillCurrentFleetAttachment(sessionKey: string, attachmentId: string): boolean {
-    return this.getCurrentFleetAttachmentIfUnchanged(sessionKey, attachmentId) !== undefined;
-  }
-
   /**
    * continue: applies an optional Clawdy-reported status to the CURRENT
    * attachment, and — since `continue` is Clawdy explicitly re-affirming
@@ -529,16 +756,19 @@ export class SessionManager {
    * identity alone.
    *
    * Only when Clawdy supplied NO status does `inspect` fall through to a
-   * bounded, single-handle liveness check via the injected FleetAdapter.
+   * bounded, single-attachment read through the runtime seam (a host-
+   * registered runtime, or the built-in tmux liveness probe for claude-fleet).
    * Deliberately NOT awaited by the caller (submitTask stays synchronous,
-   * matching its existing public contract): the liveness result lands a
-   * tick later via the fire-and-forget promise below. Its callback re-reads
-   * the attachment FRESH via getCurrentFleetAttachmentIfUnchanged rather
-   * than trusting the `current` this closure captured before the await —
-   * that CAS-by-identity check also catches a status-only write (e.g. a
-   * later `continue{status:"needs_input"}` landing while this probe was
-   * still in flight), not just a detach/replace, because it reads the LIVE
-   * record rather than comparing against a snapshot taken before the await.
+   * matching its existing public contract): the result lands a tick later via
+   * the fire-and-forget dispatch below, and every write it makes goes through
+   * applyAgentSessionStatus's identity/delegation/token compare-and-set rather
+   * than trusting anything this closure captured before the await.
+   *
+   * A `continue` carrying a `prompt` additionally DRIVES the runtime — it is
+   * the one directive that delivers a follow-up turn. It dispatches even when
+   * no runtime can be resolved, unlike the passive probe: Clawdy asked for
+   * something to happen, so "no runtime knows how" has to become a visible
+   * `error` on the attachment rather than silence.
    */
   private applyFleetObservation(
     sessionKey: string,
@@ -558,37 +788,29 @@ export class SessionManager {
     const delegationChanged = directive.op === "continue" && jobId !== undefined && jobId !== current.delegatedTurnId;
     if (statusChanged || delegationChanged) {
       this.writeFleetAttachment(sessionKey, current.id, {
-        ...(statusChanged ? { status: directive.status } : {}),
+        // A status Clawdy states directly IS an observation, and the newest
+        // one — so it takes a token like any other. Without that, an `inspect`
+        // probe already in flight (which does not re-stamp delegatedTurnId,
+        // being a passive read) could resolve afterwards and overwrite it.
+        ...(statusChanged ? { status: directive.status, observationToken: ++this.observationSeq } : {}),
         ...(delegationChanged ? { delegatedTurnId: jobId } : {}),
         lastObservedAt: Date.now(),
       });
     }
+    if (directive.op === "continue" && directive.prompt) {
+      void this.runAgentSessionOp(sessionKey, { op: "continue", prompt: directive.prompt });
+      return;
+    }
     if (directive.status !== undefined) return;
 
-    if (directive.op !== "inspect" || !this.fleetAdapter) return;
-    const adapter = this.fleetAdapter;
-    const attachmentId = current.id;
-    adapter.isLive(current).then(
-      (live) => {
-        const fresh = this.getCurrentFleetAttachmentIfUnchanged(sessionKey, attachmentId);
-        if (!fresh) return;
-        // Only promotes the still-uninformative initial "starting" status —
-        // never overrides a status Clawdy has since reported explicitly
-        // (needs_input, idle, failed, or an already-affirmed running), which
-        // is always a stronger signal than a bare tmux liveness bit. Without
-        // this, a plain inspect's background probe could silently clobber a
-        // needs_input Clawdy reported while the probe was still in flight.
-        const shouldPromote = live && fresh.status === "starting";
-        this.writeFleetAttachment(sessionKey, attachmentId, {
-          lastObservedAt: Date.now(),
-          ...(shouldPromote ? { status: "running" } : {}),
-        });
-      },
-      () => {
-        if (!this.isStillCurrentFleetAttachment(sessionKey, attachmentId)) return;
-        this.writeFleetAttachment(sessionKey, attachmentId, { lastObservedAt: Date.now() });
-      },
-    );
+    if (directive.op !== "inspect") return;
+    // A passive refresh with nobody to ask stays a no-op, exactly as it was
+    // before any runtime existed: there is no news, so the record keeps
+    // whatever it already knew instead of gaining an error about our own
+    // wiring. A caller who wants that answer asks runAgentSessionOp directly
+    // and gets the precise unknown_runtime result.
+    if (!this.resolveRuntime(current)) return;
+    void this.runAgentSessionOp(sessionKey, { op: "inspect" });
   }
 
   /**
@@ -607,9 +829,19 @@ export class SessionManager {
       case "replace":
         this.attachOrReplaceFleet(sessionKey, jobId, directive);
         break;
-      case "detach":
+      case "detach": {
+        // Ask the runtime to stop the session BEFORE the local pointer goes
+        // away (afterwards there is no attachment left to address), but never
+        // wait on it and never let it change the outcome: the local detach is
+        // the durable decision, and a runtime that is down must not be able to
+        // wedge a conversation into staying attached to something it has
+        // abandoned. The result is logged, not written back — by the time it
+        // lands the record is already terminal lineage.
+        const current = this.getFleetAttachment(sessionKey);
+        if (current && directive.stopRuntime) this.stopRuntimeSession(current, directive.reason);
         this.detachFleet(sessionKey, directive.reason);
         break;
+      }
       case "continue":
         this.applyFleetObservation(sessionKey, jobId, directive);
         break;
@@ -617,6 +849,65 @@ export class SessionManager {
         // Passive read-refresh — never stamps delegatedTurnId.
         this.applyFleetObservation(sessionKey, undefined, directive);
         break;
+    }
+  }
+
+  /**
+   * Best-effort "end this session in its runtime too", for a detach that
+   * explicitly asked for it (see FleetDirective's `stopRuntime`). Never
+   * throws — dispatchAgentSession turns every failure into a status — and
+   * never writes: the local detach that follows is what is durable.
+   */
+  private stopRuntimeSession(record: FleetAttachmentRecord, reason: string): void {
+    void dispatchAgentSession(
+      this.resolveRuntime(record),
+      this.agentSessionRef(record),
+      { op: "detach", reason },
+      { now: Date.now() },
+    ).then((status) => {
+      logDebug(
+        `[agent-session] runtime detach of ${record.runtime}/${record.handle}: ${status.error ? `${status.error.code} — ${status.error.message}` : status.state}`,
+      );
+    });
+  }
+
+  /**
+   * Reads the attachment through whichever path can produce a TRUSTWORTHY
+   * final answer for a completed turn, for the recovery tier below:
+   *
+   *   - a host-registered runtime answers through its own `inspect`, and the
+   *     shared normalization guarantees `finalResponse` only exists in a
+   *     completed-turn state;
+   *   - claude-fleet with no host-registered runtime falls back to the
+   *     FleetAdapter's terminal transcript read, which carries its own,
+   *     stronger trust gate (the tmux session must have ENDED, and the
+   *     transcript entry supplies its own timestamp) than a liveness probe
+   *     could. That is why recovery does not simply reuse `inspect` here.
+   *
+   * Anything else — an unknown runtime, no adapter — yields undefined, and the
+   * caller falls through to today's completed_no_summary.
+   */
+  private async observeForRecovery(record: FleetAttachmentRecord): Promise<AgentSessionStatus | undefined> {
+    const ref = this.agentSessionRef(record);
+    const now = Date.now();
+    const registered = this.runtimes?.get(record.runtime);
+    if (registered) return dispatchAgentSession(registered, ref, { op: "inspect" }, { now });
+    if (record.runtime !== CLAUDE_FLEET_RUNTIME_ID || !this.fleetAdapter) return undefined;
+    try {
+      const handoff = await this.fleetAdapter.readTerminalHandoff(record);
+      if (!handoff?.text) return undefined;
+      return normalizeAgentSessionObservation(
+        ref,
+        // `resultAt` is the transcript entry's OWN timestamp — never wall-clock
+        // read time — which is what makes the freshness bound below meaningful.
+        { state: "completed", finalResponse: handoff.text, lastEventAt: handoff.resultAt },
+        now,
+      );
+    } catch (err) {
+      logDebug(
+        `[agent-session] readTerminalHandoff threw for ${record.handle}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return undefined;
     }
   }
 
@@ -632,59 +923,56 @@ export class SessionManager {
    *     not match `job.jobId`) — otherwise a still-current attachment left
    *     over from an earlier, unrelated turn could answer a LATER task it
    *     never actually worked on;
-   *   - the attachment is `needs_input`/`failed` — an explicit Clawdy-
-   *     reported signal that the child is NOT simply finished, which must
-   *     stay actionable rather than being papered over by leftover
-   *     transcript text;
-   *   - the adapter has nothing trustworthy yet;
-   *   - the handoff's own result timestamp predates this turn even starting
-   *     (stale output correlated to an earlier delegation);
-   *   - the attachment was detached/replaced while the adapter call was in
-   *     flight (identity compare-and-set).
+   *   - the attachment is `needs_input`/`needs_permission`/`failed` — an
+   *     explicit signal that the child is NOT simply finished, which must
+   *     stay actionable rather than being papered over by leftover output;
+   *   - the runtime has nothing trustworthy yet, or reported anything short
+   *     of a genuinely completed turn (see COMPLETED_TURN_STATES — a partial
+   *     answer from a running or blocked session never becomes a result);
+   *   - the read failed, or could not date its own answer;
+   *   - that answer predates this turn even starting (stale output correlated
+   *     to an earlier delegation);
+   *   - the attachment was detached/replaced, re-delegated, or overtaken by a
+   *     newer observation while the runtime call was in flight (see
+   *     applyAgentSessionStatus's three-part compare-and-set).
    */
   private async tryFleetRecovery(job: Job): Promise<{ summary: string; attachmentId: string } | undefined> {
-    if (!this.fleetAdapter) return undefined;
+    if (!this.fleetAdapter && !this.runtimes) return undefined;
     const current = this.getFleetAttachment(job.sessionKey);
     if (!current) return undefined;
 
     if (!current.delegatedTurnId || current.delegatedTurnId !== job.jobId) return undefined;
-    if (current.status === "needs_input" || current.status === "failed") return undefined;
+    if (isBlockedAgentSessionState(current.status) || current.status === "failed") return undefined;
     const attachmentId = current.id;
     const delegatedTurnId = current.delegatedTurnId;
+    const token = ++this.observationSeq;
 
-    let handoff: FleetHandoff | null;
-    try {
-      handoff = await this.fleetAdapter.readTerminalHandoff(current);
-    } catch (err) {
-      logDebug(`[fleet] readTerminalHandoff threw for ${current.handle}: ${err instanceof Error ? err.message : String(err)}`);
+    const status = await this.observeForRecovery(current);
+    if (!status || status.error) return undefined;
+    if (!isCompletedTurnState(status.state) || !status.finalResponse) return undefined;
+
+    // A result we cannot date cannot be proven to belong to THIS turn, and an
+    // undatable answer must read as "nothing trustworthy yet" rather than as
+    // an untimestamped success — the same rule fleet-adapter.ts applies when
+    // it skips a transcript entry with no parseable timestamp.
+    const resultAt = status.lastEventAt ?? status.termination?.at;
+    if (resultAt === undefined) {
+      logDebug(`[agent-session] ignoring undatable result from ${current.runtime}/${current.handle}`);
       return undefined;
     }
-
-    // The same attachment can be continued for a newer parent turn while the
-    // adapter call is in flight. Re-read both identity and delegated turn
-    // token before allowing the async result to write durable state; identity
-    // alone would let an old handoff contaminate the newer generation.
-    const fresh = this.getCurrentFleetAttachmentIfUnchanged(job.sessionKey, attachmentId);
-    if (!fresh || fresh.delegatedTurnId !== delegatedTurnId) return undefined;
-    if (!handoff || !handoff.text) return undefined;
-
-    if (handoff.resultAt < job.startedAt) {
+    if (resultAt < job.startedAt) {
       logDebug(
-        `[fleet] discarding stale handoff for ${current.handle}: resultAt ${handoff.resultAt} predates job ${job.jobId.slice(0, 8)}'s start ${job.startedAt}`,
+        `[agent-session] discarding stale result for ${current.handle}: resultAt ${resultAt} predates job ${job.jobId.slice(0, 8)}'s start ${job.startedAt}`,
       );
       return undefined;
     }
 
-    const capped =
-      handoff.text.length > FLEET_RESULT_SUMMARY_MAX
-        ? `${handoff.text.slice(0, FLEET_RESULT_SUMMARY_MAX - 1)}…`
-        : handoff.text;
-    const outputRef = fresh.worktree ? `${fresh.handle}:${fresh.worktree}` : fresh.handle;
-    this.writeFleetAttachment(job.sessionKey, attachmentId, {
-      lastResult: { summary: capped, outputRef, observedAt: handoff.resultAt },
-      lastObservedAt: Date.now(),
-    });
-    return { summary: handoff.text, attachmentId };
+    // The same attachment can be re-delegated to a newer parent turn, or read
+    // again, while the runtime call is in flight. The write-back is the one
+    // place that decides whether this answer is still allowed to be durable —
+    // and if it isn't, it isn't allowed to complete the job either.
+    if (!this.applyAgentSessionStatus(job.sessionKey, attachmentId, delegatedTurnId, token, status)) return undefined;
+    return { summary: status.finalResponse, attachmentId };
   }
 
   submitTask(input: TaskInput): Job {
@@ -697,7 +985,7 @@ export class SessionManager {
     // REAL job it rides in on (see applyFleetDirective's delegatedTurnId
     // stamping) — a "session busy" rejection must not be able to claim or
     // burn a delegation slot that belongs to the job actually running.
-    const parsedDirective = parseFleetDirective(input.context);
+    const parsedDirective = parseSessionHandoff(input.context);
     const strippedContext = parsedDirective ? parsedDirective.strippedText : input.context;
     const effectiveInput: TaskInput = strippedContext === input.context ? input : { ...input, context: strippedContext };
 

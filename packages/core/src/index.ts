@@ -5,8 +5,34 @@ export { JsonFileJobStore } from "./job-store.ts";
 export type { JobStore, PersistedJob } from "./job-store.ts";
 export { JsonFileFleetAttachmentStore } from "./fleet-attachment-store.ts";
 export type { FleetAttachmentStore } from "./fleet-attachment-store.ts";
-export { LocalTmuxFleetAdapter } from "./fleet-adapter.ts";
+export { LocalTmuxFleetAdapter, fleetAdapterRuntime, CLAUDE_FLEET_RUNTIME_ID } from "./fleet-adapter.ts";
 export type { FleetAdapter, FleetHandoff } from "./fleet-adapter.ts";
+export {
+  AgentSessionRuntimeRegistry,
+  dispatchAgentSession,
+  normalizeAgentSessionObservation,
+  coerceAgentSessionState,
+  isCompletedTurnState,
+  isBlockedAgentSessionState,
+  COMPLETED_TURN_STATES,
+} from "./agent-session.ts";
+export type {
+  AgentSessionCallOptions,
+  AgentSessionCapabilities,
+  AgentSessionError,
+  AgentSessionObservation,
+  AgentSessionProviderId,
+  AgentSessionRef,
+  AgentSessionRequest,
+  AgentSessionRuntime,
+  AgentSessionRuntimeCallbacks,
+  AgentSessionRuntimeId,
+  AgentSessionState,
+  AgentSessionStatus,
+  AgentSessionTermination,
+} from "./agent-session.ts";
+export { parseFleetDirective, parseAgentSessionMarker, parseSessionHandoff } from "./fleet-handoff.ts";
+export type { ParsedFleetDirective } from "./fleet-handoff.ts";
 export { loadAgentRegistry, resolveAgent, REGISTRY_PATH, agentBlurb, agentDescriptor } from "./agent-registry.ts";
 export type { AgentEntry, AgentRegistry } from "./agent-registry.ts";
 export { searchMemory, getMemory, listCollections, DEFAULT_QMD_URL } from "./memory.ts";

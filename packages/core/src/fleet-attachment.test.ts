@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { AgentSessionRuntimeRegistry, type AgentSessionObservation, type AgentSessionRef } from "./agent-session.ts";
 import { FLEET_RESULT_SUMMARY_MAX, SessionManager } from "./session.ts";
 import type { OpenClawGateway, RunObservation } from "./gateway.ts";
 import type { FleetAdapter, FleetHandoff } from "./fleet-adapter.ts";
@@ -845,5 +846,580 @@ describe("Independent-review blocker fixes: detach/replace races (identity compa
     expect(current.status).toBe("needs_input");
     expect(current.lastResult).toBeUndefined();
     expect(sessions.getJob(job.jobId)?.summary).not.toBe("stale answer from the old generation");
+  });
+});
+
+/**
+ * The generic runtime bridge: the SAME session-scoped attachment machinery
+ * above, driven by a host-registered runtime instead of the built-in tmux
+ * adapter. ClawConnect learns nothing about T3 here — the fake below is
+ * standing in for a host that owns T3's CLI, pairing, and project model
+ * entirely on its own side of the callback boundary.
+ */
+
+function agentSessionMarker(obj: Record<string, unknown>): string {
+  return `<agent-session>${JSON.stringify(obj)}</agent-session>`;
+}
+
+const T3_MARKER = agentSessionMarker({
+  runtime: "t3-fleet",
+  provider: "anthropic-claude-code",
+  sessionId: "thr-abc123",
+  host: "minip3",
+  state: "running",
+  metadata: { t3ProjectId: "proj-1", turnId: "turn-1" },
+});
+
+type FakeRuntime = {
+  registry: AgentSessionRuntimeRegistry;
+  inspectCalls: AgentSessionRef[];
+  continueCalls: { ref: AgentSessionRef; prompt?: string }[];
+  detachCalls: { ref: AgentSessionRef; reason?: string }[];
+};
+
+function fakeT3Runtime(
+  opts: {
+    inspect?: (ref: AgentSessionRef) => Promise<AgentSessionObservation | null>;
+    onContinue?: (prompt?: string) => Promise<AgentSessionObservation | null>;
+    onDetach?: (reason?: string) => Promise<AgentSessionObservation | null>;
+    withContinue?: boolean;
+    withDetach?: boolean;
+  } = {},
+): FakeRuntime {
+  const inspectCalls: AgentSessionRef[] = [];
+  const continueCalls: { ref: AgentSessionRef; prompt?: string }[] = [];
+  const detachCalls: { ref: AgentSessionRef; reason?: string }[] = [];
+  const registry = new AgentSessionRuntimeRegistry();
+  registry.register({
+    id: "t3-fleet",
+    provider: "anthropic-claude-code",
+    async inspect(ref) {
+      inspectCalls.push(ref);
+      return opts.inspect ? opts.inspect(ref) : { state: "running" };
+    },
+    ...(opts.onContinue || opts.withContinue
+      ? {
+          async continue(ref: AgentSessionRef, request: { prompt?: string }) {
+            continueCalls.push({ ref, prompt: request.prompt });
+            return opts.onContinue ? opts.onContinue(request.prompt) : { state: "running" };
+          },
+        }
+      : {}),
+    ...(opts.onDetach || opts.withDetach
+      ? {
+          async detach(ref: AgentSessionRef, request: { reason?: string }) {
+            detachCalls.push({ ref, reason: request.reason });
+            return opts.onDetach ? opts.onDetach(request.reason) : { state: "dead" };
+          },
+        }
+      : {}),
+  });
+  return { registry, inspectCalls, continueCalls, detachCalls };
+}
+
+describe("managed agent sessions on a host-registered runtime", () => {
+  it("attaches straight from the runtime's own neutral marker, with no directive dialect", () => {
+    const t3 = fakeT3Runtime();
+    const ctrl = fakeGateway();
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, t3.registry);
+    const job = sessions.submitTask({ task: "ship the thing", context: `Delegated.\n${T3_MARKER}` });
+
+    const attachment = sessions.getFleetAttachment(job.sessionKey)!;
+    expect(attachment).toMatchObject({
+      runtime: "t3-fleet",
+      provider: "anthropic-claude-code",
+      handle: "thr-abc123",
+      host: "minip3",
+      status: "running",
+      metadata: { t3ProjectId: "proj-1", turnId: "turn-1" },
+      delegatedTurnId: job.jobId,
+    });
+    // It rides on the existing snapshot key — one projection, not a second one
+    // that could drift from it.
+    expect(sessions.buildSnapshot(job).fleetAttachment?.handle).toBe("thr-abc123");
+  });
+
+  it("never lets the raw marker reach the agent's prompt", () => {
+    const t3 = fakeT3Runtime();
+    const ctrl = fakeGateway();
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, t3.registry);
+    const job = sessions.submitTask({ task: "ship the thing", context: `Before.\n${T3_MARKER}\nAfter.` });
+    expect(sessions.getJob(job.jobId)?.prompt.context).toBe("Before.\n\nAfter.");
+  });
+
+  it("re-stating the same session on a later turn refreshes it instead of growing the lineage", async () => {
+    const t3 = fakeT3Runtime();
+    const ctrl = fakeGateway();
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, t3.registry);
+    const first = sessions.submitTask({ task: "start", context: T3_MARKER });
+    const attachedAt = sessions.getFleetAttachment(first.sessionKey)!.attachedAt;
+    ctrl.finishChat("first turn done", 0);
+    await wait();
+
+    // Clawdy passes the runtime's marker through on EVERY turn; a second
+    // lineage record per turn would be noise, and superseding a live
+    // attachment with a copy of itself would be a lie about what happened.
+    const second = sessions.submitTask({
+      task: "keep going",
+      sessionKey: first.sessionKey,
+      context: agentSessionMarker({
+        runtime: "t3-fleet",
+        sessionId: "thr-abc123",
+        state: "needs_input",
+        remoteUrl: "https://t3.example/threads/abc123",
+        metadata: { turnId: "turn-2" },
+      }),
+    });
+
+    expect(sessions.getFleetLineage(first.sessionKey)).toHaveLength(1);
+    const attachment = sessions.getFleetAttachment(first.sessionKey)!;
+    expect(attachment.attachedAt).toBe(attachedAt);
+    expect(attachment.status).toBe("needs_input");
+    expect(attachment.remoteUrl).toBe("https://t3.example/threads/abc123");
+    // Merged, not replaced: turn-1's project id is still known.
+    expect(attachment.metadata).toEqual({ t3ProjectId: "proj-1", turnId: "turn-2" });
+    // Re-stating it IS the new turn delegating to it.
+    expect(attachment.delegatedTurnId).toBe(second.jobId);
+  });
+
+  it("a different session on the same runtime still replaces, preserving lineage", async () => {
+    const t3 = fakeT3Runtime();
+    const ctrl = fakeGateway();
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, t3.registry);
+    const job = sessions.submitTask({ task: "start", context: T3_MARKER });
+    ctrl.finishChat("first turn done", 0);
+    await wait();
+    sessions.submitTask({
+      task: "start over",
+      sessionKey: job.sessionKey,
+      context: fleetBlock({ op: "replace", runtime: "t3-fleet", sessionId: "thr-second", host: "minip3", reason: "wrong project" }),
+    });
+
+    const lineage = sessions.getFleetLineage(job.sessionKey);
+    expect(lineage).toHaveLength(2);
+    const superseded = lineage.find((r) => r.handle === "thr-abc123")!;
+    expect(superseded.status).toBe("superseded");
+    expect(superseded.reason).toBe("wrong project");
+    const current = sessions.getFleetAttachment(job.sessionKey)!;
+    expect(current.handle).toBe("thr-second");
+    expect(current.replacesAttachmentId).toBe(superseded.id);
+  });
+
+  it("survives a connector restart with runtime, provider, and metadata intact", () => {
+    const store = new FakeFleetAttachmentStore();
+    const t3 = fakeT3Runtime();
+    const first = fakeGateway();
+    const sessionsA = new SessionManager(first.gateway, "main", undefined, store, undefined, t3.registry);
+    const job = sessionsA.submitTask({ task: "ship it", context: T3_MARKER });
+
+    // A brand-new manager over the same store, as after a process restart.
+    const second = fakeGateway();
+    const sessionsB = new SessionManager(second.gateway, "main", undefined, store, undefined, t3.registry);
+    expect(sessionsB.getFleetAttachment(job.sessionKey)).toMatchObject({
+      runtime: "t3-fleet",
+      provider: "anthropic-claude-code",
+      handle: "thr-abc123",
+      metadata: { t3ProjectId: "proj-1" },
+      delegatedTurnId: job.jobId,
+    });
+  });
+
+  it("dispatches inspect to exactly the one attachment — never a scan, and never for a session with none", async () => {
+    const t3 = fakeT3Runtime({
+      inspect: async () => ({
+        state: "needs_permission",
+        alive: true,
+        latestResponse: "may I run the migration?",
+        lastEventAt: "2026-08-03T12:05:00.000Z",
+        providerSessionId: "prov-9",
+        metadata: { turnId: "turn-2" },
+      }),
+    });
+    const ctrl = fakeGateway();
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, t3.registry);
+
+    // A session that never attached must not produce a single runtime call.
+    const unattached = sessions.submitTask({ task: "unrelated work" });
+    await wait();
+    expect(t3.inspectCalls).toHaveLength(0);
+    ctrl.finishChat("done", 0);
+    await wait();
+
+    const job = sessions.submitTask({ task: "ship it", context: T3_MARKER });
+    ctrl.finishChat("done", 1);
+    await wait();
+    await sessions.runAgentSessionOp(job.sessionKey, { op: "inspect" });
+
+    expect(t3.inspectCalls).toHaveLength(1);
+    // The neutral ref, not ClawConnect's record: no lineage id, no turn token.
+    expect(t3.inspectCalls[0]).toEqual({
+      runtime: "t3-fleet",
+      provider: "anthropic-claude-code",
+      sessionId: "thr-abc123",
+      providerSessionId: undefined,
+      host: "minip3",
+      remoteUrl: undefined,
+      metadata: { t3ProjectId: "proj-1", turnId: "turn-1" },
+      lastKnownState: "running",
+    });
+    expect(unattached.sessionKey).not.toBe(job.sessionKey);
+
+    const attachment = sessions.getFleetAttachment(job.sessionKey)!;
+    expect(attachment.status).toBe("needs_permission");
+    expect(attachment.alive).toBe(true);
+    expect(attachment.latestResponse).toBe("may I run the migration?");
+    expect(attachment.lastEventAt).toBe(Date.parse("2026-08-03T12:05:00.000Z"));
+    expect(attachment.providerSessionId).toBe("prov-9");
+    expect(attachment.metadata).toEqual({ t3ProjectId: "proj-1", turnId: "turn-2" });
+    // A blocked session's partial text is never promoted to a turn result.
+    expect(attachment.lastResult).toBeUndefined();
+  });
+
+  it("delivers a follow-up turn through the runtime's continue callback", async () => {
+    const t3 = fakeT3Runtime({ onContinue: async () => ({ state: "running", latestResponse: "on it" }) });
+    const ctrl = fakeGateway();
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, t3.registry);
+    const job = sessions.submitTask({ task: "ship it", context: T3_MARKER });
+    ctrl.finishChat("done", 0);
+    await wait();
+
+    sessions.submitTask({
+      task: "nudge it",
+      sessionKey: job.sessionKey,
+      context: fleetBlock({ op: "continue", prompt: "also update the docs" }),
+    });
+    await wait();
+
+    expect(t3.continueCalls).toEqual([
+      { ref: expect.objectContaining({ runtime: "t3-fleet", sessionId: "thr-abc123" }), prompt: "also update the docs" },
+    ]);
+    expect(sessions.getFleetAttachment(job.sessionKey)?.latestResponse).toBe("on it");
+  });
+
+  it("reports a precise unsupported_operation instead of failing the task", async () => {
+    const t3 = fakeT3Runtime(); // inspect only — no continue callback registered
+    const ctrl = fakeGateway();
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, t3.registry);
+    const job = sessions.submitTask({ task: "ship it", context: T3_MARKER });
+    ctrl.finishChat("done", 0);
+    await wait();
+
+    const nudge = sessions.submitTask({
+      task: "nudge it",
+      sessionKey: job.sessionKey,
+      context: fleetBlock({ op: "continue", prompt: "also update the docs" }),
+    });
+    await wait();
+
+    // The TASK is unaffected — a delegation that cannot be driven is not a
+    // reason for the turn itself to fail.
+    expect(nudge.status).toBe("running");
+    const attachment = sessions.getFleetAttachment(job.sessionKey)!;
+    expect(attachment.error).toMatchObject({ code: "unsupported_operation" });
+    // A failed ask teaches nothing about the session, so what we last knew survives.
+    expect(attachment.status).toBe("running");
+  });
+
+  it("reports unknown_runtime for a runtime this build was never taught, and keeps the attachment readable", async () => {
+    const ctrl = fakeGateway();
+    // No registry at all: a t3-fleet attachment written by a build that had
+    // one must still round-trip, not be dropped.
+    const sessions = new SessionManager(ctrl.gateway);
+    const job = sessions.submitTask({ task: "ship it", context: T3_MARKER });
+    expect(sessions.getFleetAttachment(job.sessionKey)?.runtime).toBe("t3-fleet");
+
+    const status = await sessions.runAgentSessionOp(job.sessionKey, { op: "inspect" });
+    expect(status?.state).toBe("unavailable");
+    expect(status?.error?.code).toBe("unknown_runtime");
+    expect(status?.detail).toContain("Last reported state: running.");
+    // Still exactly what the marker said — an unanswerable read changed nothing.
+    expect(sessions.getFleetAttachment(job.sessionKey)?.status).toBe("running");
+  });
+
+  it("returns undefined rather than reaching for anything when nothing is attached", async () => {
+    const t3 = fakeT3Runtime();
+    const ctrl = fakeGateway();
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, t3.registry);
+    const job = sessions.submitTask({ task: "no delegation here" });
+    expect(await sessions.runAgentSessionOp(job.sessionKey, { op: "inspect" })).toBeUndefined();
+    expect(t3.inspectCalls).toHaveLength(0);
+  });
+
+  it("recovers a completed turn's final response through the runtime, marked provisional", async () => {
+    const t3 = fakeT3Runtime({
+      inspect: async () => ({
+        state: "completed",
+        finalResponse: "the T3 session's real answer",
+        lastEventAt: Date.now(),
+        termination: { reason: "completed" },
+      }),
+    });
+    const ctrl = fakeGateway({ pollTranscriptForFinalText: async () => undefined });
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, t3.registry);
+    const job = sessions.submitTask({ task: "ship it", context: T3_MARKER });
+
+    ctrl.finishChat(NO_SUMMARY_SENTINEL, 0);
+    await wait();
+
+    const recovered = sessions.getJob(job.jobId)!;
+    expect(recovered.status).toBe("completed");
+    expect(recovered.summary).toBe("the T3 session's real answer");
+    expect(recovered.resultSource).toBe("fleet-transcript");
+    const attachment = sessions.getFleetAttachment(job.sessionKey)!;
+    expect(attachment.lastResult?.summary).toBe("the T3 session's real answer");
+    expect(attachment.lastResult?.outputRef).toBe("thr-abc123");
+    expect(attachment.termination).toMatchObject({ reason: "completed" });
+
+    // Provisional: the real parent transcript still wins when it shows up.
+    ctrl.setPoll(async () => "the real parent answer, arrived late");
+    await sessions.waitForJob(job.jobId, 0, undefined, "wait", 1);
+    expect(sessions.getJob(job.jobId)?.summary).toBe("the real parent answer, arrived late");
+    expect(sessions.getJob(job.jobId)?.resultSource).toBe("parent");
+  });
+
+  it("never completes a parent from a session that is waiting on a human", async () => {
+    for (const blocked of ["needs_input", "needs_permission"]) {
+      const t3 = fakeT3Runtime({
+        inspect: async () => ({
+          state: blocked,
+          // Text is present and readable — the point is that being blocked
+          // beats having something quotable.
+          latestResponse: "should I force-push?",
+          finalResponse: "should I force-push?",
+          lastEventAt: Date.now(),
+        }),
+      });
+      const ctrl = fakeGateway({ pollTranscriptForFinalText: async () => undefined });
+      const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, t3.registry);
+      const job = sessions.submitTask({
+        task: "ship it",
+        // The marker itself reports the blocked state, which is exactly how a
+        // runtime announces "I'm waiting on a human" at delegation time.
+        context: agentSessionMarker({ runtime: "t3-fleet", sessionId: "thr-abc123", host: "minip3", state: blocked }),
+      });
+      ctrl.finishChat(NO_SUMMARY_SENTINEL, 0);
+      await wait();
+
+      const settled = sessions.getJob(job.jobId)!;
+      expect(settled.status, blocked).toBe("completed_no_summary");
+      expect(settled.resultSource, blocked).toBe("parent");
+      // The attachment stays actionable, which is the whole point.
+      expect(sessions.getFleetAttachment(job.sessionKey)?.status, blocked).toBe(blocked);
+      expect(sessions.getFleetAttachment(job.sessionKey)?.lastResult, blocked).toBeUndefined();
+    }
+  });
+
+  it("refuses a result it cannot date — an undatable answer is not proof of this turn", async () => {
+    const t3 = fakeT3Runtime({
+      inspect: async () => ({ state: "completed", finalResponse: "an answer from who knows when" }),
+    });
+    const ctrl = fakeGateway({ pollTranscriptForFinalText: async () => undefined });
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, t3.registry);
+    const job = sessions.submitTask({ task: "ship it", context: T3_MARKER });
+    ctrl.finishChat(NO_SUMMARY_SENTINEL, 0);
+    await wait();
+
+    expect(sessions.getJob(job.jobId)?.status).toBe("completed_no_summary");
+    expect(sessions.getFleetAttachment(job.sessionKey)?.lastResult).toBeUndefined();
+  });
+
+  it("refuses a result that predates the turn it would be answering", async () => {
+    const t3 = fakeT3Runtime({
+      inspect: async () => ({ state: "completed", finalResponse: "an answer from a previous delegation", lastEventAt: 1_000 }),
+    });
+    const ctrl = fakeGateway({ pollTranscriptForFinalText: async () => undefined });
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, t3.registry);
+    const job = sessions.submitTask({ task: "ship it", context: T3_MARKER });
+    ctrl.finishChat(NO_SUMMARY_SENTINEL, 0);
+    await wait();
+
+    expect(sessions.getJob(job.jobId)?.status).toBe("completed_no_summary");
+  });
+
+  it("drops a read that resolves after the attachment was re-delegated to a newer turn", async () => {
+    const gate = deferred<AgentSessionObservation>();
+    const t3 = fakeT3Runtime({ inspect: () => gate.promise });
+    const ctrl = fakeGateway();
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, t3.registry);
+    const job = sessions.submitTask({ task: "ship it", context: T3_MARKER });
+
+    // A read for THIS turn goes out and hangs.
+    const inFlight = sessions.runAgentSessionOp(job.sessionKey, { op: "inspect" });
+    await wait();
+    ctrl.finishChat("first turn done", 0);
+    await wait();
+
+    // A newer turn claims the same attachment while that read is outstanding.
+    const newer = sessions.submitTask({
+      task: "keep going",
+      sessionKey: job.sessionKey,
+      context: fleetBlock({ op: "continue", status: "needs_input" }),
+    });
+    expect(sessions.getFleetAttachment(job.sessionKey)?.delegatedTurnId).toBe(newer.jobId);
+
+    gate.resolve({ state: "completed", finalResponse: "answer for the OLD turn", lastEventAt: Date.now() });
+    const status = await inFlight;
+
+    // The answer is still reported to the caller who asked...
+    expect(status?.state).toBe("completed");
+    // ...but it is not allowed to become durable state for a turn that never
+    // asked for it.
+    const attachment = sessions.getFleetAttachment(job.sessionKey)!;
+    expect(attachment.status).toBe("needs_input");
+    expect(attachment.lastResult).toBeUndefined();
+  });
+
+  it("never lets an older read overtake a newer one on the same attachment and turn", async () => {
+    const gates = [deferred<AgentSessionObservation>(), deferred<AgentSessionObservation>()];
+    let call = 0;
+    const t3 = fakeT3Runtime({ inspect: () => gates[call++].promise });
+    const ctrl = fakeGateway();
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, t3.registry);
+    const job = sessions.submitTask({ task: "ship it", context: T3_MARKER });
+
+    const older = sessions.runAgentSessionOp(job.sessionKey, { op: "inspect" });
+    const newer = sessions.runAgentSessionOp(job.sessionKey, { op: "inspect" });
+
+    // The NEWER read lands first, then the older one straggles in behind it.
+    gates[1].resolve({ state: "needs_input", latestResponse: "current state" });
+    await newer;
+    gates[0].resolve({ state: "running", latestResponse: "state from a moment ago" });
+    await older;
+
+    const attachment = sessions.getFleetAttachment(job.sessionKey)!;
+    expect(attachment.status).toBe("needs_input");
+    expect(attachment.latestResponse).toBe("current state");
+  });
+
+  it("never lets an in-flight passive read overwrite a status stated after it went out", async () => {
+    // `inspect` is a passive refresh: it deliberately does NOT re-stamp the
+    // delegated turn, so the delegation check cannot catch this one. The
+    // observation token is what makes an explicitly stated status durable
+    // against a read that was already outstanding when it was stated.
+    const gate = deferred<AgentSessionObservation>();
+    const t3 = fakeT3Runtime({ inspect: () => gate.promise });
+    const ctrl = fakeGateway();
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, t3.registry);
+    const job = sessions.submitTask({ task: "ship it", context: T3_MARKER });
+
+    const inFlight = sessions.runAgentSessionOp(job.sessionKey, { op: "inspect" });
+    await wait();
+    ctrl.finishChat("first turn done", 0);
+    await wait();
+
+    // Clawdy sees the session block and says so, on the same delegation.
+    sessions.submitTask({
+      task: "just looking",
+      sessionKey: job.sessionKey,
+      context: fleetBlock({ op: "inspect", status: "needs_input" }),
+    });
+    expect(sessions.getFleetAttachment(job.sessionKey)?.delegatedTurnId).toBe(job.jobId);
+
+    gate.resolve({ state: "running", latestResponse: "still chugging" });
+    await inFlight;
+
+    const attachment = sessions.getFleetAttachment(job.sessionKey)!;
+    expect(attachment.status).toBe("needs_input");
+    expect(attachment.latestResponse).toBeUndefined();
+  });
+
+  it("asks the runtime to stop the session only when the detach says so, and detaches locally either way", async () => {
+    const quiet = fakeT3Runtime({ withDetach: true });
+    const ctrl = fakeGateway();
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, quiet.registry);
+    const job = sessions.submitTask({ task: "ship it", context: T3_MARKER });
+    ctrl.finishChat("done", 0);
+    await wait();
+
+    sessions.submitTask({
+      task: "stop tracking it",
+      sessionKey: job.sessionKey,
+      context: fleetBlock({ op: "detach", reason: "handed back to me" }),
+    });
+    await wait();
+    expect(quiet.detachCalls).toHaveLength(0);
+    expect(sessions.getFleetAttachment(job.sessionKey)).toBeUndefined();
+    expect(sessions.getFleetLineage(job.sessionKey)[0]).toMatchObject({ status: "detached", reason: "handed back to me" });
+  });
+
+  it("dispatches an opt-in runtime stop, and a runtime that throws cannot wedge the conversation", async () => {
+    const t3 = fakeT3Runtime({
+      onDetach: async () => {
+        throw new Error("T3 endpoint unreachable");
+      },
+    });
+    const ctrl = fakeGateway();
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, t3.registry);
+    const job = sessions.submitTask({ task: "ship it", context: T3_MARKER });
+    ctrl.finishChat("done", 0);
+    await wait();
+
+    sessions.submitTask({
+      task: "kill it",
+      sessionKey: job.sessionKey,
+      context: fleetBlock({ op: "detach", reason: "abandoned", stopRuntime: true }),
+    });
+    await wait();
+
+    expect(t3.detachCalls).toEqual([{ ref: expect.objectContaining({ sessionId: "thr-abc123" }), reason: "abandoned" }]);
+    // The local detach is the durable decision; a runtime that is down must
+    // not be able to hold the conversation hostage.
+    expect(sessions.getFleetAttachment(job.sessionKey)).toBeUndefined();
+  });
+
+  it("keeps claude-fleet on the built-in adapter, and reports precisely what that adapter cannot do", async () => {
+    const adapter = fakeFleetAdapter({ isLive: true });
+    const ctrl = fakeGateway();
+    // A registry is present but knows nothing about claude-fleet — the
+    // explicit tmux fallback still answers for it.
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter, fakeT3Runtime().registry);
+    const job = sessions.submitTask({
+      task: "do the thing",
+      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "minip3" }),
+    });
+
+    const inspected = await sessions.runAgentSessionOp(job.sessionKey, { op: "inspect" });
+    expect(adapter.isLiveCalls.map((a) => a.handle)).toEqual(["cf-foo"]);
+    // Liveness only: the adapter deliberately claims no state, so a bare tmux
+    // bit can only promote the uninformative initial "starting".
+    expect(inspected?.state).toBe("unknown");
+    expect(sessions.getFleetAttachment(job.sessionKey)?.status).toBe("running");
+
+    const nudged = await sessions.runAgentSessionOp(job.sessionKey, { op: "continue", prompt: "keep going" });
+    expect(nudged?.error).toMatchObject({ code: "unsupported_operation" });
+  });
+
+  it("lets a host-registered claude-fleet runtime win over the built-in adapter", async () => {
+    const adapter = fakeFleetAdapter({ isLive: true });
+    const registry = new AgentSessionRuntimeRegistry();
+    const seen: AgentSessionRef[] = [];
+    registry.register({
+      id: "claude-fleet",
+      provider: "anthropic-claude-code",
+      inspect: async (ref) => {
+        seen.push(ref);
+        return { state: "idle" };
+      },
+    });
+    const ctrl = fakeGateway();
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter, registry);
+    const job = sessions.submitTask({
+      task: "do the thing",
+      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "minip3" }),
+    });
+
+    await sessions.runAgentSessionOp(job.sessionKey, { op: "inspect" });
+    expect(seen.map((r) => r.sessionId)).toEqual(["cf-foo"]);
+    expect(adapter.isLiveCalls).toHaveLength(0);
+    expect(sessions.getFleetAttachment(job.sessionKey)?.status).toBe("idle");
+  });
+
+  it("exposes registered runtimes for wiring assertions without exposing any session", () => {
+    const t3 = fakeT3Runtime();
+    const ctrl = fakeGateway();
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, t3.registry);
+    expect(sessions.hasAgentSessionRuntime("t3-fleet")).toBe(true);
+    expect(sessions.hasAgentSessionRuntime("some-other-runtime")).toBe(false);
+    expect(new SessionManager(fakeGateway().gateway).hasAgentSessionRuntime("t3-fleet")).toBe(false);
   });
 });

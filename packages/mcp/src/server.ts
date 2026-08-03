@@ -22,6 +22,7 @@ import {
 } from "@clawconnect/core";
 import type {
   AgentRegistry,
+  AgentSessionRuntimeRegistry,
   CheckMode,
   CheckTaskResult,
   ContinuationState,
@@ -187,6 +188,12 @@ export function createMcpServer(config: {
    * tests to inject a fake and assert on wiring.
    */
   fleetAdapter?: FleetAdapter;
+  /**
+   * Managed-agent-session runtimes this host can drive (see agent-session.ts
+   * in core). Omitted, claude-fleet stays the only reachable runtime and any
+   * other attachment reads back as a precise unknown_runtime result.
+   */
+  agentSessionRuntimes?: AgentSessionRuntimeRegistry;
 }) {
   const server = new McpServer({
     name: "ClawConnect",
@@ -194,7 +201,7 @@ export function createMcpServer(config: {
   });
 
   const fleetAdapter = config.fleetAdapter ?? new LocalTmuxFleetAdapter();
-  const pool = new GatewayPool(config.registry, undefined, fleetAdapter);
+  const pool = new GatewayPool(config.registry, undefined, fleetAdapter, undefined, config.agentSessionRuntimes);
 
   const provider = config.provider ?? {};
   const defaultMode = provider.defaultCheckMode ?? "wait";

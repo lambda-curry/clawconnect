@@ -3,9 +3,13 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { promisify } from "node:util";
+import type { AgentSessionRuntime } from "./agent-session.ts";
 import type { FleetAttachmentRecord } from "./types.ts";
 
 const execFileAsync = promisify(execFile);
+
+/** The runtime id this adapter answers for, and the default for a directive that names none. */
+export const CLAUDE_FLEET_RUNTIME_ID = "claude-fleet";
 
 /**
  * `resultAt` is the transcript entry's OWN timestamp — when the child
@@ -27,6 +31,48 @@ export interface FleetAdapter {
   isLive(attachment: FleetAttachmentRecord): Promise<boolean>;
   /** A durable terminal result for the attachment, or null when none is available/trustworthy yet. */
   readTerminalHandoff(attachment: FleetAttachmentRecord): Promise<FleetHandoff | null>;
+}
+
+/**
+ * Presents an injected FleetAdapter through the neutral runtime seam, so
+ * claude-fleet dispatches by exactly the same path a host-registered runtime
+ * does instead of being special-cased at every call site.
+ *
+ * Only `inspect` is offered, and it deliberately reports NO state — a bare
+ * tmux liveness bit cannot distinguish "working" from "waiting on a human",
+ * and claiming one would let it clobber a status Clawdy reported explicitly.
+ * It answers the one question it can (`alive`), and the write-back's
+ * liveness-only rule decides what, if anything, that is allowed to promote.
+ *
+ * No `continue`/`detach` callbacks: a tmux adapter cannot deliver a turn or
+ * end a session, and derived capabilities turn that into a precise
+ * `unsupported_operation` for a caller who asks — rather than a silent no-op.
+ *
+ * Terminal-transcript recovery is NOT routed through here. It has its own
+ * trust gate (the tmux session must have ENDED, and the transcript entry
+ * carries its own timestamp), which is a stronger claim than `inspect` makes
+ * and is consulted only from session.ts's recovery tier — see
+ * FleetAdapter.readTerminalHandoff.
+ */
+export function fleetAdapterRuntime(
+  adapter: FleetAdapter,
+  record: FleetAttachmentRecord,
+  provider = "anthropic-claude-code",
+): AgentSessionRuntime {
+  return {
+    id: CLAUDE_FLEET_RUNTIME_ID,
+    provider,
+    capabilities: { inspect: true, continue: false, detach: false },
+    callbacks: {
+      id: CLAUDE_FLEET_RUNTIME_ID,
+      provider,
+      // Bound to the one record it was built for rather than reconstructing an
+      // attachment from the neutral ref: FleetAdapter's contract is stated in
+      // terms of a real FleetAttachmentRecord, and every dispatch addresses
+      // exactly one already-known attachment anyway.
+      inspect: async () => ({ alive: await adapter.isLive(record) }),
+    },
+  };
 }
 
 /**

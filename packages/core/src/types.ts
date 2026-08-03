@@ -1,3 +1,11 @@
+import type {
+  AgentSessionError,
+  AgentSessionProviderId,
+  AgentSessionRuntimeId,
+  AgentSessionState,
+  AgentSessionTermination,
+} from "./agent-session.ts";
+
 // ── Event types from the gateway ──────────────���──────────────────────────────
 
 export type GatewayEvent =
@@ -60,31 +68,60 @@ export type TaskStatus = "queued" | "running" | "blocked" | "needs-human" | "don
  */
 export type ResultSource = "parent" | "fleet-transcript";
 
-// ── Managed Fleet attachment ──────────────────────────────────────────────
+// ── Managed agent-session attachment ──────────────────────────────────────
 
 /**
- * The substates a directive may report Clawdy observing directly (Clawdy
- * supervises the Fleet session and knows things — e.g. "it's asking me
- * something" — that ClawConnect's own tmux-liveness-only adapter cannot
- * determine on its own). Deliberately excludes "superseded"/"detached":
- * those are lineage states only session.ts's own replace/detach transitions
- * may set, never a directive directly — see FleetDirective.
+ * The substates a directive may report Clawdy observing directly, and the only
+ * ones a record's `status` may hold: the neutral AgentSessionState vocabulary
+ * minus the two values that describe a READ rather than a session
+ * ("unavailable", "unknown"). Clawdy supervises the managed session and knows
+ * things — e.g. "it's asking me something" — that ClawConnect's own
+ * tmux-liveness-only adapter cannot determine on its own; "we could not reach
+ * the runtime" is never one of them, and lives on `error` instead.
+ *
+ * Deliberately excludes "superseded"/"detached" too: those are lineage states
+ * only session.ts's own replace/detach transitions may set, never a directive
+ * directly — see FleetDirective.
+ *
+ * Named for Fleet because that is the name production already publishes; it
+ * has always been the managed-session state type, and widening it is what lets
+ * one record serve claude-fleet (terminal success "idle") and a service
+ * runtime (terminal success "completed") without a second model.
  */
-export type FleetLiveStatus = "starting" | "running" | "idle" | "needs_input" | "failed";
+export type FleetLiveStatus = Exclude<AgentSessionState, "unavailable" | "unknown">;
 
 /**
- * One session may have at most one CURRENT Fleet attachment at a time, but
- * every attachment a session has ever had is kept (see SessionFleetState) —
- * `id` is ClawConnect's own identifier for this record, distinct from
- * `handle` (the Fleet session's own name), so replacement lineage can chain
- * through `replacesAttachmentId` even if a handle were ever reused.
+ * One Clawdy conversation may have at most one CURRENT managed-session
+ * attachment at a time, but every attachment it has ever had is kept (see
+ * SessionFleetState) — `id` is ClawConnect's own identifier for this record,
+ * distinct from `handle` (the session's own id in its runtime's namespace), so
+ * replacement lineage can chain through `replacesAttachmentId` even if a
+ * handle were ever reused.
+ *
+ * Fields below the lineage block are the NORMALIZED runtime observation (see
+ * agent-session.ts): everything a runtime told us about the session, in one
+ * vocabulary, written only through the guarded write-back in session.ts.
  */
 export type FleetAttachmentRecord = {
   id: string;
-  runtime: "claude-fleet";
+  /**
+   * Which system owns this session's lifecycle. "claude-fleet" is the
+   * historical value and the default for a directive that omits it, so every
+   * record written before this field could vary still reads correctly.
+   */
+  runtime: AgentSessionRuntimeId;
+  /** Which agent/model runs inside the session, when the runtime reports it. */
+  provider?: AgentSessionProviderId;
+  /** The session's id in its runtime's namespace. Called `handle` because that is the name production already publishes. */
   handle: string;
   providerSessionId?: string;
-  host: string;
+  /**
+   * Host whose runtime state owns this session. Optional: a service runtime's
+   * session lives on a server, not on a machine ClawConnect can name, and the
+   * neutral marker may legitimately omit it. The explicit
+   * `[[clawconnect:fleet]]` directive still requires one.
+   */
+  host?: string;
   worktree?: string;
   remoteUrl?: string;
   attachedAt: number;
@@ -105,16 +142,52 @@ export type FleetAttachmentRecord = {
   /** Set only when status is "detached" or "superseded" — why it stopped being current. */
   reason?: string;
   /**
-   * Best-effort terminal result observed from the attached Fleet session.
-   * `summary` is capped (see FLEET_RESULT_SUMMARY_MAX in session.ts) —
-   * `outputRef` is the durable pointer (transcript path / session key) so the
-   * full text is always re-derivable rather than duplicated unbounded here.
+   * Best-effort FINAL result observed from the attached session — populated
+   * only from a genuinely completed turn (see COMPLETED_TURN_STATES in
+   * agent-session.ts), never from a partial answer a running or blocked
+   * session happened to have written. `summary` is capped (see
+   * FLEET_RESULT_SUMMARY_MAX in session.ts) — `outputRef` is the durable
+   * pointer (transcript path / session key) so the full text is always
+   * re-derivable rather than duplicated unbounded here.
    */
   lastResult?: {
     summary?: string;
     outputRef?: string;
     observedAt: number;
   };
+  /**
+   * The most recent assistant text the runtime reported, in ANY state —
+   * capped the same way. Distinct from `lastResult` on purpose: this is what
+   * the session is saying now, which is exactly the thing that must never be
+   * mistaken for the turn's answer.
+   */
+  latestResponse?: string;
+  /** Liveness as the runtime last reported it. undefined when it could not say — different from `false`. */
+  alive?: boolean;
+  /** Session creation time as the runtime reports it (epoch ms) — not `attachedAt`, which is when ClawConnect first saw it. */
+  startedAt?: number;
+  /** Most recent activity the runtime knows about (epoch ms). */
+  lastEventAt?: number;
+  /**
+   * The last failure of a READ, not of the session (see AgentSessionError):
+   * "we could not reach the runtime" must never be stored as a session state.
+   * Cleared by the next read that actually reaches the runtime.
+   */
+  error?: AgentSessionError;
+  /** Why the session stopped, for the terminal states only. */
+  termination?: AgentSessionTermination;
+  /** Runtime-specific extras carried through untouched from the marker and every observation. Strings only. */
+  metadata?: Record<string, string>;
+  /**
+   * Monotonic token of the newest runtime observation already written to this
+   * record. Every dispatch takes a token BEFORE it calls out, and its result
+   * is written back only if no higher-token observation has landed meanwhile —
+   * so a slow inspect that resolves after a later one cannot roll the record
+   * back to what it saw. The attachment-identity and delegated-turn checks
+   * guard a different axis (a different attachment / a different parent turn);
+   * this one guards two reads of the SAME attachment on the same turn.
+   */
+  observationToken?: number;
 };
 
 /**
@@ -140,17 +213,42 @@ export type SessionFleetState = {
 export type FleetDirective =
   | {
       op: "attach" | "replace";
+      /** Defaults to "claude-fleet" when omitted — the runtime this directive shape originally described. */
+      runtime?: AgentSessionRuntimeId;
+      provider?: AgentSessionProviderId;
       handle: string;
       providerSessionId?: string;
-      host: string;
+      host?: string;
       worktree?: string;
       remoteUrl?: string;
+      metadata?: Record<string, string>;
       /** Required for "replace"; ignored for "attach". */
       reason?: string;
       status?: FleetLiveStatus;
     }
-  | { op: "continue"; status?: FleetLiveStatus }
-  | { op: "detach"; reason: string }
+  | {
+      op: "continue";
+      status?: FleetLiveStatus;
+      /**
+       * When present, the follow-up turn to deliver to the attached session
+       * through its runtime's `continue` callback. Omit for the historical
+       * meaning: re-affirm that this parent turn is delegated to the current
+       * attachment, without driving the runtime at all.
+       */
+      prompt?: string;
+    }
+  | {
+      op: "detach";
+      reason: string;
+      /**
+       * Whether to also stop the session in its runtime, not just stop
+       * tracking it here. Defaults to false because ending someone else's
+       * agent session is not recoverable and "detach" has always meant the
+       * local, reversible thing — a caller that wants the session killed has
+       * to say so.
+       */
+      stopRuntime?: boolean;
+    }
   | { op: "inspect"; status?: FleetLiveStatus };
 
 export type JobRecoveryState = {

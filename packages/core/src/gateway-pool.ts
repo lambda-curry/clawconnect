@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import type { AgentSessionRuntimeRegistry } from "./agent-session.ts";
 import type { FleetAdapter } from "./fleet-adapter.ts";
 import { JsonFileFleetAttachmentStore } from "./fleet-attachment-store.ts";
 import { OpenClawGateway } from "./gateway.ts";
@@ -27,12 +28,18 @@ export class GatewayPool {
    * file in the same directory) since both exist for the same "survive a
    * restart" reason and a deployment that configures one almost always wants
    * the other too. Pass an explicit path only to put them somewhere else.
+   *
+   * `runtimes` is the host's managed-agent-session runtime table (see
+   * agent-session.ts). It is shared across every agent's SessionManager on
+   * purpose — a runtime is a property of the deployment, not of an OpenClaw
+   * agent — and omitting it leaves claude-fleet as the only reachable runtime.
    */
   constructor(
     private readonly registry: AgentRegistry,
     private readonly jobStoreDir?: string,
     private readonly fleetAdapter?: FleetAdapter,
     private readonly fleetStoreDir: string | undefined = jobStoreDir,
+    private readonly runtimes?: AgentSessionRuntimeRegistry,
   ) {}
 
   list(): AgentEntry[] {
@@ -52,7 +59,14 @@ export class GatewayPool {
     const fleetStore = this.fleetStoreDir
       ? new JsonFileFleetAttachmentStore(join(this.fleetStoreDir, `${agent.id}.fleet.json`))
       : undefined;
-    const sessions = new SessionManager(gateway, agent.openclawAgentId, store, fleetStore, this.fleetAdapter);
+    const sessions = new SessionManager(
+      gateway,
+      agent.openclawAgentId,
+      store,
+      fleetStore,
+      this.fleetAdapter,
+      this.runtimes,
+    );
     const entry: PoolEntry = { agent, gateway, sessions };
     this.entries.set(agent.id, entry);
     return entry;

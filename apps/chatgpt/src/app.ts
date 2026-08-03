@@ -23,7 +23,16 @@ import {
   buildGetTaskStructuredContent,
   TASK_SUMMARY_PREVIEW_MAX,
 } from "@clawconnect/core";
-import type { AgentEntry, AgentRegistry, CheckMode, FleetAdapter, JobSnapshot, TaskDetail, TaskSummary } from "@clawconnect/core";
+import type {
+  AgentEntry,
+  AgentRegistry,
+  AgentSessionRuntimeRegistry,
+  CheckMode,
+  FleetAdapter,
+  JobSnapshot,
+  TaskDetail,
+  TaskSummary,
+} from "@clawconnect/core";
 import {
   negotiateProtocolVersion,
   buildExtensionsCapability,
@@ -62,6 +71,16 @@ export interface CreateAppOptions {
    * without needing a real tmux/filesystem.
    */
   fleetAdapter?: FleetAdapter;
+  /**
+   * Managed-agent-session runtimes this deployment can drive (see
+   * agent-session.ts). A host registers one runtime id/provider plus
+   * per-session inspect/continue/detach callbacks and keeps every detail of
+   * that runtime's CLI, transport, and project model on its own side of the
+   * boundary. Omitted, claude-fleet stays the only reachable runtime and an
+   * attachment naming any other reads back as a precise unknown_runtime
+   * result rather than failing the task.
+   */
+  agentSessionRuntimes?: AgentSessionRuntimeRegistry;
 }
 
 export interface App {
@@ -113,7 +132,13 @@ export function createApp(registry: AgentRegistry, opts: CreateAppOptions = {}):
 
   const hono = new Hono();
   const fleetAdapter = opts.fleetAdapter ?? new LocalTmuxFleetAdapter();
-  const pool = new GatewayPool(registry, opts.jobStoreDir ?? DEFAULT_JOB_STORE_DIR, fleetAdapter);
+  const pool = new GatewayPool(
+    registry,
+    opts.jobStoreDir ?? DEFAULT_JOB_STORE_DIR,
+    fleetAdapter,
+    undefined,
+    opts.agentSessionRuntimes,
+  );
   // Reload every configured agent's persisted jobs now, not lazily on first
   // request — otherwise an agent nobody has queried yet since the restart
   // would leave its in-flight jobs unrecovered indefinitely.

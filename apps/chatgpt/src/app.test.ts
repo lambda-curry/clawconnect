@@ -4,6 +4,7 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createApp, checkTaskText } from "./app.ts";
+import { AgentSessionRuntimeRegistry } from "@clawconnect/core";
 import type { AgentRegistry, FleetAdapter, JobSnapshot } from "@clawconnect/core";
 
 /**
@@ -263,5 +264,28 @@ describe("production entrypoint wiring — FleetAdapter", () => {
     const fake: FleetAdapter = { isLive: async () => false, readTerminalHandoff: async () => null };
     const { pool } = createApp(fakeRegistry(), { jobStoreDir, fleetAdapter: fake });
     expect(pool.forAgent("test-agent").sessions.hasFleetAdapter()).toBe(true);
+  });
+
+  /**
+   * Same failure mode, one layer up: a host's managed-agent-session runtimes
+   * are only reachable if the registry actually reaches every agent's
+   * SessionManager. Registering a runtime that nothing can dispatch to would
+   * look exactly like a working integration until a delegation needed it.
+   */
+  it("createApp passes a host's agent-session runtime registry through to every agent", () => {
+    const jobStoreDir = mkdtempSync(join(tmpdir(), "clawconnect-jobstore-"));
+    tmpDirs.push(jobStoreDir);
+    const runtimes = new AgentSessionRuntimeRegistry();
+    runtimes.register({ id: "t3-fleet", provider: "anthropic-claude-code", inspect: async () => ({ state: "running" }) });
+
+    const { pool } = createApp(fakeRegistry(), { jobStoreDir, agentSessionRuntimes: runtimes });
+    expect(pool.forAgent("test-agent").sessions.hasAgentSessionRuntime("t3-fleet")).toBe(true);
+  });
+
+  it("createApp leaves claude-fleet the only reachable runtime when no registry is supplied", () => {
+    const jobStoreDir = mkdtempSync(join(tmpdir(), "clawconnect-jobstore-"));
+    tmpDirs.push(jobStoreDir);
+    const { pool } = createApp(fakeRegistry(), { jobStoreDir });
+    expect(pool.forAgent("test-agent").sessions.hasAgentSessionRuntime("t3-fleet")).toBe(false);
   });
 });
