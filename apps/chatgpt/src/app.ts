@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { Hono } from "hono";
 import {
   GatewayPool,
+  LocalTmuxFleetAdapter,
   runTask,
   checkTask,
   getTask,
@@ -22,7 +23,7 @@ import {
   buildGetTaskStructuredContent,
   TASK_SUMMARY_PREVIEW_MAX,
 } from "@clawconnect/core";
-import type { AgentEntry, AgentRegistry, CheckMode, JobSnapshot, TaskDetail, TaskSummary } from "@clawconnect/core";
+import type { AgentEntry, AgentRegistry, CheckMode, FleetAdapter, JobSnapshot, TaskDetail, TaskSummary } from "@clawconnect/core";
 import {
   negotiateProtocolVersion,
   buildExtensionsCapability,
@@ -52,6 +53,15 @@ export interface CreateAppOptions {
   widgetHtmlPath?: string;
   /** Directory for per-agent job-persistence files. Defaults on (DEFAULT_JOB_STORE_DIR) — override so tests write into a scratch dir instead of the real default. */
   jobStoreDir?: string;
+  /**
+   * Fleet-transcript recovery adapter (see docs/architecture/2026-08-02-
+   * managed-fleet-attachment-plan.md). Defaults to a real LocalTmuxFleetAdapter
+   * so recovery tier 3 is actually reachable in production — without this,
+   * Clawdy could attach a Fleet session all day and ClawConnect would never
+   * consult it. Override in tests to inject a fake and assert on wiring
+   * without needing a real tmux/filesystem.
+   */
+  fleetAdapter?: FleetAdapter;
 }
 
 export interface App {
@@ -102,7 +112,8 @@ export function createApp(registry: AgentRegistry, opts: CreateAppOptions = {}):
   }
 
   const hono = new Hono();
-  const pool = new GatewayPool(registry, opts.jobStoreDir ?? DEFAULT_JOB_STORE_DIR);
+  const fleetAdapter = opts.fleetAdapter ?? new LocalTmuxFleetAdapter();
+  const pool = new GatewayPool(registry, opts.jobStoreDir ?? DEFAULT_JOB_STORE_DIR, fleetAdapter);
   // Reload every configured agent's persisted jobs now, not lazily on first
   // request — otherwise an agent nobody has queried yet since the restart
   // would leave its in-flight jobs unrecovered indefinitely.

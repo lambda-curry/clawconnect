@@ -92,6 +92,16 @@ export type FleetAttachmentRecord = {
   status: FleetLiveStatus | "superseded" | "detached";
   /** Set only on a record created by an explicit `replace` transition. */
   replacesAttachmentId?: string;
+  /**
+   * Correlates this attachment to ONE specific parent turn (a jobId) —
+   * stamped by session.ts whenever an attach/replace/continue directive
+   * rides in on a real (non-busy-rejected) submitTask call. A Fleet-transcript
+   * recovery is only ever trusted for the turn that currently owns this id:
+   * without it, an attachment left current from an earlier delegated turn
+   * could answer a LATER, unrelated task that never actually used it. Never
+   * set by "inspect" (a passive read-refresh, not a new delegation claim).
+   */
+  delegatedTurnId?: string;
   /** Set only when status is "detached" or "superseded" — why it stopped being current. */
   reason?: string;
   /**

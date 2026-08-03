@@ -88,6 +88,16 @@ function fakeFleetAdapter(
   };
 }
 
+function deferred<T>() {
+  let resolve!: (v: T) => void;
+  let reject!: (e: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 /**
  * Round-trips through `saved`, not just a fixed `preloaded` value — a fresh
  * SessionManager constructed over the SAME store instance (simulating a
@@ -159,7 +169,7 @@ describe("Fleet attachment transitions", () => {
     expect(job.prompt.context).toContain("after");
   });
 
-  it("later turns expose and continue the same attachment without a directive", () => {
+  it("later turns expose and continue the same attachment without a directive", async () => {
     const ctrl = fakeGateway();
     const sessions = new SessionManager(ctrl.gateway);
     const first = sessions.submitTask({
@@ -167,15 +177,17 @@ describe("Fleet attachment transitions", () => {
       context: fleetBlock({ op: "attach", handle: "cf-foo", host: "minip3" }),
     });
     ctrl.finishChat("first done", 0);
+    await wait();
 
     const before = sessions.getFleetAttachment(first.sessionKey);
     // Second turn, same session, NO directive at all.
     const second = sessions.submitTask({ task: "second", sessionKey: first.sessionKey });
+    expect(second.status).toBe("running"); // proves this is a REAL second turn, not a busy rejection
     const after = sessions.getFleetAttachment(second.sessionKey);
     expect(after).toEqual(before);
   });
 
-  it("explicit replacement preserves superseded lineage", () => {
+  it("explicit replacement preserves superseded lineage", async () => {
     const ctrl = fakeGateway();
     const sessions = new SessionManager(ctrl.gateway);
     const job = sessions.submitTask({
@@ -185,6 +197,7 @@ describe("Fleet attachment transitions", () => {
     const original = sessions.getFleetAttachment(job.sessionKey)!;
 
     ctrl.finishChat("done", 0);
+    await wait();
     sessions.submitTask({
       task: "replace it",
       sessionKey: job.sessionKey,
@@ -202,7 +215,7 @@ describe("Fleet attachment transitions", () => {
     expect(superseded.reason).toBe("stale worktree");
   });
 
-  it("explicit detach persists a reason and clears the current attachment", () => {
+  it("explicit detach persists a reason and clears the current attachment", async () => {
     const ctrl = fakeGateway();
     const sessions = new SessionManager(ctrl.gateway);
     const job = sessions.submitTask({
@@ -211,6 +224,7 @@ describe("Fleet attachment transitions", () => {
     });
     const original = sessions.getFleetAttachment(job.sessionKey)!;
     ctrl.finishChat("done", 0);
+    await wait();
 
     sessions.submitTask({
       task: "detach it",
@@ -225,7 +239,7 @@ describe("Fleet attachment transitions", () => {
     expect(detached.reason).toBe("task finished");
   });
 
-  it("needs_input reported via continue stays actionable — visible on the snapshot without forcing the job terminal", () => {
+  it("needs_input reported via continue stays actionable — visible on the snapshot without forcing the job terminal", async () => {
     const ctrl = fakeGateway();
     const sessions = new SessionManager(ctrl.gateway);
     const job = sessions.submitTask({
@@ -233,6 +247,7 @@ describe("Fleet attachment transitions", () => {
       context: fleetBlock({ op: "attach", handle: "cf-foo", host: "minip3" }),
     });
     ctrl.finishChat("done", 0);
+    await wait();
 
     sessions.submitTask({
       task: "check in",
@@ -321,7 +336,7 @@ describe("Fleet attachment restart persistence", () => {
 
 describe("Fleet-adapter recovery order (tier 3, after parent live+transcript recovery gives up)", () => {
   it("child completion does not prematurely finish an active parent — the adapter is never consulted while the job is running", async () => {
-    const adapter = fakeFleetAdapter({ handoff: { text: "child already finished", observedAt: Date.now() } });
+    const adapter = fakeFleetAdapter({ handoff: { text: "child already finished", resultAt: Date.now() } });
     const ctrl = fakeGateway();
     const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
     const job = sessions.submitTask({
@@ -334,7 +349,10 @@ describe("Fleet-adapter recovery order (tier 3, after parent live+transcript rec
   });
 
   it("empty parent final + completed attached child recovers the child result with resultSource=fleet-transcript", async () => {
-    const adapter = fakeFleetAdapter({ handoff: { text: "the child's real answer", observedAt: 12345 } });
+    // The handoff form computes resultAt lazily, at ADAPTER-CALL time — well
+    // after job.startedAt — matching the real timing (the child produces its
+    // answer sometime after the parent turn began, never before).
+    const adapter = fakeFleetAdapter({ handoff: async () => ({ text: "the child's real answer", resultAt: Date.now() }) });
     const ctrl = fakeGateway({ pollTranscriptForFinalText: async () => undefined });
     const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
     const job = sessions.submitTask({
@@ -358,7 +376,7 @@ describe("Fleet-adapter recovery order (tier 3, after parent live+transcript rec
 
   it("output is capped, with the durable transcript reference preserved on the attachment", async () => {
     const longText = "x".repeat(FLEET_RESULT_SUMMARY_MAX + 500);
-    const adapter = fakeFleetAdapter({ handoff: { text: longText, observedAt: 1 } });
+    const adapter = fakeFleetAdapter({ handoff: async () => ({ text: longText, resultAt: Date.now() }) });
     const ctrl = fakeGateway({ pollTranscriptForFinalText: async () => undefined });
     const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
     const job = sessions.submitTask({
@@ -397,7 +415,7 @@ describe("Fleet-adapter recovery order (tier 3, after parent live+transcript rec
   });
 
   it("repeated recovery is idempotent — calling the fallback again with the same handoff doesn't change the outcome or duplicate lineage", async () => {
-    const adapter = fakeFleetAdapter({ handoff: { text: "stable answer", observedAt: 1 } });
+    const adapter = fakeFleetAdapter({ handoff: async () => ({ text: "stable answer", resultAt: Date.now() }) });
     const ctrl = fakeGateway({ pollTranscriptForFinalText: async () => undefined });
     const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
     const job = sessions.submitTask({
@@ -420,7 +438,7 @@ describe("Fleet-adapter recovery order (tier 3, after parent live+transcript rec
   });
 
   it("late parent final safely replaces the provisional Fleet result", async () => {
-    const adapter = fakeFleetAdapter({ handoff: { text: "child's provisional answer", observedAt: 1 } });
+    const adapter = fakeFleetAdapter({ handoff: async () => ({ text: "child's provisional answer", resultAt: Date.now() }) });
     const ctrl = fakeGateway({ pollTranscriptForFinalText: async () => undefined });
     const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
     const job = sessions.submitTask({
@@ -439,5 +457,201 @@ describe("Fleet-adapter recovery order (tier 3, after parent live+transcript rec
     expect(finalJob.summary).toBe("the real parent answer, arrived late");
     expect(finalJob.resultSource).toBe("parent");
     expect(finalJob.terminalReason).toBe("lazy-recheck-transcript");
+  });
+});
+
+describe("Independent-review blocker fixes: delegated-turn boundary + stale-result rejection", () => {
+  it("a stale child result — its own timestamp predates this turn even starting — is rejected, not treated as this turn's answer", async () => {
+    // resultAt is BEFORE the test even runs (let alone before job.startedAt),
+    // simulating leftover output from a much earlier delegation.
+    const staleResultAt = Date.now() - 60_000;
+    const adapter = fakeFleetAdapter({ handoff: async () => ({ text: "stale output from ages ago", resultAt: staleResultAt }) });
+    const ctrl = fakeGateway({ pollTranscriptForFinalText: async () => undefined });
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
+    const job = sessions.submitTask({
+      task: "do the thing",
+      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "minip3" }),
+    });
+    ctrl.finishChat(NO_SUMMARY_SENTINEL, 0);
+    await wait();
+
+    const result = sessions.getJob(job.jobId)!;
+    expect(result.status).toBe("completed_no_summary");
+    expect(result.resultSource).toBe("parent");
+    expect(result.summary).not.toBe("stale output from ages ago");
+  });
+
+  it("an attachment left current from an EARLIER delegated turn does not answer a LATER, unrelated turn on the same session", async () => {
+    const adapter = fakeFleetAdapter({ handoff: async () => ({ text: "answer to the FIRST delegated task", resultAt: Date.now() }) });
+    const ctrl = fakeGateway({ pollTranscriptForFinalText: async () => undefined });
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
+
+    // Turn 1: attaches and delegates. Its own recovery correctly succeeds.
+    const turn1 = sessions.submitTask({
+      task: "delegate this to Fleet",
+      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "minip3" }),
+    });
+    ctrl.finishChat(NO_SUMMARY_SENTINEL, 0);
+    await wait();
+    expect(sessions.getJob(turn1.jobId)?.resultSource).toBe("fleet-transcript");
+
+    // Turn 2: a completely different, unrelated task on the SAME session.
+    // Clawdy sends NO directive — the attachment is still "current" for
+    // exposure purposes, but was never delegated to THIS turn.
+    const turn2 = sessions.submitTask({ task: "unrelated: what's 2+2", sessionKey: turn1.sessionKey });
+    ctrl.finishChat(NO_SUMMARY_SENTINEL, 1);
+    await wait();
+
+    const turn2Result = sessions.getJob(turn2.jobId)!;
+    expect(turn2Result.status).toBe("completed_no_summary");
+    expect(turn2Result.summary).not.toBe("answer to the FIRST delegated task");
+    expect(turn2Result.resultSource).toBe("parent");
+  });
+
+  it("needs_input stays actionable — a fresh, valid handoff with real output text is still refused while status is needs_input", async () => {
+    // The adapter genuinely has fresh, well-formed output — this is NOT a
+    // "nothing trustworthy yet" case. The guard must be the attachment's own
+    // Clawdy-reported status, not merely the absence of output.
+    const adapter = fakeFleetAdapter({ handoff: async () => ({ text: "here is some output, but I have a question", resultAt: Date.now() }) });
+    const ctrl = fakeGateway({ pollTranscriptForFinalText: async () => undefined });
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
+    const job = sessions.submitTask({
+      task: "do the thing",
+      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "minip3", status: "needs_input" }),
+    });
+    ctrl.finishChat(NO_SUMMARY_SENTINEL, 0);
+    await wait();
+
+    const result = sessions.getJob(job.jobId)!;
+    expect(result.status).toBe("completed_no_summary");
+    expect(result.resultSource).toBe("parent");
+    expect(result.summary).not.toContain("here is some output");
+
+    // The attachment itself stays needs_input — visible/actionable, not
+    // silently overwritten by the fact that output text existed.
+    expect(sessions.getFleetAttachment(job.sessionKey)?.status).toBe("needs_input");
+  });
+
+  it("a failed child's leftover transcript text is never treated as a trusted answer", async () => {
+    const adapter = fakeFleetAdapter({ handoff: async () => ({ text: "partial output before it crashed", resultAt: Date.now() }) });
+    const ctrl = fakeGateway({ pollTranscriptForFinalText: async () => undefined });
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
+    const job = sessions.submitTask({
+      task: "do the thing",
+      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "minip3", status: "failed" }),
+    });
+    ctrl.finishChat(NO_SUMMARY_SENTINEL, 0);
+    await wait();
+
+    const result = sessions.getJob(job.jobId)!;
+    expect(result.status).toBe("completed_no_summary");
+    expect(result.resultSource).toBe("parent");
+  });
+});
+
+describe("Independent-review blocker fixes: detach/replace races (identity compare-and-set)", () => {
+  it("an async inspect liveness result that resolves AFTER a detach does not resurrect the detached record", async () => {
+    const { promise: isLivePromise, resolve: resolveIsLive } = deferred<boolean>();
+    const adapter = fakeFleetAdapter({ isLive: () => isLivePromise });
+    const ctrl = fakeGateway();
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
+    const job = sessions.submitTask({
+      task: "first",
+      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "minip3" }),
+    });
+    const original = sessions.getFleetAttachment(job.sessionKey)!;
+    ctrl.finishChat("done", 0);
+    await wait();
+
+    // Kick off an inspect — its isLive call is now in flight, deliberately
+    // held open via the unresolved deferred promise. Finish ITS chat turn
+    // immediately so the busy guard doesn't block the next submission below
+    // (submitTask always dispatches a real turn — a directive alone doesn't
+    // exempt it from the one-job-per-session guard).
+    sessions.submitTask({ task: "inspect", sessionKey: job.sessionKey, context: fleetBlock({ op: "inspect" }) });
+    expect(adapter.isLiveCalls).toHaveLength(1);
+    ctrl.finishChat("inspect turn done", 1);
+    await wait();
+
+    // Detach BEFORE the in-flight isLive resolves.
+    sessions.submitTask({ task: "detach", sessionKey: job.sessionKey, context: fleetBlock({ op: "detach", reason: "operator stopped it" }) });
+    ctrl.finishChat("detach turn done", 2);
+    expect(sessions.getFleetAttachment(job.sessionKey)).toBeUndefined();
+
+    // NOW the stale isLive resolves true ("it's running!") — after the fact.
+    resolveIsLive(true);
+    await wait();
+
+    // The detached record must stay detached — not resurrected to "running".
+    const lineage = sessions.getFleetLineage(job.sessionKey);
+    const detachedRecord = lineage.find((a) => a.id === original.id)!;
+    expect(detachedRecord.status).toBe("detached");
+    expect(detachedRecord.reason).toBe("operator stopped it");
+    expect(sessions.getFleetAttachment(job.sessionKey)).toBeUndefined();
+  });
+
+  it("a recovery handoff that resolves AFTER a replace does not complete the job with the stale attachment's output, and does not corrupt the superseded record", async () => {
+    // First adapter call (from the initial give-up in recoverLateFinalText)
+    // finds nothing, settling the job to completed_no_summary — same as
+    // today's pre-existing behavior. The busy guard only blocks a NEW
+    // submission while a job is `running`, so the race this test targets is
+    // the SECOND consult: a lazy recheck (maybeRecoverTerminalJob) triggered
+    // once the job is already terminal, which a replace CAN legitimately
+    // race against.
+    let handoffCallCount = 0;
+    const { promise: secondHandoffPromise, resolve: resolveSecondHandoff } = deferred<FleetHandoff | null>();
+    const adapter = fakeFleetAdapter({
+      handoff: () => {
+        handoffCallCount += 1;
+        return handoffCallCount === 1 ? Promise.resolve(null) : secondHandoffPromise;
+      },
+    });
+    const ctrl = fakeGateway({ pollTranscriptForFinalText: async () => undefined });
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
+    const job = sessions.submitTask({
+      task: "do the thing",
+      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "minip3" }),
+    });
+    const original = sessions.getFleetAttachment(job.sessionKey)!;
+
+    ctrl.finishChat(NO_SUMMARY_SENTINEL, 0);
+    await wait();
+    expect(sessions.getJob(job.jobId)?.status).toBe("completed_no_summary");
+    expect(handoffCallCount).toBe(1);
+
+    // Trigger a lazy recheck — its tryFleetRecovery call is the SECOND
+    // handoff call, now in flight and deliberately held open.
+    const waitPromise = sessions.waitForJob(job.jobId, 0, undefined, "wait", 1);
+    await wait();
+    expect(handoffCallCount).toBe(2);
+
+    // Replace the attachment WHILE that second adapter call is in flight —
+    // job1 is terminal now, so the busy guard does not block this submit.
+    sessions.submitTask({
+      task: "replace mid-flight",
+      sessionKey: job.sessionKey,
+      context: fleetBlock({ op: "replace", handle: "cf-bar", host: "minip3", reason: "operator swap" }),
+    });
+    ctrl.finishChat("replace turn done", 1);
+
+    // NOW the stale handoff resolves, carrying the OLD (now-superseded) attachment's answer.
+    resolveSecondHandoff({ text: "stale answer for the superseded attachment", resultAt: Date.now() });
+    await waitPromise;
+    await wait();
+
+    // The job must NOT be completed via the stale, now-orphaned handoff.
+    const finalJob = sessions.getJob(job.jobId)!;
+    expect(finalJob.status).toBe("completed_no_summary");
+    expect(finalJob.summary).not.toBe("stale answer for the superseded attachment");
+
+    // The superseded record's lineage must not be corrupted by the stale write.
+    const supersededRecord = sessions.getFleetLineage(job.sessionKey).find((a) => a.id === original.id)!;
+    expect(supersededRecord.status).toBe("superseded");
+    expect(supersededRecord.lastResult).toBeUndefined();
+
+    // The new (replaced) attachment is untouched by the stale write too.
+    const current = sessions.getFleetAttachment(job.sessionKey)!;
+    expect(current.handle).toBe("cf-bar");
+    expect(current.lastResult).toBeUndefined();
   });
 });

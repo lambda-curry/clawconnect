@@ -7,7 +7,14 @@ import type { FleetAttachmentRecord } from "./types.ts";
 
 const execFileAsync = promisify(execFile);
 
-export type FleetHandoff = { text: string; observedAt: number };
+/**
+ * `resultAt` is the transcript entry's OWN timestamp — when the child
+ * actually produced this text — never wall-clock read time. session.ts uses
+ * it as the freshness/correlation bound for recovery: a handoff whose
+ * resultAt predates the recovering job's own startedAt cannot possibly be
+ * that job's answer, no matter how it ended up readable here.
+ */
+export type FleetHandoff = { text: string; resultAt: number };
 
 /**
  * Inspects exactly one already-known attachment — never enumerates or scans
@@ -83,24 +90,29 @@ export class LocalTmuxFleetAdapter implements FleetAdapter {
     const transcriptPath = meta.transcriptPath;
     if (typeof transcriptPath !== "string" || !transcriptPath || !existsSync(transcriptPath)) return null;
 
-    const text = readLastAssistantText(transcriptPath);
-    if (!text) return null;
-    return { text, observedAt: Date.now() };
+    const found = readLastAssistantEntry(transcriptPath);
+    if (!found) return null;
+    return { text: found.text, resultAt: found.resultAt };
   }
 }
 
 /**
- * Scans a Claude Code transcript JSONL file (`{type, message:{role,
- * content}}` per line, newest entry last) backward for the most recent
- * assistant text block. Best-effort: any read/parse failure yields "",
- * treated by the caller as "no trustworthy handoff yet" rather than an error.
+ * Scans a Claude Code transcript JSONL file (`{type, timestamp, message:
+ * {role, content}}` per line, newest entry last) backward for the most
+ * recent assistant text block THAT ALSO carries a parseable `timestamp`.
+ * An entry with text but no usable timestamp is skipped, not substituted
+ * with a fabricated one — session.ts's freshness check requires a REAL
+ * result timestamp, so "we found text but can't date it" must read as "no
+ * trustworthy handoff yet," not as an untimestamped success. Best-effort:
+ * any read/parse failure yields null, treated by the caller as "no
+ * trustworthy handoff yet" rather than an error.
  */
-function readLastAssistantText(transcriptPath: string): string {
+function readLastAssistantEntry(transcriptPath: string): { text: string; resultAt: number } | null {
   let raw: string;
   try {
     raw = readFileSync(transcriptPath, "utf8");
   } catch {
-    return "";
+    return null;
   }
   const lines = raw.split("\n").filter((l) => l.trim().length > 0);
   for (let i = lines.length - 1; i >= 0; i--) {
@@ -111,9 +123,12 @@ function readLastAssistantText(transcriptPath: string): string {
       continue;
     }
     const text = extractAssistantText(entry);
-    if (text) return text;
+    if (!text) continue;
+    const resultAt = extractResultTimestamp(entry);
+    if (resultAt === undefined) continue;
+    return { text, resultAt };
   }
-  return "";
+  return null;
 }
 
 function extractAssistantText(entry: unknown): string {
@@ -129,4 +144,13 @@ function extractAssistantText(entry: unknown): string {
     .map((b) => b.text as string)
     .join("")
     .trim();
+}
+
+/** Parses the entry's own `timestamp` (ISO string, the real Claude Code transcript convention) into epoch ms. */
+function extractResultTimestamp(entry: unknown): number | undefined {
+  if (!entry || typeof entry !== "object") return undefined;
+  const ts = (entry as Record<string, unknown>).timestamp;
+  if (typeof ts !== "string") return undefined;
+  const ms = Date.parse(ts);
+  return Number.isFinite(ms) ? ms : undefined;
 }

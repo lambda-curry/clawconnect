@@ -97,9 +97,9 @@ describe("LocalTmuxFleetAdapter", () => {
     mkdirSync(dir, { recursive: true });
     const transcriptPath = join(dir, "session.jsonl");
     const lines = [
-      { type: "user", message: { role: "user", content: [{ type: "text", text: "do the thing" }] } },
-      { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "working on it" }] } },
-      { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "done — final answer" }] } },
+      { type: "user", timestamp: "2026-08-03T00:00:00.000Z", message: { role: "user", content: [{ type: "text", text: "do the thing" }] } },
+      { type: "assistant", timestamp: "2026-08-03T00:00:05.000Z", message: { role: "assistant", content: [{ type: "text", text: "working on it" }] } },
+      { type: "assistant", timestamp: "2026-08-03T00:01:00.000Z", message: { role: "assistant", content: [{ type: "text", text: "done — final answer" }] } },
     ];
     writeFileSync(transcriptPath, lines.map((l) => JSON.stringify(l)).join("\n"));
     writeFileSync(join(dir, "meta.json"), JSON.stringify({ transcriptPath }));
@@ -107,7 +107,7 @@ describe("LocalTmuxFleetAdapter", () => {
     const adapter = new LocalTmuxFleetAdapter(home);
     const handoff = await adapter.readTerminalHandoff(attachment);
     expect(handoff?.text).toBe("done — final answer");
-    expect(typeof handoff?.observedAt).toBe("number");
+    expect(handoff?.resultAt).toBe(Date.parse("2026-08-03T00:01:00.000Z"));
   });
 
   it("readTerminalHandoff skips assistant entries with no visible text and unparseable lines", async () => {
@@ -117,9 +117,9 @@ describe("LocalTmuxFleetAdapter", () => {
     mkdirSync(dir, { recursive: true });
     const transcriptPath = join(dir, "session.jsonl");
     const lines = [
-      JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "real answer" }] } }),
+      JSON.stringify({ type: "assistant", timestamp: "2026-08-03T00:00:00.000Z", message: { role: "assistant", content: [{ type: "text", text: "real answer" }] } }),
       "{ not valid json",
-      JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "thinking", thinking: "..." }] } }),
+      JSON.stringify({ type: "assistant", timestamp: "2026-08-03T00:00:05.000Z", message: { role: "assistant", content: [{ type: "thinking", thinking: "..." }] } }),
     ];
     writeFileSync(transcriptPath, lines.join("\n"));
     writeFileSync(join(dir, "meta.json"), JSON.stringify({ transcriptPath }));
@@ -127,6 +127,28 @@ describe("LocalTmuxFleetAdapter", () => {
     const adapter = new LocalTmuxFleetAdapter(home);
     const handoff = await adapter.readTerminalHandoff(attachment);
     expect(handoff?.text).toBe("real answer");
+  });
+
+  it("readTerminalHandoff skips a text-bearing entry with no parseable timestamp rather than fabricating one", async () => {
+    const home = tmpHome();
+    const attachment = makeAttachment();
+    const dir = join(home, attachment.handle);
+    mkdirSync(dir, { recursive: true });
+    const transcriptPath = join(dir, "session.jsonl");
+    const lines = [
+      // Newest entry has text but no usable timestamp — must be skipped, not
+      // dated with Date.now() as a substitute.
+      JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "undated text" }] } }),
+      JSON.stringify({ type: "assistant", timestamp: "not-a-real-timestamp", message: { role: "assistant", content: [{ type: "text", text: "also undated" }] } }),
+      JSON.stringify({ type: "assistant", timestamp: "2026-08-03T00:00:00.000Z", message: { role: "assistant", content: [{ type: "text", text: "the actual dated answer" }] } }),
+    ];
+    writeFileSync(transcriptPath, lines.join("\n"));
+    writeFileSync(join(dir, "meta.json"), JSON.stringify({ transcriptPath }));
+
+    const adapter = new LocalTmuxFleetAdapter(home);
+    const handoff = await adapter.readTerminalHandoff(attachment);
+    expect(handoff?.text).toBe("the actual dated answer");
+    expect(handoff?.resultAt).toBe(Date.parse("2026-08-03T00:00:00.000Z"));
   });
 
   it.runIf(hasTmux)(

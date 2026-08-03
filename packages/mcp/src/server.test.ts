@@ -3,7 +3,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import { createMcpServer, defaultFormatCheckTask } from "./server.ts";
-import type { AgentRegistry, CheckTaskResult, JobSnapshot } from "@clawconnect/core";
+import type { AgentRegistry, CheckTaskResult, FleetAdapter, JobSnapshot } from "@clawconnect/core";
 
 /**
  * Generic MCP compatibility fixtures for the stdio server (Claude Code,
@@ -269,5 +269,26 @@ describe("check_task model-facing text carries the resume cursor", () => {
     );
     const payload = JSON.parse(response.content[0].text) as Record<string, unknown>;
     expect(String(payload.hint)).toContain("knownLogCount=17");
+  });
+});
+
+describe("production entrypoint wiring — FleetAdapter", () => {
+  /**
+   * Independent-review blocker 1: recovery tier 3 (see docs/architecture/
+   * 2026-08-02-managed-fleet-attachment-plan.md) is only reachable if a real
+   * FleetAdapter is actually injected in production, not just implemented and
+   * left unwired. Proves createMcpServer() does this by default, without
+   * spinning up a real recovery scenario — SessionManager.hasFleetAdapter()
+   * is the dedicated, minimal surface for exactly this assertion.
+   */
+  it("createMcpServer wires a real FleetAdapter into every agent's SessionManager by default", () => {
+    const { pool } = createMcpServer({ registry: fakeRegistry() });
+    expect(pool.forAgent("test-agent").sessions.hasFleetAdapter()).toBe(true);
+  });
+
+  it("createMcpServer lets a caller override the FleetAdapter (e.g. a test injecting a fake)", () => {
+    const fake: FleetAdapter = { isLive: async () => false, readTerminalHandoff: async () => null };
+    const { pool } = createMcpServer({ registry: fakeRegistry(), fleetAdapter: fake });
+    expect(pool.forAgent("test-agent").sessions.hasFleetAdapter()).toBe(true);
   });
 });

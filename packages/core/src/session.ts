@@ -341,6 +341,16 @@ export class SessionManager {
   // sessions/handles/hosts, which is what "no heuristic scanning" (mission
   // requirement 4) means structurally, not just by convention.
 
+  /**
+   * True when a FleetAdapter was injected at construction — i.e. recovery
+   * tier 3 is actually reachable, not just persisted metadata. Exists so
+   * production entrypoint tests can assert the wiring is present without
+   * needing to drive a full recovery scenario end to end.
+   */
+  hasFleetAdapter(): boolean {
+    return this.fleetAdapter !== undefined;
+  }
+
   /** The session's current attachment, or undefined if it has never attached / is currently detached. */
   getFleetAttachment(sessionKey: string): FleetAttachmentRecord | undefined {
     const state = this.fleetAttachments.get(sessionKey);
@@ -365,6 +375,7 @@ export class SessionManager {
    */
   private attachOrReplaceFleet(
     sessionKey: string,
+    jobId: string,
     directive: Extract<FleetDirective, { op: "attach" | "replace" }>,
   ): FleetAttachmentRecord {
     const state = this.fleetAttachments.get(sessionKey) ?? { sessionKey, attachments: {} };
@@ -380,6 +391,9 @@ export class SessionManager {
       remoteUrl: directive.remoteUrl,
       attachedAt: Date.now(),
       status: directive.status ?? "starting",
+      // The turn that is dispatching THIS attach/replace is, by construction,
+      // delegating its own work to it — see FleetAttachmentRecord.delegatedTurnId.
+      delegatedTurnId: jobId,
       ...(previous ? { replacesAttachmentId: previous.id } : {}),
     };
 
@@ -426,69 +440,108 @@ export class SessionManager {
   }
 
   /**
-   * continue: applies an optional Clawdy-reported status to the CURRENT
-   * attachment. No-op (and no persistence) if there is no current attachment
-   * or nothing changed — "continue" with no directive at all is simply
-   * omitting a directive, which already leaves the existing attachment
-   * exposed on every subsequent snapshot untouched.
-   *
-   * inspect: the same, plus — only when Clawdy did NOT supply an explicit
-   * status — a bounded, single-handle liveness check via the injected
-   * FleetAdapter. Deliberately NOT awaited by the caller (submitTask stays
-   * synchronous, matching its existing public contract): the liveness result
-   * lands a tick later via the fire-and-forget promise below, same pattern
-   * as this file's other background recovery work (recoverLateFinalText).
+   * Compare-and-set guard for a write whose value was computed
+   * asynchronously (an adapter call awaited across a tick): true only when
+   * `attachmentId` is STILL this session's current attachment. A
+   * detach/replace that lands while the async call was in flight changes
+   * `currentAttachmentId` (to undefined, or to a different new id), which
+   * this catches — preventing a stale async result from resurrecting or
+   * corrupting a now-historical (detached/superseded) lineage record.
    */
-  private applyFleetObservation(sessionKey: string, directive: Extract<FleetDirective, { op: "continue" | "inspect" }>): void {
-    const state = this.fleetAttachments.get(sessionKey);
-    const current = state?.currentAttachmentId ? state.attachments[state.currentAttachmentId] : undefined;
-    if (!state || !current) return;
+  private isStillCurrentFleetAttachment(sessionKey: string, attachmentId: string): boolean {
+    return this.fleetAttachments.get(sessionKey)?.currentAttachmentId === attachmentId;
+  }
 
-    if (directive.status && directive.status !== current.status) {
-      this.writeFleetAttachment(sessionKey, current.id, { status: directive.status, lastObservedAt: Date.now() });
-      return;
+  /**
+   * continue: applies an optional Clawdy-reported status to the CURRENT
+   * attachment, and — since `continue` is Clawdy explicitly re-affirming
+   * "this turn is still delegated to this attachment" — re-stamps
+   * `delegatedTurnId` to `jobId` even when status didn't change. No-op (and
+   * no persistence) if there is no current attachment or nothing changed —
+   * "continue" with no directive at all is simply omitting a directive,
+   * which already leaves the existing attachment exposed on every
+   * subsequent snapshot untouched (just not eligible for recovery on a turn
+   * that never claimed it — see tryFleetRecovery).
+   *
+   * inspect: applies only an optional Clawdy-reported status (never
+   * delegatedTurnId — a passive read-refresh is not a new delegation claim),
+   * plus — only when Clawdy did NOT supply an explicit status — a bounded,
+   * single-handle liveness check via the injected FleetAdapter. Deliberately
+   * NOT awaited by the caller (submitTask stays synchronous, matching its
+   * existing public contract): the liveness result lands a tick later via
+   * the fire-and-forget promise below, CAS-guarded against a detach/replace
+   * that lands first — same pattern as this file's other background
+   * recovery work (recoverLateFinalText).
+   */
+  private applyFleetObservation(
+    sessionKey: string,
+    jobId: string | undefined,
+    directive: Extract<FleetDirective, { op: "continue" | "inspect" }>,
+  ): void {
+    const current = this.getFleetAttachment(sessionKey);
+    if (!current) return;
+
+    // Built via object-literal keys rather than property assignment on
+    // purpose: this file's structural one-writer tripwire test (see
+    // completion-reconciliation.test.ts) regex-matches ANY `.status =`
+    // assignment regardless of receiver, and `patch.status = …` here would
+    // be a false positive against a Job-outcome write it was never meant to
+    // catch — `patch` is a FleetAttachmentRecord fragment, not a Job.
+    const statusChanged = directive.status !== undefined && directive.status !== current.status;
+    const delegationChanged = directive.op === "continue" && jobId !== undefined && jobId !== current.delegatedTurnId;
+    if (statusChanged || delegationChanged) {
+      this.writeFleetAttachment(sessionKey, current.id, {
+        ...(statusChanged ? { status: directive.status } : {}),
+        ...(delegationChanged ? { delegatedTurnId: jobId } : {}),
+        lastObservedAt: Date.now(),
+      });
     }
+
     if (directive.op !== "inspect" || !this.fleetAdapter) return;
     const adapter = this.fleetAdapter;
     const attachmentId = current.id;
     adapter.isLive(current).then(
       (live) => {
+        if (!this.isStillCurrentFleetAttachment(sessionKey, attachmentId)) return;
         this.writeFleetAttachment(sessionKey, attachmentId, {
           lastObservedAt: Date.now(),
           ...(live && current.status !== "running" ? { status: "running" } : {}),
         });
       },
-      () => this.writeFleetAttachment(sessionKey, attachmentId, { lastObservedAt: Date.now() }),
+      () => {
+        if (!this.isStillCurrentFleetAttachment(sessionKey, attachmentId)) return;
+        this.writeFleetAttachment(sessionKey, attachmentId, { lastObservedAt: Date.now() });
+      },
     );
   }
 
   /**
-   * Parses a Fleet directive out of `context` (if any), applies the
-   * resulting transition synchronously, and returns the context with the
-   * directive block stripped — buildSubmitMessage must receive this
-   * stripped text, not the original, so the agent's prompt never sees raw
-   * directive JSON. A directive applies even when the job it rides in on is
-   * refused for "session busy": attachment transitions are session metadata,
-   * not gated on a chat turn actually dispatching.
+   * Applies an already-parsed Fleet directive. Takes `jobId` explicitly
+   * (rather than minting one itself) because attach/replace/continue stamp
+   * `delegatedTurnId` to it — see attachOrReplaceFleet/applyFleetObservation
+   * and FleetAttachmentRecord.delegatedTurnId. Called from submitTask only
+   * on the REAL dispatch path (never for a "session busy" rejection): a
+   * directive whose turn never actually dispatched must not claim/burn a
+   * delegation slot, and must not silently invalidate whatever turn
+   * currently legitimately owns it.
    */
-  private applyFleetDirectiveFromContext(sessionKey: string, context: string | undefined): string | undefined {
-    const parsed = parseFleetDirective(context);
-    if (!parsed) return context;
-    const { directive } = parsed;
+  private applyFleetDirective(sessionKey: string, jobId: string, directive: FleetDirective): void {
     switch (directive.op) {
       case "attach":
       case "replace":
-        this.attachOrReplaceFleet(sessionKey, directive);
+        this.attachOrReplaceFleet(sessionKey, jobId, directive);
         break;
       case "detach":
         this.detachFleet(sessionKey, directive.reason);
         break;
       case "continue":
+        this.applyFleetObservation(sessionKey, jobId, directive);
+        break;
       case "inspect":
-        this.applyFleetObservation(sessionKey, directive);
+        // Passive read-refresh — never stamps delegatedTurnId.
+        this.applyFleetObservation(sessionKey, undefined, directive);
         break;
     }
-    return parsed.strippedText;
   }
 
   /**
@@ -497,14 +550,29 @@ export class SessionManager {
    * where the parent's own live+transcript recovery has already given up.
    * Consults ONLY the session's known current attachment via the injected
    * FleetAdapter; returns undefined (never synthesizes a fake completion)
-   * when there is no attachment, no adapter configured, or the adapter has
-   * nothing trustworthy yet — including a still-live or needs_input
-   * attachment, which must stay actionable rather than being reported done.
+   * for any of:
+   *   - no attachment, or no adapter configured;
+   *   - the attachment was not delegated to THIS turn (delegatedTurnId does
+   *     not match `job.jobId`) — otherwise a still-current attachment left
+   *     over from an earlier, unrelated turn could answer a LATER task it
+   *     never actually worked on;
+   *   - the attachment is `needs_input`/`failed` — an explicit Clawdy-
+   *     reported signal that the child is NOT simply finished, which must
+   *     stay actionable rather than being papered over by leftover
+   *     transcript text;
+   *   - the adapter has nothing trustworthy yet;
+   *   - the handoff's own result timestamp predates this turn even starting
+   *     (stale output correlated to an earlier delegation);
+   *   - the attachment was detached/replaced while the adapter call was in
+   *     flight (identity compare-and-set).
    */
-  private async tryFleetRecovery(sessionKey: string): Promise<{ summary: string; attachmentId: string } | undefined> {
+  private async tryFleetRecovery(job: Job): Promise<{ summary: string; attachmentId: string } | undefined> {
     if (!this.fleetAdapter) return undefined;
-    const current = this.getFleetAttachment(sessionKey);
+    const current = this.getFleetAttachment(job.sessionKey);
     if (!current) return undefined;
+
+    if (!current.delegatedTurnId || current.delegatedTurnId !== job.jobId) return undefined;
+    if (current.status === "needs_input" || current.status === "failed") return undefined;
 
     let handoff: FleetHandoff | null;
     try {
@@ -515,13 +583,25 @@ export class SessionManager {
     }
     if (!handoff || !handoff.text) return undefined;
 
+    if (handoff.resultAt < job.startedAt) {
+      logDebug(
+        `[fleet] discarding stale handoff for ${current.handle}: resultAt ${handoff.resultAt} predates job ${job.jobId.slice(0, 8)}'s start ${job.startedAt}`,
+      );
+      return undefined;
+    }
+
+    // Identity CAS: the attachment may have been detached/replaced while the
+    // adapter call above was in flight. Only write into the record that is
+    // STILL current — never resurrect/corrupt a now-historical one.
+    if (!this.isStillCurrentFleetAttachment(job.sessionKey, current.id)) return undefined;
+
     const capped =
       handoff.text.length > FLEET_RESULT_SUMMARY_MAX
         ? `${handoff.text.slice(0, FLEET_RESULT_SUMMARY_MAX - 1)}…`
         : handoff.text;
     const outputRef = current.worktree ? `${current.handle}:${current.worktree}` : current.handle;
-    this.writeFleetAttachment(sessionKey, current.id, {
-      lastResult: { summary: capped, outputRef, observedAt: handoff.observedAt },
+    this.writeFleetAttachment(job.sessionKey, current.id, {
+      lastResult: { summary: capped, outputRef, observedAt: handoff.resultAt },
       lastObservedAt: Date.now(),
     });
     return { summary: handoff.text, attachmentId: current.id };
@@ -530,11 +610,15 @@ export class SessionManager {
   submitTask(input: TaskInput): Job {
     const { sessionKey, migratedFromLegacy } = resolveSessionKey(input.sessionKey, this.agentId);
 
-    // Parse+apply a Fleet directive (if any) BEFORE building the message, so
-    // buildSubmitMessage never sees the raw directive block — and before the
-    // busy check, since an attachment transition is session metadata, not
-    // gated on whether this particular chat turn gets dispatched.
-    const strippedContext = this.applyFleetDirectiveFromContext(sessionKey, input.context);
+    // Parse (but do not yet apply) any Fleet directive — buildSubmitMessage
+    // must never see the raw directive block, so it's stripped here
+    // regardless of what happens next. Application is DEFERRED until the
+    // busy check below has passed, so a directive always correlates to the
+    // REAL job it rides in on (see applyFleetDirective's delegatedTurnId
+    // stamping) — a "session busy" rejection must not be able to claim or
+    // burn a delegation slot that belongs to the job actually running.
+    const parsedDirective = parseFleetDirective(input.context);
+    const strippedContext = parsedDirective ? parsedDirective.strippedText : input.context;
     const effectiveInput: TaskInput = strippedContext === input.context ? input : { ...input, context: strippedContext };
 
     // buildSubmitMessage prepends the `message`-tool veto preamble, the
@@ -580,6 +664,8 @@ export class SessionManager {
     }
 
     const jobId = randomUUID();
+    // Apply the directive now that we know it correlates to a REAL turn.
+    if (parsedDirective) this.applyFleetDirective(sessionKey, jobId, parsedDirective.directive);
     const artifacts = emptyArtifacts();
     const now = Date.now();
     const hasInitialLog = !input.sessionKey || migratedFromLegacy;
@@ -1134,7 +1220,7 @@ export class SessionManager {
           // confirmed nothing upstream is left to wait for). Consults only
           // this session's known current Fleet attachment, never a scan —
           // see tryFleetRecovery.
-          const fleet = await this.tryFleetRecovery(sessionKey);
+          const fleet = await this.tryFleetRecovery(job);
           if (fleet && job.status === "running" && this.latestJobBySession.get(sessionKey) === jobId) {
             // Marked provisional so the existing lazy-recheck path
             // (maybeRecoverTerminalJob) keeps re-reading the PARENT
@@ -1320,7 +1406,7 @@ export class SessionManager {
       // job is `running` — that path is recoverLateFinalText's, not this
       // lazy re-check's.
       if (job.status === "completed_no_summary") {
-        const fleet = await this.tryFleetRecovery(job.sessionKey);
+        const fleet = await this.tryFleetRecovery(job);
         if (
           fleet &&
           this.latestJobBySession.get(job.sessionKey) === job.jobId &&

@@ -4,7 +4,7 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createApp, checkTaskText } from "./app.ts";
-import type { AgentRegistry, JobSnapshot } from "@clawconnect/core";
+import type { AgentRegistry, FleetAdapter, JobSnapshot } from "@clawconnect/core";
 
 /**
  * Real HTTP integration tests against createApp()'s request listener — a
@@ -238,5 +238,30 @@ describe("check_task model-facing text carries the resume cursor", () => {
     const text = checkTaskText(runningSnapshot({ status: "completed", summary: "the answer" }), true);
     expect(text).toBe("the answer");
     expect(text).not.toContain("knownLogCount");
+  });
+});
+
+describe("production entrypoint wiring — FleetAdapter", () => {
+  /**
+   * Independent-review blocker 1: recovery tier 3 (see docs/architecture/
+   * 2026-08-02-managed-fleet-attachment-plan.md) is only reachable if a real
+   * FleetAdapter is actually injected in production, not just implemented and
+   * left unwired. Proves createApp() does this by default, without spinning
+   * up a real recovery scenario — SessionManager.hasFleetAdapter() is the
+   * dedicated, minimal surface for exactly this assertion.
+   */
+  it("createApp wires a real FleetAdapter into every agent's SessionManager by default", () => {
+    const jobStoreDir = mkdtempSync(join(tmpdir(), "clawconnect-jobstore-"));
+    tmpDirs.push(jobStoreDir);
+    const { pool } = createApp(fakeRegistry(), { jobStoreDir });
+    expect(pool.forAgent("test-agent").sessions.hasFleetAdapter()).toBe(true);
+  });
+
+  it("createApp lets a caller override the FleetAdapter (e.g. a test injecting a fake)", () => {
+    const jobStoreDir = mkdtempSync(join(tmpdir(), "clawconnect-jobstore-"));
+    tmpDirs.push(jobStoreDir);
+    const fake: FleetAdapter = { isLive: async () => false, readTerminalHandoff: async () => null };
+    const { pool } = createApp(fakeRegistry(), { jobStoreDir, fleetAdapter: fake });
+    expect(pool.forAgent("test-agent").sessions.hasFleetAdapter()).toBe(true);
   });
 });

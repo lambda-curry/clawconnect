@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import {
   GatewayPool,
+  LocalTmuxFleetAdapter,
   runTask,
   checkTask,
   getTask,
@@ -24,6 +25,7 @@ import type {
   CheckMode,
   CheckTaskResult,
   ContinuationState,
+  FleetAdapter,
   RunTaskResult,
   TaskSummary,
   SessionInspectResult,
@@ -175,13 +177,24 @@ function defaultFormatGetSession(result: SessionInspectResult): McpToolResponse 
 
 // ── Server factory ──────────────────────────────────────────────────────────
 
-export function createMcpServer(config: { registry: AgentRegistry; provider?: ProviderConfig }) {
+export function createMcpServer(config: {
+  registry: AgentRegistry;
+  provider?: ProviderConfig;
+  /**
+   * Fleet-transcript recovery adapter (see docs/architecture/2026-08-02-
+   * managed-fleet-attachment-plan.md). Defaults to a real LocalTmuxFleetAdapter
+   * so recovery tier 3 is actually reachable in production. Override in
+   * tests to inject a fake and assert on wiring.
+   */
+  fleetAdapter?: FleetAdapter;
+}) {
   const server = new McpServer({
     name: "ClawConnect",
     version: "0.1.0",
   });
 
-  const pool = new GatewayPool(config.registry);
+  const fleetAdapter = config.fleetAdapter ?? new LocalTmuxFleetAdapter();
+  const pool = new GatewayPool(config.registry, undefined, fleetAdapter);
 
   const provider = config.provider ?? {};
   const defaultMode = provider.defaultCheckMode ?? "wait";

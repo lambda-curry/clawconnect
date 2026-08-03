@@ -3,6 +3,10 @@ export { SessionManager } from "./session.ts";
 export { GatewayPool } from "./gateway-pool.ts";
 export { JsonFileJobStore } from "./job-store.ts";
 export type { JobStore, PersistedJob } from "./job-store.ts";
+export { JsonFileFleetAttachmentStore } from "./fleet-attachment-store.ts";
+export type { FleetAttachmentStore } from "./fleet-attachment-store.ts";
+export { LocalTmuxFleetAdapter } from "./fleet-adapter.ts";
+export type { FleetAdapter, FleetHandoff } from "./fleet-adapter.ts";
 export { loadAgentRegistry, resolveAgent, REGISTRY_PATH, agentBlurb, agentDescriptor } from "./agent-registry.ts";
 export type { AgentEntry, AgentRegistry } from "./agent-registry.ts";
 export { searchMemory, getMemory, listCollections, DEFAULT_QMD_URL } from "./memory.ts";
@@ -28,6 +32,9 @@ export type {
   ContinuationState,
   ErrorCategory,
   ErrorInfo,
+  FleetAttachmentRecord,
+  FleetDirective,
+  FleetLiveStatus,
   GatewayConfig,
   GatewayEvent,
   Job,
@@ -36,7 +43,9 @@ export type {
   JobStatus,
   LogEntry,
   NextAction,
+  ResultSource,
   RunTaskResult,
+  SessionFleetState,
   SessionInspectMode,
   SessionInspectResult,
   TaskInput,
