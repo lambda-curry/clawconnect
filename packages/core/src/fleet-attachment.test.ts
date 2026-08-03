@@ -1447,6 +1447,46 @@ describe("managed agent sessions on a host-registered runtime", () => {
     expect(attachment.latestResponse).toBeUndefined();
   });
 
+  it("still takes a token for a stated status that REPEATS the stored one, so an older read cannot overtake it", async () => {
+    // The status field looks identical before and after this report, which is
+    // exactly why it is dangerous: the report is still the newest thing anyone
+    // has said about the session, and the read that went out before it is
+    // still older. Advancing the token only when the VALUE changed left the
+    // record's freshness mark behind the report, so the older read passed the
+    // compare-and-set and replaced a state Clawdy had just re-affirmed.
+    const gate = deferred<AgentSessionObservation>();
+    const t3 = fakeT3Runtime({ inspect: () => gate.promise });
+    const ctrl = fakeGateway();
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, t3.registry);
+    const job = sessions.submitTask({ task: "ship it", context: T3_MARKER });
+    expect(sessions.getFleetAttachment(job.sessionKey)?.status).toBe("running");
+
+    const inFlight = sessions.runAgentSessionOp(job.sessionKey, { op: "inspect" });
+    await wait();
+    ctrl.finishChat("first turn done", 0);
+    await wait();
+    const before = sessions.getFleetAttachment(job.sessionKey)!;
+
+    // Clawdy re-states exactly what the record already says.
+    sessions.submitTask({
+      task: "just looking",
+      sessionKey: job.sessionKey,
+      context: fleetBlock({ op: "inspect", status: "running" }),
+    });
+    const restated = sessions.getFleetAttachment(job.sessionKey)!;
+    expect(restated.status).toBe("running");
+    expect(restated.observationToken ?? 0).toBeGreaterThan(before.observationToken ?? 0);
+    expect(restated.lastObservedAt).toBeGreaterThanOrEqual(restated.attachedAt);
+
+    // The older read straggles in behind it, disagreeing.
+    gate.resolve({ state: "needs_input", latestResponse: "state from before the report" });
+    await inFlight;
+
+    const attachment = sessions.getFleetAttachment(job.sessionKey)!;
+    expect(attachment.status).toBe("running");
+    expect(attachment.latestResponse).toBeUndefined();
+  });
+
   it("asks the runtime to stop the session only when the detach says so, and detaches locally either way", async () => {
     const quiet = fakeT3Runtime({ withDetach: true });
     const ctrl = fakeGateway();

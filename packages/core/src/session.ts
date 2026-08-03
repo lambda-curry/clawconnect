@@ -803,7 +803,8 @@ export class SessionManager {
    * attachment, and — since `continue` is Clawdy explicitly re-affirming
    * "this turn is still delegated to this attachment" — re-stamps
    * `delegatedTurnId` to `jobId` even when status didn't change. No-op (and
-   * no persistence) if there is no current attachment or nothing changed —
+   * no persistence) if there is no current attachment, or if the directive
+   * states no status and claims no new delegation —
    * "continue" with no directive at all is simply omitting a directive,
    * which already leaves the existing attachment exposed on every
    * subsequent snapshot untouched (just not eligible for recovery on a turn
@@ -850,9 +851,9 @@ export class SessionManager {
     // assignment regardless of receiver, and `patch.status = …` here would
     // be a false positive against a Job-outcome write it was never meant to
     // catch — `patch` is a FleetAttachmentRecord fragment, not a Job.
-    const statusChanged = directive.status !== undefined && directive.status !== current.status;
+    const statusStated = directive.status !== undefined;
     const delegationChanged = directive.op === "continue" && jobId !== undefined && jobId !== current.delegatedTurnId;
-    if (statusChanged || delegationChanged) {
+    if (statusStated || delegationChanged) {
       this.writeFleetAttachment(sessionKey, current.id, {
         // Same rule as a re-stated marker: a `continue` from a LATER turn is a
         // new delegation, so the previous turn's outcome fields go. Listed
@@ -862,7 +863,16 @@ export class SessionManager {
         // one — so it takes a token like any other. Without that, an `inspect`
         // probe already in flight (which does not re-stamp delegatedTurnId,
         // being a passive read) could resolve afterwards and overwrite it.
-        ...(statusChanged ? { status: directive.status, observationToken: ++this.observationSeq } : {}),
+        //
+        // Keyed off STATED, not CHANGED: a report that repeats the stored
+        // status is still a fresh observation of NOW, and an in-flight read
+        // that started before it is still older. Treating it as a no-op left
+        // the token behind the report, so that older read passed the CAS and
+        // replaced a status Clawdy had just re-affirmed with what it saw
+        // beforehand. An identical value written again is invisible in the
+        // record apart from the token and freshness mark — which is the whole
+        // point of writing it.
+        ...(statusStated ? { status: directive.status, observationToken: ++this.observationSeq } : {}),
         ...(delegationChanged ? { delegatedTurnId: jobId } : {}),
         lastObservedAt: Date.now(),
       });
