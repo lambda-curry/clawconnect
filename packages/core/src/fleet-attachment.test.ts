@@ -796,4 +796,54 @@ describe("Independent-review blocker fixes: detach/replace races (identity compa
     expect(current.handle).toBe("cf-bar");
     expect(current.lastResult).toBeUndefined();
   });
+
+  it("a delayed handoff from an older turn is discarded when the same attachment continues into needs_input", async () => {
+    let handoffCallCount = 0;
+    const { promise: handoffPromise, resolve: resolveHandoff } = deferred<FleetHandoff | null>();
+    const adapter = fakeFleetAdapter({
+      handoff: () => {
+        handoffCallCount += 1;
+        return handoffCallCount === 1 ? Promise.resolve(null) : handoffPromise;
+      },
+    });
+    const ctrl = fakeGateway({ pollTranscriptForFinalText: async () => undefined });
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
+    const job = sessions.submitTask({
+      task: "do the thing",
+      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "minip3" }),
+    });
+
+    ctrl.finishChat(NO_SUMMARY_SENTINEL, 0);
+    await wait();
+    expect(sessions.getJob(job.jobId)?.status).toBe("completed_no_summary");
+    expect(handoffCallCount).toBe(1);
+
+    // Start a lazy recheck for the original generation and hold its handoff
+    // open while the same attachment is claimed by a newer continuation.
+    const waitPromise = sessions.waitForJob(job.jobId, 0, undefined, "wait", 1);
+    await wait();
+    expect(handoffCallCount).toBe(2);
+
+    sessions.submitTask({
+      task: "continue with a question",
+      sessionKey: job.sessionKey,
+      context: fleetBlock({ op: "continue", status: "needs_input" }),
+    });
+    ctrl.finishChat("continue turn done", 1);
+
+    const currentBeforeResolution = sessions.getFleetAttachment(job.sessionKey)!;
+    expect(currentBeforeResolution.status).toBe("needs_input");
+    expect(currentBeforeResolution.delegatedTurnId).not.toBe(job.jobId);
+    expect(currentBeforeResolution.lastResult).toBeUndefined();
+
+    // The old handoff resolves after the newer generation is actionable.
+    resolveHandoff({ text: "stale answer from the old generation", resultAt: Date.now() });
+    await waitPromise;
+    await wait();
+
+    const current = sessions.getFleetAttachment(job.sessionKey)!;
+    expect(current.status).toBe("needs_input");
+    expect(current.lastResult).toBeUndefined();
+    expect(sessions.getJob(job.jobId)?.summary).not.toBe("stale answer from the old generation");
+  });
 });

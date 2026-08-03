@@ -647,6 +647,8 @@ export class SessionManager {
 
     if (!current.delegatedTurnId || current.delegatedTurnId !== job.jobId) return undefined;
     if (current.status === "needs_input" || current.status === "failed") return undefined;
+    const attachmentId = current.id;
+    const delegatedTurnId = current.delegatedTurnId;
 
     let handoff: FleetHandoff | null;
     try {
@@ -655,6 +657,13 @@ export class SessionManager {
       logDebug(`[fleet] readTerminalHandoff threw for ${current.handle}: ${err instanceof Error ? err.message : String(err)}`);
       return undefined;
     }
+
+    // The same attachment can be continued for a newer parent turn while the
+    // adapter call is in flight. Re-read both identity and delegated turn
+    // token before allowing the async result to write durable state; identity
+    // alone would let an old handoff contaminate the newer generation.
+    const fresh = this.getCurrentFleetAttachmentIfUnchanged(job.sessionKey, attachmentId);
+    if (!fresh || fresh.delegatedTurnId !== delegatedTurnId) return undefined;
     if (!handoff || !handoff.text) return undefined;
 
     if (handoff.resultAt < job.startedAt) {
@@ -664,21 +673,16 @@ export class SessionManager {
       return undefined;
     }
 
-    // Identity CAS: the attachment may have been detached/replaced while the
-    // adapter call above was in flight. Only write into the record that is
-    // STILL current — never resurrect/corrupt a now-historical one.
-    if (!this.isStillCurrentFleetAttachment(job.sessionKey, current.id)) return undefined;
-
     const capped =
       handoff.text.length > FLEET_RESULT_SUMMARY_MAX
         ? `${handoff.text.slice(0, FLEET_RESULT_SUMMARY_MAX - 1)}…`
         : handoff.text;
-    const outputRef = current.worktree ? `${current.handle}:${current.worktree}` : current.handle;
-    this.writeFleetAttachment(job.sessionKey, current.id, {
+    const outputRef = fresh.worktree ? `${fresh.handle}:${fresh.worktree}` : fresh.handle;
+    this.writeFleetAttachment(job.sessionKey, attachmentId, {
       lastResult: { summary: capped, outputRef, observedAt: handoff.resultAt },
       lastObservedAt: Date.now(),
     });
-    return { summary: handoff.text, attachmentId: current.id };
+    return { summary: handoff.text, attachmentId };
   }
 
   submitTask(input: TaskInput): Job {
