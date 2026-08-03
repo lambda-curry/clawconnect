@@ -163,6 +163,33 @@ function resolveSessionKey(
   return { sessionKey: input, migratedFromLegacy: false };
 }
 
+/**
+ * Normalizes one loaded SessionFleetState so every downstream reader
+ * (getFleetAttachment, buildSnapshot, attachOrReplaceFleet, …) can trust the
+ * invariant "`attachments` is always a plain object, and `currentAttachmentId`
+ * — if set — always has a matching entry" without re-checking it at every
+ * call site. A hand-edited, legacy, truncated, or otherwise corrupted store
+ * file can violate either half of that invariant; this treats an
+ * unrecoverable `currentAttachmentId` as "no current attachment" (never
+ * throws) while PRESERVING every entry in `attachments` that is at least a
+ * plain object with a string `id` — a malformed `currentAttachmentId` does
+ * not discard the rest of the session's valid lineage.
+ */
+function sanitizeFleetState(raw: SessionFleetState): SessionFleetState {
+  const rawAttachments = raw && typeof raw === "object" ? raw.attachments : undefined;
+  const attachments: Record<string, FleetAttachmentRecord> = {};
+  if (rawAttachments && typeof rawAttachments === "object") {
+    for (const [id, record] of Object.entries(rawAttachments)) {
+      if (record && typeof record === "object" && typeof (record as FleetAttachmentRecord).id === "string") {
+        attachments[id] = record as FleetAttachmentRecord;
+      }
+    }
+  }
+  const currentAttachmentId =
+    raw?.currentAttachmentId && attachments[raw.currentAttachmentId] ? raw.currentAttachmentId : undefined;
+  return { sessionKey: raw.sessionKey, currentAttachmentId, attachments };
+}
+
 export class SessionManager {
   private jobs = new Map<string, Job>();
   private latestJobBySession = new Map<string, string>();
@@ -293,7 +320,8 @@ export class SessionManager {
   /** Restart-recovery counterpart to rehydrateFromStore, for Fleet attachment lineage. See fleet-attachment-store.ts. */
   private rehydrateFleetFromStore(store: FleetAttachmentStore): void {
     for (const state of store.load()) {
-      this.fleetAttachments.set(state.sessionKey, state);
+      if (typeof state?.sessionKey !== "string" || !state.sessionKey) continue;
+      this.fleetAttachments.set(state.sessionKey, sanitizeFleetState(state));
     }
   }
 
@@ -351,16 +379,29 @@ export class SessionManager {
     return this.fleetAdapter !== undefined;
   }
 
-  /** The session's current attachment, or undefined if it has never attached / is currently detached. */
+  /**
+   * The session's current attachment, or undefined if it has never attached,
+   * is currently detached, or the persisted record is malformed (a
+   * `currentAttachmentId` with no matching entry in `attachments`, or a
+   * missing/non-object `attachments` field — see sanitizeFleetState, applied
+   * at rehydration; the optional chaining here is a second, independent
+   * guard so this can never throw regardless of how a bad record got into
+   * the map). Never throws — malformed reads as "no current attachment".
+   */
   getFleetAttachment(sessionKey: string): FleetAttachmentRecord | undefined {
     const state = this.fleetAttachments.get(sessionKey);
-    return state?.currentAttachmentId ? state.attachments[state.currentAttachmentId] : undefined;
+    if (!state?.currentAttachmentId) return undefined;
+    return state.attachments?.[state.currentAttachmentId];
   }
 
-  /** Every attachment lineage record this session has ever had, current and superseded/detached alike. */
+  /**
+   * Every attachment lineage record this session has ever had, current and
+   * superseded/detached alike. Never throws: a missing/non-object
+   * `attachments` field reads as an empty lineage rather than propagating.
+   */
   getFleetLineage(sessionKey: string): FleetAttachmentRecord[] {
-    const state = this.fleetAttachments.get(sessionKey);
-    return state ? Object.values(state.attachments) : [];
+    const attachments = this.fleetAttachments.get(sessionKey)?.attachments;
+    return attachments ? Object.values(attachments) : [];
   }
 
   /**
@@ -379,7 +420,7 @@ export class SessionManager {
     directive: Extract<FleetDirective, { op: "attach" | "replace" }>,
   ): FleetAttachmentRecord {
     const state = this.fleetAttachments.get(sessionKey) ?? { sessionKey, attachments: {} };
-    const previous = state.currentAttachmentId ? state.attachments[state.currentAttachmentId] : undefined;
+    const previous = state.currentAttachmentId ? state.attachments?.[state.currentAttachmentId] : undefined;
 
     const record: FleetAttachmentRecord = {
       id: randomUUID(),
@@ -397,7 +438,7 @@ export class SessionManager {
       ...(previous ? { replacesAttachmentId: previous.id } : {}),
     };
 
-    const nextAttachments = { ...state.attachments, [record.id]: record };
+    const nextAttachments = { ...(state.attachments ?? {}), [record.id]: record };
     if (previous) {
       nextAttachments[previous.id] = {
         ...previous,
@@ -417,13 +458,13 @@ export class SessionManager {
 
   private detachFleet(sessionKey: string, reason: string): FleetAttachmentRecord | undefined {
     const state = this.fleetAttachments.get(sessionKey);
-    const current = state?.currentAttachmentId ? state.attachments[state.currentAttachmentId] : undefined;
+    const current = state?.currentAttachmentId ? state.attachments?.[state.currentAttachmentId] : undefined;
     if (!state || !current) return undefined;
     const detached: FleetAttachmentRecord = { ...current, status: "detached", reason };
     this.fleetAttachments.set(sessionKey, {
       sessionKey,
       currentAttachmentId: undefined,
-      attachments: { ...state.attachments, [detached.id]: detached },
+      attachments: { ...(state.attachments ?? {}), [detached.id]: detached },
     });
     this.persistFleetState();
     logDebug(`[fleet] session ${sessionKey.slice(-12)} detached ${detached.handle}: ${reason}`);
@@ -432,24 +473,34 @@ export class SessionManager {
 
   private writeFleetAttachment(sessionKey: string, attachmentId: string, patch: Partial<FleetAttachmentRecord>): void {
     const state = this.fleetAttachments.get(sessionKey);
-    const current = state?.attachments[attachmentId];
+    const current = state?.attachments?.[attachmentId];
     if (!state || !current) return;
     const updated: FleetAttachmentRecord = { ...current, ...patch };
-    this.fleetAttachments.set(sessionKey, { ...state, attachments: { ...state.attachments, [attachmentId]: updated } });
+    this.fleetAttachments.set(sessionKey, { ...state, attachments: { ...(state.attachments ?? {}), [attachmentId]: updated } });
     this.persistFleetState();
   }
 
   /**
-   * Compare-and-set guard for a write whose value was computed
-   * asynchronously (an adapter call awaited across a tick): true only when
-   * `attachmentId` is STILL this session's current attachment. A
-   * detach/replace that lands while the async call was in flight changes
-   * `currentAttachmentId` (to undefined, or to a different new id), which
-   * this catches — preventing a stale async result from resurrecting or
-   * corrupting a now-historical (detached/superseded) lineage record.
+   * Compare-and-set READ for a write whose value was computed asynchronously
+   * (an adapter call awaited across a tick): returns the FRESH record only
+   * when `attachmentId` is STILL this session's current attachment — never
+   * the value an async callback closed over before its await, which may be
+   * stale by the time it resolves (another observation can have written a
+   * new status in the meantime, even without a detach/replace). A
+   * detach/replace changes `currentAttachmentId` itself (to undefined, or to
+   * a different new id), which this also catches — preventing a stale async
+   * result from resurrecting or corrupting a now-historical
+   * (detached/superseded) lineage record.
    */
+  private getCurrentFleetAttachmentIfUnchanged(sessionKey: string, attachmentId: string): FleetAttachmentRecord | undefined {
+    const state = this.fleetAttachments.get(sessionKey);
+    if (state?.currentAttachmentId !== attachmentId) return undefined;
+    return state.attachments?.[attachmentId];
+  }
+
+  /** Boolean form of getCurrentFleetAttachmentIfUnchanged, for callers that don't need the record itself. */
   private isStillCurrentFleetAttachment(sessionKey: string, attachmentId: string): boolean {
-    return this.fleetAttachments.get(sessionKey)?.currentAttachmentId === attachmentId;
+    return this.getCurrentFleetAttachmentIfUnchanged(sessionKey, attachmentId) !== undefined;
   }
 
   /**
@@ -464,14 +515,28 @@ export class SessionManager {
    * that never claimed it — see tryFleetRecovery).
    *
    * inspect: applies only an optional Clawdy-reported status (never
-   * delegatedTurnId — a passive read-refresh is not a new delegation claim),
-   * plus — only when Clawdy did NOT supply an explicit status — a bounded,
-   * single-handle liveness check via the injected FleetAdapter. Deliberately
-   * NOT awaited by the caller (submitTask stays synchronous, matching its
-   * existing public contract): the liveness result lands a tick later via
-   * the fire-and-forget promise below, CAS-guarded against a detach/replace
-   * that lands first — same pattern as this file's other background
-   * recovery work (recoverLateFinalText).
+   * delegatedTurnId — a passive read-refresh is not a new delegation claim).
+   *
+   * An explicit Clawdy-reported status (on either op) is authoritative and
+   * is persisted synchronously, THEN this returns immediately — it never
+   * also kicks off the background liveness probe below. Two independent
+   * reasons: (1) Clawdy's own report is a stronger signal than a bare tmux
+   * liveness bit and shouldn't be second-guessed by it, and (2) starting the
+   * probe anyway would race it — see the callback's re-read for why a probe
+   * that outlives a later status write is unsafe even when CAS-guarded by
+   * identity alone.
+   *
+   * Only when Clawdy supplied NO status does `inspect` fall through to a
+   * bounded, single-handle liveness check via the injected FleetAdapter.
+   * Deliberately NOT awaited by the caller (submitTask stays synchronous,
+   * matching its existing public contract): the liveness result lands a
+   * tick later via the fire-and-forget promise below. Its callback re-reads
+   * the attachment FRESH via getCurrentFleetAttachmentIfUnchanged rather
+   * than trusting the `current` this closure captured before the await —
+   * that CAS-by-identity check also catches a status-only write (e.g. a
+   * later `continue{status:"needs_input"}` landing while this probe was
+   * still in flight), not just a detach/replace, because it reads the LIVE
+   * record rather than comparing against a snapshot taken before the await.
    */
   private applyFleetObservation(
     sessionKey: string,
@@ -496,16 +561,25 @@ export class SessionManager {
         lastObservedAt: Date.now(),
       });
     }
+    if (directive.status !== undefined) return;
 
     if (directive.op !== "inspect" || !this.fleetAdapter) return;
     const adapter = this.fleetAdapter;
     const attachmentId = current.id;
     adapter.isLive(current).then(
       (live) => {
-        if (!this.isStillCurrentFleetAttachment(sessionKey, attachmentId)) return;
+        const fresh = this.getCurrentFleetAttachmentIfUnchanged(sessionKey, attachmentId);
+        if (!fresh) return;
+        // Only promotes the still-uninformative initial "starting" status —
+        // never overrides a status Clawdy has since reported explicitly
+        // (needs_input, idle, failed, or an already-affirmed running), which
+        // is always a stronger signal than a bare tmux liveness bit. Without
+        // this, a plain inspect's background probe could silently clobber a
+        // needs_input Clawdy reported while the probe was still in flight.
+        const shouldPromote = live && fresh.status === "starting";
         this.writeFleetAttachment(sessionKey, attachmentId, {
           lastObservedAt: Date.now(),
-          ...(live && current.status !== "running" ? { status: "running" } : {}),
+          ...(shouldPromote ? { status: "running" } : {}),
         });
       },
       () => {

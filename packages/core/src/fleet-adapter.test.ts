@@ -151,6 +151,67 @@ describe("LocalTmuxFleetAdapter", () => {
     expect(handoff?.resultAt).toBe(Date.parse("2026-08-03T00:00:00.000Z"));
   });
 
+  it("readTerminalHandoff rejects an absolute transcriptPath that escapes fleetHomeDir, even though the file genuinely exists and is readable", async () => {
+    const home = tmpHome();
+    const attachment = makeAttachment();
+    const dir = join(home, attachment.handle);
+    mkdirSync(dir, { recursive: true });
+
+    // A real, valid transcript that just happens to live OUTSIDE fleetHomeDir
+    // — a naive existsSync-only check would have happily accepted this.
+    const outsideDir = mkdtempSync(join(tmpdir(), "clawconnect-fleetadapter-outside-"));
+    dirs.push(outsideDir);
+    const outsideTranscript = join(outsideDir, "secret.jsonl");
+    writeFileSync(
+      outsideTranscript,
+      JSON.stringify({
+        type: "assistant",
+        timestamp: "2026-08-03T00:00:00.000Z",
+        message: { role: "assistant", content: [{ type: "text", text: "should never be read" }] },
+      }),
+    );
+    writeFileSync(join(dir, "meta.json"), JSON.stringify({ transcriptPath: outsideTranscript }));
+
+    const adapter = new LocalTmuxFleetAdapter(home);
+    await expect(adapter.readTerminalHandoff(attachment)).resolves.toBeNull();
+  });
+
+  it("readTerminalHandoff rejects a relative-traversal transcriptPath even when the resolved target happens to exist", async () => {
+    const home = tmpHome();
+    const attachment = makeAttachment();
+    const dir = join(home, attachment.handle);
+    mkdirSync(dir, { recursive: true });
+    // Deep enough "../" traversal to escape any tmpdir nesting and land on a
+    // real, always-present file — proves the containment check runs BEFORE
+    // any read is attempted, not that the target happens to be unreadable.
+    writeFileSync(join(dir, "meta.json"), JSON.stringify({ transcriptPath: "../../../../../../../../etc/passwd" }));
+
+    const adapter = new LocalTmuxFleetAdapter(home);
+    await expect(adapter.readTerminalHandoff(attachment)).resolves.toBeNull();
+  });
+
+  it("readTerminalHandoff accepts a transcriptPath legitimately nested under fleetHomeDir", async () => {
+    const home = tmpHome();
+    const attachment = makeAttachment();
+    const dir = join(home, attachment.handle);
+    mkdirSync(dir, { recursive: true });
+    const transcriptPath = join(dir, "nested", "session.jsonl");
+    mkdirSync(join(dir, "nested"), { recursive: true });
+    writeFileSync(
+      transcriptPath,
+      JSON.stringify({
+        type: "assistant",
+        timestamp: "2026-08-03T00:00:00.000Z",
+        message: { role: "assistant", content: [{ type: "text", text: "legit answer" }] },
+      }),
+    );
+    writeFileSync(join(dir, "meta.json"), JSON.stringify({ transcriptPath }));
+
+    const adapter = new LocalTmuxFleetAdapter(home);
+    const handoff = await adapter.readTerminalHandoff(attachment);
+    expect(handoff?.text).toBe("legit answer");
+  });
+
   it.runIf(hasTmux)(
     "readTerminalHandoff returns null while the tmux session is still live, even with a readable transcript",
     async () => {

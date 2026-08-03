@@ -263,6 +263,66 @@ describe("Fleet attachment transitions", () => {
     expect(latestJob.status).toBe("running");
   });
 
+  it("inspect with an explicit status never starts the background isLive probe at all", async () => {
+    const adapter = fakeFleetAdapter({ isLive: true });
+    const ctrl = fakeGateway();
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
+    const job = sessions.submitTask({
+      task: "first",
+      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "minip3" }),
+    });
+    ctrl.finishChat("done", 0);
+    await wait();
+
+    sessions.submitTask({
+      task: "inspect with explicit status",
+      sessionKey: job.sessionKey,
+      context: fleetBlock({ op: "inspect", status: "needs_input" }),
+    });
+
+    expect(sessions.getFleetAttachment(job.sessionKey)?.status).toBe("needs_input");
+    expect(adapter.isLiveCalls).toHaveLength(0);
+  });
+
+  it("an explicit needs_input status is never overwritten by an in-flight isLive probe from an EARLIER plain inspect", async () => {
+    const { promise: isLivePromise, resolve: resolveIsLive } = deferred<boolean>();
+    const adapter = fakeFleetAdapter({ isLive: () => isLivePromise });
+    const ctrl = fakeGateway();
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
+    const job = sessions.submitTask({
+      task: "first",
+      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "minip3" }),
+    });
+    ctrl.finishChat("done", 0);
+    await wait();
+
+    // A plain inspect (no explicit status) — its isLive call is now in
+    // flight, deliberately held open.
+    sessions.submitTask({ task: "inspect", sessionKey: job.sessionKey, context: fleetBlock({ op: "inspect" }) });
+    expect(adapter.isLiveCalls).toHaveLength(1);
+    ctrl.finishChat("inspect turn done", 1);
+    await wait();
+
+    // Clawdy explicitly reports needs_input BEFORE the stale probe resolves.
+    sessions.submitTask({
+      task: "check in",
+      sessionKey: job.sessionKey,
+      context: fleetBlock({ op: "continue", status: "needs_input" }),
+    });
+    ctrl.finishChat("continue turn done", 2);
+    expect(sessions.getFleetAttachment(job.sessionKey)?.status).toBe("needs_input");
+    // The explicit-status continue must not have ALSO started a new probe.
+    expect(adapter.isLiveCalls).toHaveLength(1);
+
+    // NOW the stale isLive resolves true ("it's running!") — after the fact.
+    resolveIsLive(true);
+    await wait();
+
+    // Must still read needs_input — the callback re-reads fresh state rather
+    // than trusting the "starting"/whatever it closed over before the await.
+    expect(sessions.getFleetAttachment(job.sessionKey)?.status).toBe("needs_input");
+  });
+
   it("no attachment triggers no adapter call at all (no global Fleet scan)", () => {
     const adapter = fakeFleetAdapter();
     const ctrl = fakeGateway();
@@ -319,6 +379,88 @@ describe("Fleet attachment restart persistence", () => {
     const emptyFleetStore: FleetAttachmentStore = { load: () => [], save: () => {} };
     const withEmptyFleet = new SessionManager(fakeGateway().gateway, "main", undefined, emptyFleetStore);
     expect(withEmptyFleet.getFleetAttachment("agent:main:main:thread:legacy")).toBeUndefined();
+  });
+
+  it("a currentAttachmentId with no matching attachments entry never throws — reads as no current attachment", () => {
+    const malformed: SessionFleetState = {
+      sessionKey: "agent:main:main:thread:malformed-1",
+      currentAttachmentId: "ghost-id",
+      attachments: {}, // no entry for ghost-id
+    };
+    const store: FleetAttachmentStore = { load: () => [malformed], save: () => {} };
+    expect(() => new SessionManager(fakeGateway().gateway, "main", undefined, store)).not.toThrow();
+    const sessions = new SessionManager(fakeGateway().gateway, "main", undefined, store);
+    expect(sessions.getFleetAttachment(malformed.sessionKey)).toBeUndefined();
+    expect(sessions.getFleetLineage(malformed.sessionKey)).toEqual([]);
+  });
+
+  it("a record missing the attachments field entirely never throws, and valid lineage in a DIFFERENT session in the same load() is preserved", () => {
+    const missingAttachmentsField = {
+      sessionKey: "agent:main:main:thread:malformed-2",
+      currentAttachmentId: "some-id",
+      // attachments field entirely absent — e.g. a truncated/hand-edited file.
+    } as unknown as SessionFleetState;
+    const validRecord: FleetAttachmentRecord = {
+      id: "att-valid",
+      runtime: "claude-fleet",
+      handle: "cf-good",
+      host: "minip3",
+      attachedAt: 1000,
+      status: "running",
+    };
+    const validState: SessionFleetState = {
+      sessionKey: "agent:main:main:thread:valid",
+      currentAttachmentId: "att-valid",
+      attachments: { "att-valid": validRecord },
+    };
+    const store: FleetAttachmentStore = { load: () => [missingAttachmentsField, validState], save: () => {} };
+    const sessions = new SessionManager(fakeGateway().gateway, "main", undefined, store);
+
+    expect(() => sessions.getFleetAttachment(missingAttachmentsField.sessionKey)).not.toThrow();
+    expect(sessions.getFleetAttachment(missingAttachmentsField.sessionKey)).toBeUndefined();
+    expect(sessions.getFleetLineage(missingAttachmentsField.sessionKey)).toEqual([]);
+
+    // The OTHER session's valid record in the same store load is untouched.
+    expect(sessions.getFleetAttachment(validState.sessionKey)).toEqual(validRecord);
+    expect(sessions.getFleetLineage(validState.sessionKey)).toEqual([validRecord]);
+  });
+
+  it("a currentAttachmentId that IS resolvable, alongside other malformed entries in the same session's attachments, preserves the valid lineage", () => {
+    const validRecord: FleetAttachmentRecord = {
+      id: "att-good",
+      runtime: "claude-fleet",
+      handle: "cf-good",
+      host: "minip3",
+      attachedAt: 1000,
+      status: "running",
+    };
+    const mixed = {
+      sessionKey: "agent:main:main:thread:mixed",
+      currentAttachmentId: "att-good",
+      attachments: {
+        "att-good": validRecord,
+        "att-junk": "not even an object", // a corrupted entry alongside a valid one
+        "att-null": null,
+      },
+    } as unknown as SessionFleetState;
+    const store: FleetAttachmentStore = { load: () => [mixed], save: () => {} };
+    const sessions = new SessionManager(fakeGateway().gateway, "main", undefined, store);
+
+    expect(sessions.getFleetAttachment(mixed.sessionKey)).toEqual(validRecord);
+    expect(sessions.getFleetLineage(mixed.sessionKey)).toEqual([validRecord]);
+  });
+
+  it("buildSnapshot for a job on a session with malformed persisted fleet state never throws and simply omits fleetAttachment", () => {
+    const malformed = {
+      sessionKey: "agent:main:main:thread:malformed-snapshot",
+      currentAttachmentId: "ghost",
+    } as unknown as SessionFleetState;
+    const store: FleetAttachmentStore = { load: () => [malformed], save: () => {} };
+    const sessions = new SessionManager(fakeGateway().gateway, "main", undefined, store);
+    const job = sessions.submitTask({ task: "do the thing", sessionKey: malformed.sessionKey });
+
+    expect(() => sessions.buildSnapshot(job)).not.toThrow();
+    expect(sessions.buildSnapshot(job).fleetAttachment).toBeUndefined();
   });
 
   it("parent runId is persisted immediately when chat.send's onRunId fires, before chat() resolves", () => {

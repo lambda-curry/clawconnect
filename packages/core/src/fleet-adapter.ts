@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import type { FleetAttachmentRecord } from "./types.ts";
 
@@ -88,12 +88,40 @@ export class LocalTmuxFleetAdapter implements FleetAdapter {
       return null;
     }
     const transcriptPath = meta.transcriptPath;
-    if (typeof transcriptPath !== "string" || !transcriptPath || !existsSync(transcriptPath)) return null;
+    if (typeof transcriptPath !== "string" || !transcriptPath) return null;
 
-    const found = readLastAssistantEntry(transcriptPath);
+    // meta.json is local, trusted infrastructure state today, but its
+    // CONTENT is still read off disk and used to pick a file to read —
+    // treated as untrusted input here so a stale, corrupted, or (in a
+    // future change) attacker-influenced meta.json can never turn this
+    // adapter into an arbitrary-file-read primitive. Rejects both an
+    // absolute-path escape (e.g. "/etc/passwd") and relative traversal
+    // (e.g. "../../../etc/passwd") regardless of how transcriptPath was
+    // spelled.
+    const containedPath = resolveContainedPath(this.fleetHomeDir, transcriptPath);
+    if (!containedPath || !existsSync(containedPath)) return null;
+
+    const found = readLastAssistantEntry(containedPath);
     if (!found) return null;
     return { text: found.text, resultAt: found.resultAt };
   }
+}
+
+/**
+ * Resolves `candidatePath` against `baseDir` and confirms the result stays
+ * WITHIN `baseDir` — a hard boundary, not a best-effort filter. Returns null
+ * for anything outside `baseDir`, including `baseDir`'s own parent/siblings.
+ * `path.resolve` treats a later absolute segment as overriding earlier ones,
+ * so this rejects an absolute escape and a relative traversal with the same
+ * check.
+ */
+function resolveContainedPath(baseDir: string, candidatePath: string): string | null {
+  const resolvedBase = resolve(baseDir);
+  const resolvedCandidate = resolve(baseDir, candidatePath);
+  if (resolvedCandidate === resolvedBase || resolvedCandidate.startsWith(resolvedBase + sep)) {
+    return resolvedCandidate;
+  }
+  return null;
 }
 
 /**
