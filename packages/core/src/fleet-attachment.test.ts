@@ -76,19 +76,27 @@ function fakeFleetAdapter(
     isLive?: boolean | ((a: FleetAttachmentRecord) => Promise<boolean>);
     handoff?: FleetHandoff | null | ((a: FleetAttachmentRecord) => Promise<FleetHandoff | null>);
   } = {},
-): FleetAdapter & { isLiveCalls: FleetAttachmentRecord[]; handoffCalls: FleetAttachmentRecord[] } {
+): FleetAdapter & {
+  isLiveCalls: FleetAttachmentRecord[];
+  handoffCalls: FleetAttachmentRecord[];
+  /** The signal each readTerminalHandoff call received — undefined means the caller forwarded none. */
+  handoffSignals: (AbortSignal | undefined)[];
+} {
   const isLiveCalls: FleetAttachmentRecord[] = [];
   const handoffCalls: FleetAttachmentRecord[] = [];
+  const handoffSignals: (AbortSignal | undefined)[] = [];
   return {
     isLiveCalls,
     handoffCalls,
+    handoffSignals,
     async isLive(a) {
       isLiveCalls.push(a);
       if (typeof opts.isLive === "function") return opts.isLive(a);
       return opts.isLive ?? false;
     },
-    async readTerminalHandoff(a) {
+    async readTerminalHandoff(a, signal) {
       handoffCalls.push(a);
+      handoffSignals.push(signal);
       if (typeof opts.handoff === "function") return opts.handoff(a);
       return opts.handoff ?? null;
     },
@@ -561,6 +569,37 @@ describe("Fleet-adapter recovery order (tier 3, after parent live+transcript rec
     expect(stillGivenUp.status).toBe("completed_no_summary");
     expect(stillGivenUp.resultSource).toBe("parent");
     expect(adapter.handoffCalls.length).toBeGreaterThan(0);
+  });
+
+  /**
+   * The registered-runtime path has always forwarded the recovery deadline's
+   * signal; the legacy claude-fleet fallback dropped it, so a timed-out read
+   * left its local tmux and file work running with nobody waiting on it.
+   */
+  it("forwards the recovery deadline's abort signal into the legacy adapter, and fires it on timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      const adapter = fakeFleetAdapter({ handoff: () => new Promise<FleetHandoff | null>(() => {}) });
+      const ctrl = fakeGateway({ pollTranscriptForFinalText: async () => undefined });
+      const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
+      const job = sessions.submitTask({
+        task: "do the thing",
+        context: fleetBlock({ op: "attach", handle: "cf-foo", host: "minip3" }),
+      });
+      ctrl.finishChat(NO_SUMMARY_SENTINEL, 0);
+      await vi.advanceTimersByTimeAsync(1);
+
+      const signal = adapter.handoffSignals.at(-1);
+      expect(signal, "the fallback read must receive the deadline's signal").toBeInstanceOf(AbortSignal);
+      expect(signal!.aborted).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(AGENT_SESSION_CALL_TIMEOUT_MS + 1);
+      expect(signal!.aborted).toBe(true);
+      // And the job still settles rather than hanging on the abandoned read.
+      expect(sessions.getJob(job.jobId)?.status).toBe("completed_no_summary");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("repeated recovery is idempotent — calling the fallback again with the same handoff doesn't change the outcome or duplicate lineage", async () => {

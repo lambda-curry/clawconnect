@@ -4,6 +4,7 @@ import type {
   AgentSessionRuntimeId,
   AgentSessionState,
   AgentSessionTermination,
+  BlockedDelegation,
 } from "./agent-session.ts";
 
 // ── Event types from the gateway ──────────────���──────────────────────────────
@@ -511,6 +512,15 @@ export type TaskSummary = {
   /** True when `summary` was cut short — the full text is available from get_task. */
   summaryTruncated?: boolean;
   error?: string;
+  /**
+   * Set ONLY when this row's turn is waiting on a human in the session it
+   * delegated to. `status` is already "needs-human" in that case; this carries
+   * the metadata a caller needs to go answer it (which runtime, which handle,
+   * which kind of block, where to open it) without a second round trip. Its
+   * `notice` is bounded like `summary` is (see TASK_BLOCKED_NOTICE_MAX) — a
+   * listing must not grow without limit per row.
+   */
+  blockedDelegation?: BlockedDelegation;
 };
 
 export type SessionInspectMode = "snapshot" | "events" | "tail" | "tasks";

@@ -1,10 +1,11 @@
-import { isDelegateBlockedTerminalReason } from "./agent-session.ts";
+import { blockedDelegation, isDelegateBlockedTerminalReason, type BlockedDelegation } from "./agent-session.ts";
 import { GatewayPool } from "./gateway-pool.ts";
 import { recordTelemetry } from "./telemetry.ts";
 import type {
   CheckTaskOpts,
   CheckTaskResult,
   ContinuationState,
+  FleetAttachmentRecord,
   Job,
   RunTaskResult,
   SessionInspectMode,
@@ -64,18 +65,24 @@ function mapTaskStatus(status: string): TaskSummary["status"] {
   return "failed";
 }
 
-function deriveTaskStatus(job: {
-  status: string;
-  error?: string;
-  terminalReason?: string;
-  artifacts: { needsHumanDecision: boolean };
-}): TaskSummary["status"] {
+function deriveTaskStatus(
+  job: {
+    status: string;
+    error?: string;
+    terminalReason?: string;
+    artifacts: { needsHumanDecision: boolean };
+  },
+  blocked: BlockedDelegation | undefined,
+): TaskSummary["status"] {
+  // A turn whose delegated session is waiting on a human is NOT simply
+  // "running", even while the parent job still is: the child blocks long
+  // before the parent turn ends, so a row that says only "running" is how a
+  // live, actionable block goes unnoticed for as long as anyone keeps polling.
+  if (blocked) return "needs-human";
   if (job.status === "running") return "running";
-  // A turn that ended with nothing to show because the session it delegated
-  // to is waiting on a human is NOT done — listing it as such is exactly how
-  // an actionable block goes unnoticed. Checked before the terminal mapping
-  // below, and only for that one terminalReason, so every ordinary terminal
-  // job keeps its existing row status.
+  // The same fact for a turn that ENDED with nothing to show because of the
+  // block. Checked before the terminal mapping below, and only for that one
+  // terminalReason, so every ordinary terminal job keeps its existing status.
   if (isDelegateBlockedTerminalReason(job.terminalReason)) return "needs-human";
   if (job.status === "completed" || job.status === "completed_no_summary") return "done";
   if (job.artifacts.needsHumanDecision) return "needs-human";
@@ -91,24 +98,47 @@ function deriveTaskStatus(job: {
  */
 export const TASK_SUMMARY_PREVIEW_MAX = 500;
 
+/**
+ * The same cap, for a blocked delegation's notice. The notice embeds the
+ * child's last message, which is bounded but not short — so on a listing it
+ * gets the same treatment `summary` does. The full text is on the task itself
+ * (get_task) and in check_task's own response.
+ */
+export const TASK_BLOCKED_NOTICE_MAX = 500;
+
 function previewSummary(summary: string | undefined): Pick<TaskSummary, "summary" | "summaryTruncated"> {
   if (summary === undefined) return {};
   if (summary.length <= TASK_SUMMARY_PREVIEW_MAX) return { summary };
   return { summary: `${summary.slice(0, TASK_SUMMARY_PREVIEW_MAX - 1)}…`, summaryTruncated: true };
 }
 
-/** The one place a Job becomes a listing row, so list_tasks and get_session(mode:"tasks") can't drift. */
-function toTaskSummary(job: Job, agentId: string): TaskSummary {
+function previewBlockedDelegation(blocked: BlockedDelegation | undefined): BlockedDelegation | undefined {
+  if (!blocked || blocked.notice.length <= TASK_BLOCKED_NOTICE_MAX) return blocked;
+  return { ...blocked, notice: `${blocked.notice.slice(0, TASK_BLOCKED_NOTICE_MAX - 1)}…` };
+}
+
+/**
+ * The one place a Job becomes a listing row, so list_tasks and
+ * get_session(mode:"tasks") can't drift — including on whether the row's turn
+ * is waiting on a human. `attachment` is the session's CURRENT attachment;
+ * whether it has anything to say about THIS row is decided by
+ * blockedDelegation's delegated-turn check, not by the caller.
+ */
+function toTaskSummary(job: Job, agentId: string, attachment?: FleetAttachmentRecord): TaskSummary {
+  const blocked = previewBlockedDelegation(
+    blockedDelegation({ jobId: job.jobId, status: job.status, fleetAttachment: attachment }),
+  );
   return {
     taskId: job.jobId,
     jobId: job.jobId,
     sessionKey: job.sessionKey,
     agent: agentId,
-    status: deriveTaskStatus(job),
+    status: deriveTaskStatus(job, blocked),
     startedAt: job.startedAt,
     lastEventAt: job.lastEventAt,
     ...previewSummary(job.summary),
     error: job.error,
+    ...(blocked ? { blockedDelegation: blocked } : {}),
   };
 }
 
@@ -119,7 +149,9 @@ export function listTasks(pool: GatewayPool): TaskSummary[] {
     for (const session of entry.sessions.listSessions()) {
       const job = entry.sessions.getLatestJobForSession(session.sessionKey);
       if (!job) continue;
-      items.push(toTaskSummary(job, entry.agent.id));
+      // Reads the ONE attachment this session already has — the same
+      // per-session lookup get_session does, never a scan across sessions.
+      items.push(toTaskSummary(job, entry.agent.id, entry.sessions.getFleetAttachment(session.sessionKey)));
     }
   }
   recordTelemetry({ tool: "list_tasks", taskCount: items.length, durationMs: Date.now() - start });
@@ -313,12 +345,14 @@ export function getSession(
   const after = Math.max(0, opts.after ?? 0);
   const events = job.logs.slice(after, after + limit);
 
+  const fleetAttachment = entry.sessions.getFleetAttachment(opts.sessionId);
+
   const tasks: TaskSummary[] | undefined =
     mode === "tasks"
-      ? entry.sessions.getJobHistory(opts.sessionId).map((historyJob) => toTaskSummary(historyJob, entry.agent.id))
+      ? entry.sessions
+          .getJobHistory(opts.sessionId)
+          .map((historyJob) => toTaskSummary(historyJob, entry.agent.id, fleetAttachment))
       : undefined;
-
-  const fleetAttachment = entry.sessions.getFleetAttachment(opts.sessionId);
 
   return {
     found: true,

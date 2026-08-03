@@ -18,6 +18,7 @@ import {
   buildRunTaskStructuredContent,
   buildCheckTaskStructuredContent,
   buildGetTaskStructuredContent,
+  blockedDelegation,
   blockedDelegationNotice,
   TASK_SUMMARY_PREVIEW_MAX,
 } from "@clawconnect/core";
@@ -95,6 +96,11 @@ export function defaultFormatCheckTask(result: CheckTaskResult): McpToolResponse
   const structuredContent = buildCheckTaskStructuredContent(result);
 
   if (!isTerminal) {
+    // A still-running turn whose delegated session is already waiting on a
+    // human: the default hint tells the model to keep polling, which here is
+    // advice to wait forever. The notice replaces it, and the delegated
+    // session rides along so the model can go answer it.
+    const blocked = blockedDelegation(snapshot);
     const payload = {
       status: "running",
       jobId: snapshot.jobId,
@@ -112,9 +118,14 @@ export function defaultFormatCheckTask(result: CheckTaskResult): McpToolResponse
       continuePolling,
       retryAfterMs: snapshot.retryAfterMs,
       nextAction: snapshot.nextAction,
-      hint: snapshot.recovery
-        ? `Task is recovering late transcript final text. Call check_task again to continue waiting; pass knownLogCount=${snapshot.logCursor}.`
-        : `Task is actively running (this is a non-terminal timeout, not an error). Call check_task again with the same jobId to continue waiting; pass knownLogCount=${snapshot.logCursor} to resume the log window.`,
+      hint: blocked
+        ? `${blocked.notice} Pass knownLogCount=${snapshot.logCursor} when you do call check_task again.`
+        : snapshot.recovery
+          ? `Task is recovering late transcript final text. Call check_task again to continue waiting; pass knownLogCount=${snapshot.logCursor}.`
+          : `Task is actively running (this is a non-terminal timeout, not an error). Call check_task again with the same jobId to continue waiting; pass knownLogCount=${snapshot.logCursor} to resume the log window.`,
+      // Same key and same type as the terminal branch below, so a client does
+      // not have to branch on job phase to read a blocked delegation.
+      ...(blocked ? { blockedDelegation: blocked.notice, delegatedSession: snapshot.fleetAttachment } : {}),
     };
     return {
       content: [{ type: "text" as const, text: JSON.stringify(payload) }],
@@ -126,7 +137,7 @@ export function defaultFormatCheckTask(result: CheckTaskResult): McpToolResponse
   // waiting on a human is terminal for the JOB but not for the WORK — without
   // this it reads as an ordinary finished task with nothing to say, and the
   // block goes unnoticed until someone opens the session by hand.
-  const blockedDelegation = blockedDelegationNotice(snapshot);
+  const blockedNotice = blockedDelegationNotice(snapshot);
   const payload = {
     jobId: snapshot.jobId,
     sessionKey: snapshot.sessionKey,
@@ -142,8 +153,12 @@ export function defaultFormatCheckTask(result: CheckTaskResult): McpToolResponse
     continuePolling,
     retryAfterMs: snapshot.retryAfterMs,
     nextAction: snapshot.nextAction,
-    ...(blockedDelegation
-      ? { blockedDelegation, delegatedSession: snapshot.fleetAttachment, terminalReason: snapshot.terminalReason }
+    ...(blockedNotice
+      ? {
+          blockedDelegation: blockedNotice,
+          delegatedSession: snapshot.fleetAttachment,
+          terminalReason: snapshot.terminalReason,
+        }
       : {}),
   };
   return {

@@ -1,13 +1,56 @@
+/**
+ * Both mocks are pass-through recorders, so every test in this file still
+ * touches the real tmux and the real filesystem. They exist so the abort tests
+ * can prove a NEGATIVE — that an abandoned recovery spawns no subprocess and
+ * reads no transcript — which no assertion on the return value alone can show,
+ * since "aborted" and "nothing there" both come back as null.
+ */
+const spy = vi.hoisted(() => ({
+  execFileArgs: [] as string[][],
+  readFilePaths: [] as string[],
+  /** Runs before each real readFile; lets a test abort mid-flight, deterministically. */
+  onReadFile: undefined as ((path: string) => void) | undefined,
+}));
+
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:child_process")>();
+  return {
+    ...actual,
+    execFile: (...args: unknown[]) => {
+      if (Array.isArray(args[1])) spy.execFileArgs.push(args[1] as string[]);
+      return (actual.execFile as (...a: unknown[]) => unknown)(...args);
+    },
+  };
+});
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return {
+    ...actual,
+    readFile: (path: string, opts?: unknown) => {
+      spy.readFilePaths.push(String(path));
+      spy.onReadFile?.(String(path));
+      return actual.readFile(path, opts as Parameters<typeof actual.readFile>[1]);
+    },
+  };
+});
+
 import { execFile } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LocalTmuxFleetAdapter } from "./fleet-adapter.ts";
 import type { FleetAttachmentRecord } from "./types.ts";
 
 const execFileAsync = promisify(execFile);
+
+beforeEach(() => {
+  spy.execFileArgs = [];
+  spy.readFilePaths = [];
+  spy.onReadFile = undefined;
+});
 
 let dirs: string[] = [];
 afterEach(() => {
@@ -210,6 +253,82 @@ describe("LocalTmuxFleetAdapter", () => {
     const adapter = new LocalTmuxFleetAdapter(home);
     const handoff = await adapter.readTerminalHandoff(attachment);
     expect(handoff?.text).toBe("legit answer");
+  });
+
+  /**
+   * This whole path runs while a job is held out of a terminal status, under
+   * the recovery deadline session.ts already holds. Before the signal reached
+   * here the deadline aborted nothing anyone was listening to: the tmux child
+   * kept running and the transcript was still read, synchronously, off the
+   * event loop.
+   */
+  describe("an abandoned recovery stops immediately", () => {
+    /** A handle with a genuinely readable transcript, so a null return can only mean the abort. */
+    function readableSession(): { home: string; attachment: FleetAttachmentRecord } {
+      const home = tmpHome();
+      const attachment = makeAttachment();
+      const dir = join(home, attachment.handle);
+      mkdirSync(dir, { recursive: true });
+      const transcriptPath = join(dir, "session.jsonl");
+      writeFileSync(
+        transcriptPath,
+        JSON.stringify({
+          type: "assistant",
+          timestamp: "2026-08-03T00:00:00.000Z",
+          message: { role: "assistant", content: [{ type: "text", text: "the answer" }] },
+        }),
+      );
+      writeFileSync(join(dir, "meta.json"), JSON.stringify({ transcriptPath }));
+      return { home, attachment };
+    }
+
+    it("an already-aborted signal stops readTerminalHandoff before it spawns tmux or reads anything", async () => {
+      const { home, attachment } = readableSession();
+      const adapter = new LocalTmuxFleetAdapter(home);
+
+      // Same fixture, no signal: proves the null below is the abort and not a
+      // missing/unreadable transcript.
+      await expect(adapter.readTerminalHandoff(attachment)).resolves.toMatchObject({ text: "the answer" });
+      spy.execFileArgs = [];
+      spy.readFilePaths = [];
+
+      await expect(adapter.readTerminalHandoff(attachment, AbortSignal.abort())).resolves.toBeNull();
+      expect(spy.execFileArgs).toEqual([]);
+      expect(spy.readFilePaths).toEqual([]);
+    });
+
+    it("an already-aborted signal stops isLive before it spawns tmux", async () => {
+      const adapter = new LocalTmuxFleetAdapter(tmpHome());
+      await expect(adapter.isLive(makeAttachment(), AbortSignal.abort())).resolves.toBe(false);
+      expect(spy.execFileArgs).toEqual([]);
+    });
+
+    it("an abort that lands DURING the read comes back as null, not a rejection", async () => {
+      const { home, attachment } = readableSession();
+      const controller = new AbortController();
+      // Fires on the meta.json read — the first read this path does — so the
+      // abort lands mid-operation rather than before it starts.
+      spy.onReadFile = () => controller.abort();
+
+      const adapter = new LocalTmuxFleetAdapter(home);
+      await expect(adapter.readTerminalHandoff(attachment, controller.signal)).resolves.toBeNull();
+      expect(spy.readFilePaths).toHaveLength(1);
+    });
+
+    it("a live signal that never aborts changes nothing", async () => {
+      const { home, attachment } = readableSession();
+      const adapter = new LocalTmuxFleetAdapter(home);
+      const handoff = await adapter.readTerminalHandoff(attachment, new AbortController().signal);
+      expect(handoff?.text).toBe("the answer");
+      expect(handoff?.resultAt).toBe(Date.parse("2026-08-03T00:00:00.000Z"));
+    });
+
+    it("passes the signal to the tmux liveness probe", async () => {
+      const { home, attachment } = readableSession();
+      const adapter = new LocalTmuxFleetAdapter(home);
+      await adapter.isLive(attachment, new AbortController().signal);
+      expect(spy.execFileArgs).toEqual([["has-session", "-t", attachment.handle]]);
+    });
   });
 
   it.runIf(hasTmux)(

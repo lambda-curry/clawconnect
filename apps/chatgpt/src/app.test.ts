@@ -235,6 +235,54 @@ describe("check_task model-facing text carries the resume cursor", () => {
     expect(checkTaskText(snapshot, false)).toBe("Recovering late transcript final text. Poll again with knownLogCount=17.");
   });
 
+  /**
+   * "Still running. Poll again." is true and useless once the delegated
+   * session is waiting on a human — polling is exactly what will not move it.
+   */
+  it("a running response leads with the block when the delegated session is already waiting on a human", () => {
+    for (const state of ["needs_input", "needs_permission"] as const) {
+      const text = checkTaskText(
+        runningSnapshot({
+          fleetAttachment: {
+            id: "att-1",
+            runtime: "t3-fleet",
+            handle: "thr-abc123",
+            attachedAt: 1,
+            status: state,
+            latestResponse: "should I force-push?",
+            remoteUrl: "https://t3.example/threads/abc123",
+            delegatedTurnId: "job-1",
+          },
+        }),
+        false,
+      );
+      expect(text, state).toContain("t3-fleet/thr-abc123");
+      expect(text, state).toContain(state === "needs_permission" ? "waiting for permission" : "waiting for input");
+      expect(text, state).toContain("Polling cannot advance it");
+      expect(text, state).not.toContain("Still running.");
+      // The resume cursor still has to survive: the caller does poll again,
+      // after answering.
+      expect(text, state).toContain("knownLogCount=17");
+    }
+  });
+
+  it("a running response says nothing when the blocked attachment belongs to a different turn", () => {
+    const text = checkTaskText(
+      runningSnapshot({
+        fleetAttachment: {
+          id: "att-1",
+          runtime: "t3-fleet",
+          handle: "thr-abc123",
+          attachedAt: 1,
+          status: "needs_input",
+          delegatedTurnId: "job-0",
+        },
+      }),
+      false,
+    );
+    expect(text).toBe("Still running. Poll again with knownLogCount=17.");
+  });
+
   it("a terminal response is the result itself — no polling instructions appended", () => {
     const text = checkTaskText(runningSnapshot({ status: "completed", summary: "the answer" }), true);
     expect(text).toBe("the answer");

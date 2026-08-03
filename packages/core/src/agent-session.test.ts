@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   AgentSessionRuntimeRegistry,
+  blockedDelegation,
   blockedDelegationNotice,
   delegateBlockedTerminalReason,
+  describeActiveBlockedAgentSession,
   describeBlockedAgentSession,
   dispatchAgentSession,
   isAgentSessionTimeout,
@@ -407,6 +409,86 @@ describe("a blocked delegation is never an ordinary finished task", () => {
     expect(isDelegateBlockedTerminalReason("delegate-blocked:needs_permission")).toBe(true);
     expect(isDelegateBlockedTerminalReason("late-recovery-exhausted")).toBe(false);
     expect(isDelegateBlockedTerminalReason(undefined)).toBe(false);
+  });
+});
+
+/**
+ * The child blocks long before the parent turn ends, so the window in which a
+ * delegation is blocked AND the parent job is still "running" is the normal
+ * case, not an edge one. A projection that only spoke at terminal left every
+ * surface saying "running" while a human was being waited on.
+ */
+describe("an ACTIVE blocked delegation on a still-running turn", () => {
+  const activeSnapshot = {
+    jobId: "job-1",
+    status: "running",
+    fleetAttachment: {
+      runtime: "t3-fleet",
+      handle: "thr-abc123",
+      status: "needs_input",
+      latestResponse: "should I force-push?",
+      remoteUrl: "https://t3.example/threads/abc123",
+      delegatedTurnId: "job-1",
+    },
+  };
+
+  it("projects the block, its kind, and where to answer it while the job is still running", () => {
+    const blocked = blockedDelegation(activeSnapshot)!;
+    expect(blocked.active).toBe(true);
+    expect(blocked.state).toBe("needs_input");
+    expect(blocked.runtime).toBe("t3-fleet");
+    expect(blocked.handle).toBe("thr-abc123");
+    expect(blocked.remoteUrl).toBe("https://t3.example/threads/abc123");
+    expect(blocked.notice).toContain("t3-fleet/thr-abc123");
+    expect(blocked.notice).toContain("waiting for input");
+    expect(blocked.notice).toContain("should I force-push?");
+    // The one thing the active wording must add over the terminal one: the
+    // caller is mid-poll, and polling is exactly what will not help.
+    expect(blocked.notice).toContain("Polling cannot advance it");
+  });
+
+  it("distinguishes a permission prompt from a question", () => {
+    const blocked = blockedDelegation({
+      ...activeSnapshot,
+      fleetAttachment: { ...activeSnapshot.fleetAttachment, status: "needs_permission" },
+    })!;
+    expect(blocked.state).toBe("needs_permission");
+    expect(blocked.notice).toContain("waiting for permission");
+    expect(blocked.notice).not.toContain("waiting for input");
+  });
+
+  it("says nothing about a turn that did not delegate to this attachment, or one that is not blocked", () => {
+    expect(
+      blockedDelegation({
+        ...activeSnapshot,
+        fleetAttachment: { ...activeSnapshot.fleetAttachment, delegatedTurnId: "job-0" },
+      }),
+    ).toBeUndefined();
+    expect(
+      blockedDelegation({
+        ...activeSnapshot,
+        fleetAttachment: { ...activeSnapshot.fleetAttachment, status: "running" },
+      }),
+    ).toBeUndefined();
+    expect(blockedDelegation({ jobId: "job-1", status: "running" })).toBeUndefined();
+  });
+
+  it("reads as terminal, with the terminal wording, once the job has ended", () => {
+    const blocked = blockedDelegation({ ...activeSnapshot, status: "completed_no_summary" })!;
+    expect(blocked.active).toBe(false);
+    expect(blocked.notice).toBe(describeBlockedAgentSession(activeSnapshot.fleetAttachment));
+    expect(blocked.notice).toContain("the task is not finished");
+    // blockedDelegationNotice stays the TERMINAL-only accessor, so the
+    // transports' terminal branches are untouched by any of this.
+    expect(blockedDelegationNotice(activeSnapshot)).toBeUndefined();
+    expect(blockedDelegationNotice({ ...activeSnapshot, status: "completed_no_summary" })).toBe(blocked.notice);
+  });
+
+  it("describes an active block only for a genuinely blocked attachment", () => {
+    expect(describeActiveBlockedAgentSession(undefined)).toBeUndefined();
+    expect(
+      describeActiveBlockedAgentSession({ runtime: "t3-fleet", handle: "thr-1", status: "running" }),
+    ).toBeUndefined();
   });
 });
 

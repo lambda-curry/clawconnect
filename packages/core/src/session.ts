@@ -978,7 +978,7 @@ export class SessionManager {
       // withAgentSessionTimeout): this read runs on the path that decides a
       // job's terminal status, and an adapter that never answers must not be
       // able to hold a job in `running` forever.
-      const handoff = await withAgentSessionTimeout(() => this.fleetAdapter!.readTerminalHandoff(record));
+      const handoff = await withAgentSessionTimeout((signal) => this.fleetAdapter!.readTerminalHandoff(record, signal));
       if (!handoff?.text) return undefined;
       return {
         status: normalizeAgentSessionObservation(

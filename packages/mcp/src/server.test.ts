@@ -307,6 +307,71 @@ describe("check_task model-facing text carries the resume cursor", () => {
     const payload = JSON.parse(response.content[0].text) as Record<string, unknown>;
     expect(String(payload.hint)).toContain("knownLogCount=17");
   });
+
+  /**
+   * The default running hint tells the model to call check_task again. When
+   * the delegated session is already waiting on a human, that is advice to
+   * wait forever — so the notice replaces it rather than sitting beside it.
+   */
+  it("replaces the keep-polling hint when the delegated session is already waiting on a human", () => {
+    for (const state of ["needs_input", "needs_permission"] as const) {
+      const response = defaultFormatCheckTask(
+        runningResult({
+          fleetAttachment: {
+            id: "att-1",
+            runtime: "t3-fleet",
+            handle: "thr-abc123",
+            attachedAt: 1,
+            status: state,
+            latestResponse: "should I force-push?",
+            remoteUrl: "https://t3.example/threads/abc123",
+            delegatedTurnId: "job-1",
+          },
+        }),
+      );
+      const payload = JSON.parse(response.content[0].text) as Record<string, unknown>;
+      const hint = String(payload.hint);
+      expect(hint, state).toContain("t3-fleet/thr-abc123");
+      expect(hint, state).toContain(state === "needs_permission" ? "waiting for permission" : "waiting for input");
+      expect(hint, state).toContain("Polling cannot advance it");
+      expect(hint, state).not.toContain("Task is actively running");
+      // The resume cursor still has to survive: the caller does poll again,
+      // after answering.
+      expect(hint, state).toContain("knownLogCount=17");
+      expect(String(payload.blockedDelegation), state).toContain("thr-abc123");
+      expect(payload.delegatedSession, state).toMatchObject({ handle: "thr-abc123", status: state });
+      // Still a non-terminal running response — the block does not end the job.
+      expect(payload.status, state).toBe("running");
+      expect(payload.continuePolling, state).toBe(true);
+    }
+  });
+
+  it("says nothing when the blocked attachment belongs to a different turn", () => {
+    const response = defaultFormatCheckTask(
+      runningResult({
+        fleetAttachment: {
+          id: "att-1",
+          runtime: "t3-fleet",
+          handle: "thr-abc123",
+          attachedAt: 1,
+          status: "needs_input",
+          delegatedTurnId: "job-0",
+        },
+      }),
+    );
+    const payload = JSON.parse(response.content[0].text) as Record<string, unknown>;
+    expect(String(payload.hint)).toContain("Task is actively running");
+    expect(payload).not.toHaveProperty("blockedDelegation");
+  });
+
+  it("leaves an ordinary running payload byte-for-byte as it was", () => {
+    const payload = JSON.parse(defaultFormatCheckTask(runningResult()).content[0].text) as Record<string, unknown>;
+    expect(String(payload.hint)).toBe(
+      "Task is actively running (this is a non-terminal timeout, not an error). Call check_task again with the same jobId to continue waiting; pass knownLogCount=17 to resume the log window.",
+    );
+    expect(payload).not.toHaveProperty("blockedDelegation");
+    expect(payload).not.toHaveProperty("delegatedSession");
+  });
 });
 
 describe("a terminal turn whose delegated session is waiting on a human", () => {

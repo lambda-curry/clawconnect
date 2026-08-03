@@ -129,27 +129,56 @@ export function isDelegateBlockedTerminalReason(reason: string | undefined): boo
 }
 
 /**
- * One sentence a caller can act on, for an attachment that is waiting on a
- * human — shared by every text surface so the MCP and ChatGPT transports
- * cannot drift on how a blocked delegation reads.
- *
- * Structurally typed rather than importing FleetAttachmentRecord: types.ts
- * already imports from this module, and the record's shape is the only thing
- * this needs to know.
+ * The neutral shape every blocked-delegation surface reads. Structurally typed
+ * rather than importing FleetAttachmentRecord: types.ts already imports from
+ * this module, and this is the only part of the record any of them needs.
  */
-export function describeBlockedAgentSession(
-  attachment:
-    | { runtime: string; handle: string; status: string; latestResponse?: string; remoteUrl?: string }
-    | undefined,
-): string | undefined {
-  if (!attachment || !isBlockedAgentSessionState(attachment.status)) return undefined;
+export type BlockedAgentSessionView = {
+  runtime: string;
+  handle: string;
+  status: string;
+  latestResponse?: string;
+  remoteUrl?: string;
+};
+
+function blockedSentence(attachment: BlockedAgentSessionView, lead: string, tail: string): string {
   const waiting = attachment.status === "needs_permission" ? "waiting for permission" : "waiting for input";
   const asked = attachment.latestResponse ? ` It last said: ${attachment.latestResponse}` : "";
   const where = attachment.remoteUrl ? ` Open it at ${attachment.remoteUrl}.` : "";
-  return (
-    `This turn produced no result of its own: the delegated session ` +
-    `${attachment.runtime}/${attachment.handle} is ${waiting}.${asked}${where} ` +
-    `Answer it through that session — the task is not finished.`
+  return `${lead} ${attachment.runtime}/${attachment.handle} is ${waiting}.${asked}${where} ${tail}`;
+}
+
+/**
+ * One sentence a caller can act on, for an attachment that is waiting on a
+ * human — shared by every text surface so the MCP and ChatGPT transports
+ * cannot drift on how a blocked delegation reads.
+ */
+export function describeBlockedAgentSession(
+  attachment: BlockedAgentSessionView | undefined,
+): string | undefined {
+  if (!attachment || !isBlockedAgentSessionState(attachment.status)) return undefined;
+  return blockedSentence(
+    attachment,
+    "This turn produced no result of its own: the delegated session",
+    "Answer it through that session — the task is not finished.",
+  );
+}
+
+/**
+ * The same fact, said for a turn that is STILL RUNNING. The distinction the
+ * wording has to carry is what a caller should do next: the terminal notice
+ * says the task is over and unfinished, this one says the task is alive but
+ * cannot move — and that continuing to poll, which is exactly what check_task
+ * tells a model to do, will never unblock it.
+ */
+export function describeActiveBlockedAgentSession(
+  attachment: BlockedAgentSessionView | undefined,
+): string | undefined {
+  if (!attachment || !isBlockedAgentSessionState(attachment.status)) return undefined;
+  return blockedSentence(
+    attachment,
+    "This task is not progressing: the delegated session",
+    "Polling cannot advance it — answer it through that session, then keep polling.",
   );
 }
 
@@ -261,33 +290,83 @@ export type AgentSessionStatus = {
 };
 
 /**
- * The same notice, decided from a TERMINAL job snapshot — the form both
- * transports' text formatters use, so neither can quietly present a blocked
- * delegation as an ordinary finished task.
- *
- * Derived from the snapshot rather than from the job's terminalReason on
- * purpose: the block can be discovered by a read that lands AFTER the job went
- * terminal, and this stays right in that case too. Scoped to the turn that
- * actually delegated (`delegatedTurnId === jobId`), for the same reason
- * recovery is: an attachment left current from an earlier turn says nothing
- * about this one.
+ * What a job-shaped surface needs to decide whether its turn is blocked. Both
+ * a live JobSnapshot and a stored Job row satisfy it.
  */
-export function blockedDelegationNotice(snapshot: {
+export type BlockedDelegationSnapshot = {
   jobId: string;
   status: string;
-  fleetAttachment?: {
-    runtime: string;
-    handle: string;
-    status: string;
-    latestResponse?: string;
-    remoteUrl?: string;
-    delegatedTurnId?: string;
-  };
-}): string | undefined {
-  if (snapshot.status === "running") return undefined;
+  fleetAttachment?: BlockedAgentSessionView & { delegatedTurnId?: string };
+};
+
+/**
+ * The attachment THIS turn is blocked on, or undefined.
+ *
+ * Scoped to the turn that actually delegated (`delegatedTurnId === jobId`),
+ * for the same reason recovery is: an attachment left current from an earlier
+ * turn says nothing about this one, and letting it speak here would make every
+ * later task on the session read as blocked.
+ */
+function blockedAttachmentForTurn(
+  snapshot: BlockedDelegationSnapshot,
+): (BlockedAgentSessionView & { delegatedTurnId?: string }) | undefined {
   const attachment = snapshot.fleetAttachment;
   if (!attachment || attachment.delegatedTurnId !== snapshot.jobId) return undefined;
-  return describeBlockedAgentSession(attachment);
+  return isBlockedAgentSessionState(attachment.status) ? attachment : undefined;
+}
+
+/**
+ * A turn waiting on a human in the session it delegated to, in the one neutral
+ * shape every surface projects from — listing rows and both transports' text.
+ *
+ * Fires for a RUNNING turn as well as a terminal one. That is the whole point:
+ * the child blocks long before the parent turn ends, so a projection that only
+ * spoke at terminal left the normal case — a live delegation sitting on a
+ * question — reading as an ordinary busy task that just needs more polling.
+ *
+ * Derived from the attachment rather than from the job's terminalReason on
+ * purpose: the block can also be discovered by a read that lands AFTER the job
+ * went terminal, and this stays right in that case too.
+ */
+export type BlockedDelegation = {
+  runtime: string;
+  handle: string;
+  /** Which block — "needs_input" or "needs_permission" — so a caller need not re-derive it from prose. */
+  state: AgentSessionState;
+  /** Where a human opens the session, when the runtime published one. */
+  remoteUrl?: string;
+  /** True while the parent turn is still running; false once it has gone terminal. */
+  active: boolean;
+  notice: string;
+};
+
+export function blockedDelegation(snapshot: BlockedDelegationSnapshot): BlockedDelegation | undefined {
+  const attachment = blockedAttachmentForTurn(snapshot);
+  if (!attachment) return undefined;
+  const active = snapshot.status === "running";
+  const notice = active
+    ? describeActiveBlockedAgentSession(attachment)
+    : describeBlockedAgentSession(attachment);
+  if (!notice) return undefined;
+  return {
+    runtime: attachment.runtime,
+    handle: attachment.handle,
+    state: attachment.status as AgentSessionState,
+    ...(attachment.remoteUrl ? { remoteUrl: attachment.remoteUrl } : {}),
+    active,
+    notice,
+  };
+}
+
+/**
+ * The TERMINAL notice only — the form the transports' terminal branches use,
+ * so neither can quietly present a finished-but-blocked delegation as an
+ * ordinary finished task. A running turn is answered by `blockedDelegation`,
+ * whose notice is phrased for a task that is still alive.
+ */
+export function blockedDelegationNotice(snapshot: BlockedDelegationSnapshot): string | undefined {
+  if (snapshot.status === "running") return undefined;
+  return blockedDelegation(snapshot)?.notice;
 }
 
 // ── The callback seam ────────────────────────────────────────────────────────

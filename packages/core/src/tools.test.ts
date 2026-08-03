@@ -9,6 +9,7 @@ import {
   getSession,
   listTasks,
   listSessions,
+  TASK_BLOCKED_NOTICE_MAX,
   TASK_SUMMARY_PREVIEW_MAX,
 } from "./tools.ts";
 import type { AgentRegistry } from "./agent-registry.ts";
@@ -458,5 +459,107 @@ describe("a blocked delegation is listed as needing a human, not as done", () =>
     const byId = new Map(listTasks(pool).map((t) => [t.taskId, t.status]));
     expect(byId.get(done.jobId)).toBe("done");
     expect(byId.get(quiet.jobId)).toBe("done");
+  });
+});
+
+/**
+ * The job is still "running" and the session it delegated to is ALREADY
+ * waiting on a human. Rows that say only "running" here are how a live,
+ * actionable block goes unnoticed for as long as anyone keeps polling.
+ */
+describe("a RUNNING task whose delegated session is waiting on a human", () => {
+  function fleetBlock(directive: Record<string, unknown>): string {
+    return `[[clawconnect:fleet]]${JSON.stringify(directive)}[[/clawconnect:fleet]]`;
+  }
+
+  function delegatedRun(pool: GatewayPool, state: "needs_input" | "needs_permission") {
+    return runTask(pool, {
+      task: "delegate it",
+      context: fleetBlock({
+        op: "attach",
+        handle: "thr-abc123",
+        host: "minip3",
+        runtime: "t3-fleet",
+        remoteUrl: "https://t3.example/threads/abc123",
+        status: state,
+      }),
+    });
+  }
+
+  it("lists as needs-human, carrying what a caller needs to go answer it", () => {
+    for (const state of ["needs_input", "needs_permission"] as const) {
+      const pool = freshPool();
+      const run = delegatedRun(pool, state);
+      // The job itself is genuinely still running — this is not a terminal
+      // relabel, it is a live turn.
+      expect(pool.forJob(run.jobId)!.sessions.getJob(run.jobId)!.status, state).toBe("running");
+
+      const row = listTasks(pool).find((t) => t.taskId === run.jobId)!;
+      expect(row.status, state).toBe("needs-human");
+      expect(row.blockedDelegation, state).toMatchObject({
+        runtime: "t3-fleet",
+        handle: "thr-abc123",
+        state,
+        remoteUrl: "https://t3.example/threads/abc123",
+        active: true,
+      });
+
+      const session = getSession(pool, { sessionId: run.sessionKey, mode: "tasks" });
+      expect(session.found && session.tasks?.[0]?.status, state).toBe("needs-human");
+      expect(session.found && session.tasks?.[0]?.blockedDelegation?.state, state).toBe(state);
+    }
+  });
+
+  it("bounds the notice it puts on a listing row", () => {
+    const pool = freshPool();
+    const run = runTask(pool, {
+      task: "delegate it",
+      context: fleetBlock({
+        op: "attach",
+        handle: "thr-abc123",
+        host: "minip3",
+        runtime: "t3-fleet",
+        status: "needs_input",
+      }),
+    });
+    const attachment = pool.forJob(run.jobId)!.sessions.getFleetAttachment(run.sessionKey)!;
+    attachment.latestResponse = "x".repeat(5_000);
+
+    const row = listTasks(pool).find((t) => t.taskId === run.jobId)!;
+    expect(row.blockedDelegation!.notice.length).toBeLessThanOrEqual(TASK_BLOCKED_NOTICE_MAX);
+    expect(row.blockedDelegation!.notice.endsWith("…")).toBe(true);
+  });
+
+  it("says nothing about a turn that did not delegate to the attachment", () => {
+    const pool = freshPool();
+    const run = delegatedRun(pool, "needs_input");
+    // A duplicate submit on a busy session is rejected, so it never claims the
+    // attachment — its row must read as the ordinary busy rejection it is,
+    // not inherit the previous turn's block.
+    const duplicate = runTask(pool, { task: "again", sessionKey: run.sessionKey });
+    expect(duplicate.jobId).not.toBe(run.jobId);
+
+    const session = getSession(pool, { sessionId: run.sessionKey, mode: "tasks" });
+    const rows = new Map((session.found ? (session.tasks ?? []) : []).map((t) => [t.taskId, t]));
+    expect(rows.get(run.jobId)?.status).toBe("needs-human");
+    expect(rows.get(duplicate.jobId)?.status).not.toBe("needs-human");
+    expect(rows.get(duplicate.jobId)?.blockedDelegation).toBeUndefined();
+  });
+
+  it("leaves an ordinary running row untouched — same status, no new field", () => {
+    const pool = freshPool();
+    const plain = runTask(pool, { task: "just run" });
+    const row = listTasks(pool).find((t) => t.taskId === plain.jobId)!;
+    expect(row.status).toBe("running");
+    expect(row).not.toHaveProperty("blockedDelegation");
+
+    // An attachment that exists but is NOT blocked says nothing either.
+    const attached = runTask(pool, {
+      task: "delegate it",
+      context: fleetBlock({ op: "attach", handle: "thr-live", host: "minip3", runtime: "t3-fleet", status: "running" }),
+    });
+    const attachedRow = listTasks(pool).find((t) => t.taskId === attached.jobId)!;
+    expect(attachedRow.status).toBe("running");
+    expect(attachedRow).not.toHaveProperty("blockedDelegation");
   });
 });

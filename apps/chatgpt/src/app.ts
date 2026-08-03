@@ -21,6 +21,7 @@ import {
   buildRunTaskStructuredContent,
   buildCheckTaskStructuredContent,
   buildGetTaskStructuredContent,
+  blockedDelegation,
   blockedDelegationNotice,
   TASK_SUMMARY_PREVIEW_MAX,
 } from "@clawconnect/core";
@@ -108,7 +109,12 @@ export function checkTaskText(snapshot: JobSnapshot, isTerminal: boolean): strin
     if (!blocked) return summary;
     return summary && summary !== blocked ? `${blocked}\n\n${summary}` : blocked;
   }
+  // A running turn whose delegated session is already waiting on a human.
+  // "Still running. Poll again." is true and useless here — polling is exactly
+  // what will not move it — so the notice leads instead.
+  const blocked = blockedDelegation(snapshot);
   const resume = `Poll again with knownLogCount=${snapshot.logCursor}.`;
+  if (blocked) return `${blocked.notice} ${resume}`;
   return snapshot.recovery ? `Recovering late transcript final text. ${resume}` : `Still running. ${resume}`;
 }
 
