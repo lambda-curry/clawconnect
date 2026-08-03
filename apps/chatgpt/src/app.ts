@@ -21,6 +21,7 @@ import {
   buildRunTaskStructuredContent,
   buildCheckTaskStructuredContent,
   buildGetTaskStructuredContent,
+  blockedDelegationNotice,
   TASK_SUMMARY_PREVIEW_MAX,
 } from "@clawconnect/core";
 import type {
@@ -98,7 +99,15 @@ export interface App {
  * this is testable without a live gateway keeping a job in "running".
  */
 export function checkTaskText(snapshot: JobSnapshot, isTerminal: boolean): string {
-  if (isTerminal) return snapshot.summary ?? snapshot.error ?? "";
+  if (isTerminal) {
+    // A blocked delegation is terminal for the job and unfinished for the
+    // user; the notice leads, so it cannot be missed behind a summary that
+    // says nothing (see blockedDelegationNotice).
+    const blocked = blockedDelegationNotice(snapshot);
+    const summary = snapshot.summary ?? snapshot.error ?? "";
+    if (!blocked) return summary;
+    return summary && summary !== blocked ? `${blocked}\n\n${summary}` : blocked;
+  }
   const resume = `Poll again with knownLogCount=${snapshot.logCursor}.`;
   return snapshot.recovery ? `Recovering late transcript final text. ${resume}` : `Still running. ${resume}`;
 }

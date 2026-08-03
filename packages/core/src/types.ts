@@ -61,12 +61,23 @@ export type TaskStatus = "queued" | "running" | "blocked" | "needs-human" | "don
  * Where a job's terminal summary text actually came from. Absent (undefined)
  * on every pre-existing terminal path — including the ordinary live-final and
  * transcript-reconciliation paths that predate this field — and reads as the
- * implicit historical default "parent". The only writer that ever sets it to
- * "fleet-transcript" is the Fleet-adapter recovery fallback in session.ts,
- * gated behind the parent's own live+transcript recovery already having given
- * up (see docs/architecture/2026-08-02-managed-fleet-attachment-plan.md §8).
+ * implicit historical default "parent".
+ *
+ * The two delegated values are deliberately distinct, and both are written
+ * only by the recovery fallback in session.ts, gated behind the parent's own
+ * live+transcript recovery already having given up (see docs/architecture/
+ * 2026-08-02-managed-fleet-attachment-plan.md §8):
+ *
+ *   fleet-transcript — the LEGACY claude-fleet path only: a Claude Code
+ *                      transcript read off disk by the FleetAdapter, with its
+ *                      own stronger trust gate. Unchanged in meaning.
+ *   agent-session    — a registered runtime answered through the neutral
+ *                      callback seam (agent-session.ts). Kept separate because
+ *                      "we read a Claude transcript" is a specific claim about
+ *                      provenance that an arbitrary runtime's reply does not
+ *                      support.
  */
-export type ResultSource = "parent" | "fleet-transcript";
+export type ResultSource = "parent" | "fleet-transcript" | "agent-session";
 
 // ── Managed agent-session attachment ──────────────────────────────────────
 

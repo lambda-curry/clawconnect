@@ -15,7 +15,7 @@ process.on("uncaughtException", (err) => {
   console.error("[connector] uncaughtException (kept alive):", err);
 });
 
-import { loadAgentRegistry } from "@clawconnect/core";
+import { loadAgentRegistry, loadAgentSessionRuntimes } from "@clawconnect/core";
 import type { AgentRegistry } from "@clawconnect/core";
 import { createApp } from "./app.js";
 
@@ -46,7 +46,14 @@ try {
   console.log(`[chatgpt-app] env fallback registry: single agent "${singleAgentId}"`);
 }
 
-const { requestListener } = createApp(registry);
+// The host's managed-agent-session runtimes, if this deployment configured any
+// (CLAWCONNECT_AGENT_SESSION_RUNTIME_MODULES — see core's runtime-modules.ts).
+// Without it the registry option on createApp is decorative in production:
+// nothing in a shipped binary could ever supply one. Unset, claude-fleet stays
+// the only reachable runtime, exactly as before.
+const agentSessionRuntimes = await loadAgentSessionRuntimes();
+
+const { requestListener } = createApp(registry, { agentSessionRuntimes });
 
 const server = createServer(requestListener);
 const port = Number(process.env.PORT || 7331);

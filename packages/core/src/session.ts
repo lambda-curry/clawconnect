@@ -7,11 +7,16 @@ import {
 } from "./artifacts.ts";
 import { classifyError } from "./errors.ts";
 import {
+  delegateBlockedTerminalReason,
+  describeBlockedAgentSession,
   dispatchAgentSession,
   isBlockedAgentSessionState,
   isCompletedTurnState,
+  isDelegateBlockedTerminalReason,
   normalizeAgentSessionObservation,
+  withAgentSessionTimeout,
   type AgentSessionRef,
+  type AgentSessionState,
   type AgentSessionRequest,
   type AgentSessionRuntime,
   type AgentSessionRuntimeRegistry,
@@ -350,12 +355,33 @@ export class SessionManager {
     }
   }
 
-  /** Restart-recovery counterpart to rehydrateFromStore, for Fleet attachment lineage. See fleet-attachment-store.ts. */
+  /**
+   * Restart-recovery counterpart to rehydrateFromStore, for Fleet attachment
+   * lineage. See fleet-attachment-store.ts.
+   *
+   * `observationSeq` RESUMES above the highest token any reloaded record
+   * carries. The counter is in-memory and the tokens are durable, so a fresh
+   * process starting back at zero would mint tokens the compare-and-set in
+   * applyAgentSessionStatus is bound to refuse (`token <= observationToken`) —
+   * every observation, and every runtime recovery that depends on one landing,
+   * would silently do nothing until the counter caught up. Restoring the
+   * high-water mark keeps the token strictly monotonic ACROSS restarts, which
+   * is the property the CAS actually needs.
+   */
   private rehydrateFleetFromStore(store: FleetAttachmentStore): void {
+    let highWater = this.observationSeq;
     for (const state of store.load()) {
       if (typeof state?.sessionKey !== "string" || !state.sessionKey) continue;
-      this.fleetAttachments.set(state.sessionKey, sanitizeFleetState(state));
+      const sanitized = sanitizeFleetState(state);
+      this.fleetAttachments.set(state.sessionKey, sanitized);
+      // Every record, not just the current one: a superseded record can carry
+      // the highest token, and re-issuing it would let a stale write land.
+      for (const record of Object.values(sanitized.attachments)) {
+        const token = record.observationToken;
+        if (typeof token === "number" && Number.isFinite(token) && token > highWater) highWater = token;
+      }
     }
+    this.observationSeq = highWater;
   }
 
   /**
@@ -537,6 +563,10 @@ export class SessionManager {
       lastObservedAt: now,
       error: undefined,
       ...(nextStatus ? { status: nextStatus } : {}),
+      // Authoritative when a runtime answered (dispatchAgentSession binds the
+      // registered runtime's own provider onto the ref), so a record whose
+      // provider came from attachment text heals to what the runtime says.
+      ...(status.provider ? { provider: status.provider } : {}),
       ...(status.providerSessionId ? { providerSessionId: status.providerSessionId } : {}),
       ...(status.host ? { host: status.host } : {}),
       ...(status.remoteUrl ? { remoteUrl: status.remoteUrl } : {}),
@@ -671,6 +701,10 @@ export class SessionManager {
     directive: Extract<FleetDirective, { op: "attach" | "replace" }>,
   ): FleetAttachmentRecord {
     this.writeFleetAttachment(sessionKey, current.id, {
+      // A re-statement by a DIFFERENT turn is a new delegation to the same
+      // session: the previous turn's result/termination/liveness stop being
+      // this attachment's current state. See redelegationReset.
+      ...(jobId !== current.delegatedTurnId ? this.redelegationReset(current) : {}),
       delegatedTurnId: jobId,
       lastObservedAt: Date.now(),
       ...(directive.provider ? { provider: directive.provider } : {}),
@@ -688,6 +722,38 @@ export class SessionManager {
       `[agent-session] session ${sessionKey.slice(-12)} re-stated ${current.runtime}/${current.handle} (${current.id.slice(0, 8)}), delegated to job ${jobId.slice(0, 8)}`,
     );
     return this.getFleetAttachment(sessionKey) ?? current;
+  }
+
+  /**
+   * The patch that retires the PREVIOUS turn's observations when the same
+   * attachment is claimed by a NEW turn (a re-stated marker, or a `continue`
+   * from a later job). The attachment itself survives untouched — same id,
+   * same lineage, same runtime/handle/host/metadata, same attachedAt — because
+   * it is genuinely the same session; what does not survive is everything that
+   * described the last turn's OUTCOME, which would otherwise be read as this
+   * turn's:
+   *
+   *   lastResult      — the previous turn's answer;
+   *   termination      — why the previous turn stopped;
+   *   latestResponse   — what it was saying then;
+   *   alive/error      — liveness and read-failures observed for that turn;
+   *   status           — reset to "starting" ONLY from a terminal state, since
+   *                      a finished turn cannot describe one that just began.
+   *                      A non-terminal state (running/needs_input/…) is left
+   *                      alone: it may still be true, and a stated status in
+   *                      the same directive overwrites it anyway.
+   */
+  private redelegationReset(current: FleetAttachmentRecord): Partial<FleetAttachmentRecord> {
+    const terminal =
+      current.status === "completed" || current.status === "idle" || current.status === "dead" || current.status === "failed";
+    return {
+      lastResult: undefined,
+      termination: undefined,
+      latestResponse: undefined,
+      alive: undefined,
+      error: undefined,
+      ...(terminal ? { status: "starting" as const } : {}),
+    };
   }
 
   private detachFleet(sessionKey: string, reason: string): FleetAttachmentRecord | undefined {
@@ -788,6 +854,10 @@ export class SessionManager {
     const delegationChanged = directive.op === "continue" && jobId !== undefined && jobId !== current.delegatedTurnId;
     if (statusChanged || delegationChanged) {
       this.writeFleetAttachment(sessionKey, current.id, {
+        // Same rule as a re-stated marker: a `continue` from a LATER turn is a
+        // new delegation, so the previous turn's outcome fields go. Listed
+        // first so an explicitly stated status still wins over the reset.
+        ...(delegationChanged ? this.redelegationReset(current) : {}),
         // A status Clawdy states directly IS an observation, and the newest
         // one — so it takes a token like any other. Without that, an `inspect`
         // probe already in flight (which does not re-stamp delegatedTurnId,
@@ -886,26 +956,43 @@ export class SessionManager {
    *
    * Anything else — an unknown runtime, no adapter — yields undefined, and the
    * caller falls through to today's completed_no_summary.
+   *
+   * The `source` it reports is what the job's `resultSource` becomes:
+   * "fleet-transcript" stays the LEGACY claude-fleet transcript path only, so
+   * a result recovered from an arbitrary runtime is never mislabelled as one
+   * read out of a Claude Code transcript.
    */
-  private async observeForRecovery(record: FleetAttachmentRecord): Promise<AgentSessionStatus | undefined> {
+  private async observeForRecovery(
+    record: FleetAttachmentRecord,
+  ): Promise<{ status: AgentSessionStatus; source: ResultSource } | undefined> {
     const ref = this.agentSessionRef(record);
     const now = Date.now();
     const registered = this.runtimes?.get(record.runtime);
-    if (registered) return dispatchAgentSession(registered, ref, { op: "inspect" }, { now });
+    if (registered) {
+      const status = await dispatchAgentSession(registered, ref, { op: "inspect" }, { now });
+      return { status, source: "agent-session" };
+    }
     if (record.runtime !== CLAUDE_FLEET_RUNTIME_ID || !this.fleetAdapter) return undefined;
     try {
-      const handoff = await this.fleetAdapter.readTerminalHandoff(record);
+      // Bounded for the same reason a runtime callback is (see
+      // withAgentSessionTimeout): this read runs on the path that decides a
+      // job's terminal status, and an adapter that never answers must not be
+      // able to hold a job in `running` forever.
+      const handoff = await withAgentSessionTimeout(() => this.fleetAdapter!.readTerminalHandoff(record));
       if (!handoff?.text) return undefined;
-      return normalizeAgentSessionObservation(
-        ref,
-        // `resultAt` is the transcript entry's OWN timestamp — never wall-clock
-        // read time — which is what makes the freshness bound below meaningful.
-        { state: "completed", finalResponse: handoff.text, lastEventAt: handoff.resultAt },
-        now,
-      );
+      return {
+        status: normalizeAgentSessionObservation(
+          ref,
+          // `resultAt` is the transcript entry's OWN timestamp — never wall-clock
+          // read time — which is what makes the freshness bound below meaningful.
+          { state: "completed", finalResponse: handoff.text, lastEventAt: handoff.resultAt },
+          now,
+        ),
+        source: "fleet-transcript",
+      };
     } catch (err) {
       logDebug(
-        `[agent-session] readTerminalHandoff threw for ${record.handle}: ${err instanceof Error ? err.message : String(err)}`,
+        `[agent-session] readTerminalHandoff failed for ${record.handle}: ${err instanceof Error ? err.message : String(err)}`,
       );
       return undefined;
     }
@@ -936,7 +1023,9 @@ export class SessionManager {
    *     newer observation while the runtime call was in flight (see
    *     applyAgentSessionStatus's three-part compare-and-set).
    */
-  private async tryFleetRecovery(job: Job): Promise<{ summary: string; attachmentId: string } | undefined> {
+  private async tryFleetRecovery(
+    job: Job,
+  ): Promise<{ summary: string; attachmentId: string; resultSource: ResultSource } | undefined> {
     if (!this.fleetAdapter && !this.runtimes) return undefined;
     const current = this.getFleetAttachment(job.sessionKey);
     if (!current) return undefined;
@@ -947,9 +1036,26 @@ export class SessionManager {
     const delegatedTurnId = current.delegatedTurnId;
     const token = ++this.observationSeq;
 
-    const status = await this.observeForRecovery(current);
-    if (!status || status.error) return undefined;
-    if (!isCompletedTurnState(status.state) || !status.finalResponse) return undefined;
+    const observed = await this.observeForRecovery(current);
+    if (!observed) return undefined;
+    const { status, source } = observed;
+    if (status.error) {
+      // The read failed, so it says nothing about the session — but THAT it
+      // failed is worth keeping, or a timed-out runtime looks identical to one
+      // that answered "nothing yet". applyAgentSessionStatus's error branch
+      // writes the error and touches no session state.
+      this.applyAgentSessionStatus(job.sessionKey, attachmentId, delegatedTurnId, token, status);
+      return undefined;
+    }
+    if (!isCompletedTurnState(status.state) || !status.finalResponse) {
+      // Not this turn's answer — but it IS current news about the session
+      // ("needs_input", "still running", …), and dropping it on the floor is
+      // how a block stays invisible until something else happens to read it.
+      // Folded in through the same guarded write-back as any other
+      // observation; it cannot produce a result, only a state.
+      this.applyAgentSessionStatus(job.sessionKey, attachmentId, delegatedTurnId, token, status);
+      return undefined;
+    }
 
     // A result we cannot date cannot be proven to belong to THIS turn, and an
     // undatable answer must read as "nothing trustworthy yet" rather than as
@@ -972,7 +1078,22 @@ export class SessionManager {
     // place that decides whether this answer is still allowed to be durable —
     // and if it isn't, it isn't allowed to complete the job either.
     if (!this.applyAgentSessionStatus(job.sessionKey, attachmentId, delegatedTurnId, token, status)) return undefined;
-    return { summary: status.finalResponse, attachmentId };
+    return { summary: status.finalResponse, attachmentId, resultSource: source };
+  }
+
+  /**
+   * The blocked state of the session THIS turn delegated to, when there is
+   * one. A turn that ends with nothing to show because its delegate is waiting
+   * on a human is not an ordinary quiet finish, and the two must not read
+   * alike on any surface — see delegateBlockedTerminalReason.
+   *
+   * Delegation-scoped like tryFleetRecovery: an attachment left current from
+   * some earlier turn says nothing about this one.
+   */
+  private blockedDelegation(job: Job): FleetAttachmentRecord | undefined {
+    const current = this.getFleetAttachment(job.sessionKey);
+    if (!current || current.delegatedTurnId !== job.jobId) return undefined;
+    return isBlockedAgentSessionState(current.status) ? current : undefined;
   }
 
   submitTask(input: TaskInput): Job {
@@ -1624,15 +1745,15 @@ export class SessionManager {
             this.provisionalOutcomes.add(jobId);
             job.lastEventAt = Date.now();
             this.setOutcome(job, "completed", fleet.summary, undefined, {
-              resultSource: "fleet-transcript",
-              terminalReason: "fleet-transcript-recovery",
+              resultSource: fleet.resultSource,
+              terminalReason: `${fleet.resultSource}-recovery`,
             });
             job.recovery = undefined;
             extractPatternsFromSummary(artifacts, fleet.summary);
             pushLog(job, {
               ts: Date.now(),
               type: "recovery",
-              text: `Recovered the final response from the attached Fleet session (${fleet.attachmentId.slice(0, 8)}) after the parent transcript produced nothing`,
+              text: `Recovered the final response from the attached agent session (${fleet.attachmentId.slice(0, 8)}) after the parent transcript produced nothing`,
             });
             this.sessions.set(sessionKey, {
               sessionKey,
@@ -1645,21 +1766,34 @@ export class SessionManager {
             logDebug(`[job ${jobId}] recovered via Fleet attachment (${fleet.summary.length} chars)`);
             return;
           }
-          this.setOutcome(job, "completed_no_summary", NO_SUMMARY_SENTINEL, undefined, {
+          // There IS one thing left to say when the delegate is waiting on a
+          // human: this turn is not an ordinary quiet finish, and presenting
+          // it as one hides an action the caller has to take. The job status
+          // stays `completed_no_summary` (no new JobStatus, so every existing
+          // consumer keeps working) — what changes is that the summary and
+          // terminalReason say what is actually blocked. See blockedDelegation.
+          const blocked = this.blockedDelegation(job);
+          const blockedNotice = describeBlockedAgentSession(blocked);
+          this.setOutcome(job, "completed_no_summary", blockedNotice ?? NO_SUMMARY_SENTINEL, undefined, {
             resultSource: "parent",
-            terminalReason: "late-recovery-exhausted",
+            terminalReason: blocked
+              ? delegateBlockedTerminalReason(blocked.status as AgentSessionState)
+              : "late-recovery-exhausted",
           });
           job.recovery = undefined;
+          if (blockedNotice) {
+            pushLog(job, { ts: Date.now(), type: "recovery", text: blockedNotice });
+          }
           this.sessions.set(sessionKey, {
             sessionKey,
             lastJobId: jobId,
-            lastSummary: NO_SUMMARY_SENTINEL.slice(0, 500),
+            lastSummary: (blockedNotice ?? NO_SUMMARY_SENTINEL).slice(0, 500),
             artifacts,
             recommendedNextStep: deriveNextStep(artifacts, job.status),
           });
           this.persistActiveJobs();
           logDebug(
-            `[job ${jobId}] late-recovery exhausted (idle-timeout=${idleTimeoutMs / 1000}s, hard-cap=${hardCapMs / 1000}s) — completed_no_summary`,
+            `[job ${jobId}] late-recovery exhausted (idle-timeout=${idleTimeoutMs / 1000}s, hard-cap=${hardCapMs / 1000}s) — completed_no_summary${blocked ? ` (delegate ${blocked.status})` : ""}`,
           );
         },
         (err) => {
@@ -1801,22 +1935,46 @@ export class SessionManager {
       // lazy re-check's.
       if (job.status === "completed_no_summary") {
         const fleet = await this.tryFleetRecovery(job);
-        if (
-          fleet &&
-          this.latestJobBySession.get(job.sessionKey) === job.jobId &&
-          (job.outcomeVersion ?? 0) === outcomeAtStart
-        ) {
+        if (!fleet) {
+          // tryFleetRecovery refuses a blocked delegation outright, and this
+          // poll may be the first read that DISCOVERED the block — the turn
+          // was already terminal by then, still carrying the ordinary
+          // "nothing to report" outcome. Relabel it so every surface that
+          // reads the job (not just the ones that read the attachment) tells
+          // the two apart. Same status, same ownership/version guards as the
+          // recovery branch below, and idempotent: a job already labelled
+          // blocked is left alone.
+          const blocked = this.blockedDelegation(job);
+          const notice = describeBlockedAgentSession(blocked);
+          if (
+            blocked &&
+            notice &&
+            !isDelegateBlockedTerminalReason(job.terminalReason) &&
+            this.latestJobBySession.get(job.sessionKey) === job.jobId &&
+            (job.outcomeVersion ?? 0) === outcomeAtStart
+          ) {
+            job.lastEventAt = Date.now();
+            this.setOutcome(job, "completed_no_summary", notice, undefined, {
+              resultSource: "parent",
+              terminalReason: delegateBlockedTerminalReason(blocked.status as AgentSessionState),
+            });
+            pushLog(job, { ts: Date.now(), type: "recovery", text: notice });
+            logDebug(`[job ${job.jobId}] lazy-recheck: delegate is ${blocked.status} — turn is blocked, not finished`);
+          }
+          return;
+        }
+        if (this.latestJobBySession.get(job.sessionKey) === job.jobId && (job.outcomeVersion ?? 0) === outcomeAtStart) {
           this.provisionalOutcomes.add(job.jobId);
           job.lastEventAt = Date.now();
           this.setOutcome(job, "completed", fleet.summary, undefined, {
-            resultSource: "fleet-transcript",
-            terminalReason: "fleet-transcript-recovery",
+            resultSource: fleet.resultSource,
+            terminalReason: `${fleet.resultSource}-recovery`,
           });
           extractPatternsFromSummary(job.artifacts, fleet.summary);
           pushLog(job, {
             ts: Date.now(),
             type: "recovery",
-            text: `Recovered the final response from the attached Fleet session (${fleet.attachmentId.slice(0, 8)}) after a lazy parent-transcript recheck found nothing`,
+            text: `Recovered the final response from the attached agent session (${fleet.attachmentId.slice(0, 8)}) after a lazy parent-transcript recheck found nothing`,
           });
           this.sessions.set(job.sessionKey, {
             sessionKey: job.sessionKey,

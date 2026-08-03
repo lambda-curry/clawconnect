@@ -14,8 +14,17 @@ export {
   coerceAgentSessionState,
   isCompletedTurnState,
   isBlockedAgentSessionState,
+  isDelegateBlockedTerminalReason,
+  delegateBlockedTerminalReason,
+  describeBlockedAgentSession,
+  blockedDelegationNotice,
+  withAgentSessionTimeout,
+  isAgentSessionTimeout,
+  AGENT_SESSION_CALL_TIMEOUT_MS,
   COMPLETED_TURN_STATES,
+  DELEGATE_BLOCKED_TERMINAL_REASON,
 } from "./agent-session.ts";
+export { loadAgentSessionRuntimes, RUNTIME_MODULES_ENV } from "./runtime-modules.ts";
 export type {
   AgentSessionCallOptions,
   AgentSessionCapabilities,

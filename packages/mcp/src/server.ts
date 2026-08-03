@@ -18,6 +18,7 @@ import {
   buildRunTaskStructuredContent,
   buildCheckTaskStructuredContent,
   buildGetTaskStructuredContent,
+  blockedDelegationNotice,
   TASK_SUMMARY_PREVIEW_MAX,
 } from "@clawconnect/core";
 import type {
@@ -121,7 +122,11 @@ export function defaultFormatCheckTask(result: CheckTaskResult): McpToolResponse
     };
   }
 
-  // Terminal: deliver the full payload
+  // Terminal: deliver the full payload. A turn whose delegated session is
+  // waiting on a human is terminal for the JOB but not for the WORK — without
+  // this it reads as an ordinary finished task with nothing to say, and the
+  // block goes unnoticed until someone opens the session by hand.
+  const blockedDelegation = blockedDelegationNotice(snapshot);
   const payload = {
     jobId: snapshot.jobId,
     sessionKey: snapshot.sessionKey,
@@ -137,6 +142,9 @@ export function defaultFormatCheckTask(result: CheckTaskResult): McpToolResponse
     continuePolling,
     retryAfterMs: snapshot.retryAfterMs,
     nextAction: snapshot.nextAction,
+    ...(blockedDelegation
+      ? { blockedDelegation, delegatedSession: snapshot.fleetAttachment, terminalReason: snapshot.terminalReason }
+      : {}),
   };
   return {
     content: [{ type: "text" as const, text: JSON.stringify(payload) }],
@@ -194,6 +202,22 @@ export function createMcpServer(config: {
    * other attachment reads back as a precise unknown_runtime result.
    */
   agentSessionRuntimes?: AgentSessionRuntimeRegistry;
+  /**
+   * Directory for per-agent attachment-lineage files (`<agentId>.fleet.json`,
+   * see fleet-attachment-store.ts). Attachment lineage is durable state the
+   * managed-session model depends on — which conversation is delegated to
+   * which session, and its replacement history — so a stdio server that
+   * restarts (the host reconnects, the machine sleeps) otherwise loses every
+   * attachment even though the underlying runtime session is still alive.
+   *
+   * Deliberately NOT defaulted here: this factory is also what tests and
+   * embedders construct, and a default would have them writing files as a side
+   * effect of construction. The shipped `clawconnect-mcp` bin passes one (see
+   * bin.ts) — that is the deployed path this exists for. Job persistence stays
+   * off, unchanged: an in-flight job belongs to a live stdio connection that a
+   * restart ends anyway, while an attachment outlives it.
+   */
+  fleetStoreDir?: string;
 }) {
   const server = new McpServer({
     name: "ClawConnect",
@@ -201,7 +225,17 @@ export function createMcpServer(config: {
   });
 
   const fleetAdapter = config.fleetAdapter ?? new LocalTmuxFleetAdapter();
-  const pool = new GatewayPool(config.registry, undefined, fleetAdapter, undefined, config.agentSessionRuntimes);
+  const pool = new GatewayPool(
+    config.registry,
+    undefined,
+    fleetAdapter,
+    config.fleetStoreDir,
+    config.agentSessionRuntimes,
+  );
+  // Rehydrate every configured agent's persisted attachment lineage now, not
+  // lazily on the first request that happens to touch one — an agent nobody
+  // has queried since the restart would otherwise look unattached.
+  if (config.fleetStoreDir) pool.warmAll();
 
   const provider = config.provider ?? {};
   const defaultMode = provider.defaultCheckMode ?? "wait";

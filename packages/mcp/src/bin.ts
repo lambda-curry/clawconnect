@@ -11,8 +11,10 @@ process.on("uncaughtException", (err) => {
   console.error("[mcp] uncaughtException (kept alive):", err);
 });
 
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { loadAgentRegistry } from "@clawconnect/core";
+import { loadAgentRegistry, loadAgentSessionRuntimes } from "@clawconnect/core";
 import { createMcpServer } from "./server.ts";
 
 let registry;
@@ -29,6 +31,14 @@ console.error(
     `(default=${registry.default}, agents=${registry.agents.map((a) => a.id).join(",")})`,
 );
 
-const { server } = createMcpServer({ registry });
+// Managed-session wiring, both halves of it (see core's runtime-modules.ts and
+// fleet-attachment-store.ts). Absent CLAWCONNECT_AGENT_SESSION_RUNTIME_MODULES
+// this is exactly the previous behavior — claude-fleet only — and the store
+// directory is inert until something actually attaches.
+const agentSessionRuntimes = await loadAgentSessionRuntimes();
+const fleetStoreDir =
+  process.env.CLAWCONNECT_FLEET_STORE_DIR?.trim() || join(homedir(), ".clawconnect", "attachments");
+
+const { server } = createMcpServer({ registry, agentSessionRuntimes, fleetStoreDir });
 const transport = new StdioServerTransport();
 await server.connect(transport);

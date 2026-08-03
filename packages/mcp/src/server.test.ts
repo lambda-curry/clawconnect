@@ -1,4 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterAll, describe, expect, it } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
@@ -25,6 +28,39 @@ function fakeRegistry(): AgentRegistry {
     groupLabels: {},
     agents: [{ id: "test-agent", url: "ws://fake", password: "fake", openclawAgentId: "main" }],
   };
+}
+
+const tmpDirs: string[] = [];
+
+afterAll(() => {
+  for (const dir of tmpDirs) rmSync(dir, { recursive: true, force: true });
+});
+
+/** A directory holding one agent's attachment file, as a prior process would have left it. */
+function seededFleetStore(): string {
+  const dir = mkdtempSync(join(tmpdir(), "clawconnect-fleet-store-"));
+  tmpDirs.push(dir);
+  writeFileSync(
+    join(dir, "test-agent.fleet.json"),
+    JSON.stringify([
+      {
+        sessionKey: "sess-1",
+        currentAttachmentId: "att-1",
+        attachments: {
+          "att-1": {
+            id: "att-1",
+            runtime: "t3-fleet",
+            provider: "anthropic-claude-code",
+            handle: "thr-abc123",
+            attachedAt: 1,
+            status: "needs_input",
+            observationToken: 7,
+          },
+        },
+      },
+    ]),
+  );
+  return dir;
 }
 
 async function connectedClient() {
@@ -273,6 +309,78 @@ describe("check_task model-facing text carries the resume cursor", () => {
   });
 });
 
+describe("a terminal turn whose delegated session is waiting on a human", () => {
+  const blockedAttachment = {
+    id: "att-1",
+    runtime: "t3-fleet",
+    provider: "anthropic-claude-code",
+    handle: "thr-abc123",
+    attachedAt: 1,
+    status: "needs_input" as const,
+    latestResponse: "should I force-push?",
+    remoteUrl: "https://t3.example/threads/abc123",
+    delegatedTurnId: "job-1",
+  };
+
+  function terminalResult(overrides: Partial<JobSnapshot> = {}): CheckTaskResult {
+    const snapshot: JobSnapshot = {
+      jobId: "job-1",
+      sessionKey: "session-1",
+      status: "completed_no_summary",
+      startedAt: Date.now() - 5_000,
+      lastEventAt: Date.now(),
+      lastPollAt: Date.now(),
+      logs: [],
+      logCursor: 0,
+      logEventCount: 0,
+      artifacts: { filesChanged: [], commandsRun: [], needsHumanDecision: false },
+      agent: "test-agent",
+      pollCount: 2,
+      continuePolling: false,
+      retryAfterMs: 0,
+      nextAction: null,
+      ...overrides,
+    };
+    return { found: true, snapshot, isTerminal: true, isError: false, continuePolling: false };
+  }
+
+  it("says so in the model-facing text instead of reading as an ordinary finished task", () => {
+    const response = defaultFormatCheckTask(
+      terminalResult({
+        summary: "This turn produced no result of its own…",
+        fleetAttachment: blockedAttachment,
+        terminalReason: "delegate-blocked:needs_input",
+      }),
+    );
+    const payload = JSON.parse(response.content[0].text) as Record<string, unknown>;
+    expect(String(payload.blockedDelegation)).toContain("t3-fleet/thr-abc123");
+    expect(String(payload.blockedDelegation)).toContain("waiting for input");
+    expect(String(payload.blockedDelegation)).toContain("should I force-push?");
+    // The attachment itself rides along, so the caller can act without a
+    // second round-trip to get_task.
+    expect(payload.delegatedSession).toMatchObject({ handle: "thr-abc123", status: "needs_input" });
+    expect(payload.terminalReason).toBe("delegate-blocked:needs_input");
+  });
+
+  it("leaves an ordinary terminal payload byte-for-byte as it was", () => {
+    const plain = JSON.parse(defaultFormatCheckTask(terminalResult({ summary: "the answer" })).content[0].text);
+    expect(plain).not.toHaveProperty("blockedDelegation");
+    expect(plain).not.toHaveProperty("delegatedSession");
+    expect(plain.summary).toBe("the answer");
+
+    // An attachment that is NOT blocked is likewise not called out.
+    const running = JSON.parse(
+      defaultFormatCheckTask(
+        terminalResult({
+          summary: "the answer",
+          fleetAttachment: { ...blockedAttachment, status: "running" },
+        }),
+      ).content[0].text,
+    );
+    expect(running).not.toHaveProperty("blockedDelegation");
+  });
+});
+
 describe("production entrypoint wiring — FleetAdapter", () => {
   /**
    * Independent-review blocker 1: recovery tier 3 (see docs/architecture/
@@ -308,5 +416,33 @@ describe("production entrypoint wiring — FleetAdapter", () => {
   it("createMcpServer leaves claude-fleet the only reachable runtime when no registry is supplied", () => {
     const { pool } = createMcpServer({ registry: fakeRegistry() });
     expect(pool.forAgent("test-agent").sessions.hasAgentSessionRuntime("t3-fleet")).toBe(false);
+  });
+
+  /**
+   * Attachment lineage is durable state the managed-session model depends on:
+   * which conversation is delegated to which session, and its replacement
+   * history. A stdio server restarts often (the host reconnects, the machine
+   * sleeps) while the runtime session it delegated to is still very much
+   * alive — so a deployment that claims managed-session support has to persist
+   * it. `clawconnect-mcp` (bin.ts) passes a directory; this proves the factory
+   * carries it all the way through to each agent's store.
+   */
+  it("createMcpServer reloads persisted attachment lineage when the deployment configures a directory", () => {
+    const dir = seededFleetStore();
+    const { pool } = createMcpServer({ registry: fakeRegistry(), fleetStoreDir: dir });
+    // Reachable without a request having touched this agent first: an agent
+    // nobody has queried since the restart would otherwise look unattached.
+    expect(pool.forAgent("test-agent").sessions.getFleetAttachment("sess-1")).toMatchObject({
+      runtime: "t3-fleet",
+      handle: "thr-abc123",
+      status: "needs_input",
+    });
+  });
+
+  it("stays fully in-memory when no directory is configured, exactly as before", () => {
+    const dir = seededFleetStore();
+    const { pool } = createMcpServer({ registry: fakeRegistry() });
+    expect(pool.forAgent("test-agent").sessions.getFleetAttachment("sess-1")).toBeUndefined();
+    expect(readdirSync(dir)).toEqual(["test-agent.fleet.json"]);
   });
 });

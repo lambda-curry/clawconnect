@@ -1,10 +1,16 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   AgentSessionRuntimeRegistry,
+  blockedDelegationNotice,
+  delegateBlockedTerminalReason,
+  describeBlockedAgentSession,
   dispatchAgentSession,
+  isAgentSessionTimeout,
   isBlockedAgentSessionState,
   isCompletedTurnState,
+  isDelegateBlockedTerminalReason,
   normalizeAgentSessionObservation,
+  withAgentSessionTimeout,
   type AgentSessionObservation,
   type AgentSessionRef,
 } from "./agent-session.ts";
@@ -183,7 +189,9 @@ describe("capabilities and dispatch", () => {
     });
 
     await dispatchAgentSession(runtime, REF, { op: "inspect" }, { now: NOW });
-    expect(seen).toEqual([REF]);
+    // Everything the caller supplied, with the runtime's own provider bound
+    // onto it — see the provider-authority tests below.
+    expect(seen).toEqual([{ ...REF, provider: "p" }]);
   });
 
   it("routes continue and detach to their own callbacks, with the request attached", async () => {
@@ -219,6 +227,186 @@ describe("capabilities and dispatch", () => {
     // The shape of the seam is the guarantee: the only way to reach a runtime
     // is one call about one already-known session.
     expect(Object.keys(registry.get("t3-fleet")!.callbacks).sort()).toEqual(["id", "inspect", "provider"]);
+  });
+});
+
+describe("the registered runtime's provider is authoritative", () => {
+  it("cannot be spoofed by attachment text, and cannot be erased by omitting it", async () => {
+    const seen: AgentSessionRef[] = [];
+    const registry = new AgentSessionRuntimeRegistry();
+    const runtime = registry.register({
+      id: "t3-fleet",
+      provider: "anthropic-claude-code",
+      inspect: async (ref) => {
+        seen.push(ref);
+        // A reply cannot restate identity at all — provider included.
+        return { state: "running", ...({ provider: "sneaky-provider" } as AgentSessionObservation) };
+      },
+    });
+
+    // An attachment whose text claimed some other provider…
+    const spoofed = await dispatchAgentSession(
+      runtime,
+      { ...REF, provider: "totally-not-claude" },
+      { op: "inspect" },
+      { now: NOW },
+    );
+    // …and one that named none at all.
+    const silent = await dispatchAgentSession(runtime, { ...REF, provider: undefined }, { op: "inspect" }, { now: NOW });
+
+    expect(seen.map((r) => r.provider)).toEqual(["anthropic-claude-code", "anthropic-claude-code"]);
+    expect(spoofed.provider).toBe("anthropic-claude-code");
+    expect(silent.provider).toBe("anthropic-claude-code");
+  });
+
+  it("leaves the attachment's own provider alone when no runtime can answer", async () => {
+    const status = await dispatchAgentSession(undefined, { ...REF, provider: "whatever-it-said" }, { op: "inspect" }, { now: NOW });
+    expect(status.state).toBe("unavailable");
+    expect(status.provider).toBe("whatever-it-said");
+  });
+});
+
+describe("a callback that never answers", () => {
+  /**
+   * A hung callback is host code reaching a service ClawConnect knows nothing
+   * about. Terminal recovery AWAITS that call, so without a deadline one
+   * unanswered inspect wedges a job out of ever reaching a terminal status.
+   */
+  it("is abandoned at the deadline as an ordinary unavailable read, and is told it was abandoned", async () => {
+    vi.useFakeTimers();
+    try {
+      let seenSignal: AbortSignal | undefined;
+      const registry = new AgentSessionRuntimeRegistry();
+      const runtime = registry.register({
+        id: "t3-fleet",
+        provider: "p",
+        inspect: (_ref, opts) => {
+          seenSignal = opts.signal;
+          return new Promise<never>(() => {});
+        },
+      });
+
+      const pending = dispatchAgentSession(runtime, REF, { op: "inspect" }, { now: NOW, timeoutMs: 5_000 });
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(seenSignal?.aborted).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(2);
+      const status = await pending;
+
+      expect(status.state).toBe("unavailable");
+      expect(status.error?.code).toBe("inspect_timeout");
+      // The last thing anyone actually reported still rides along.
+      expect(status.detail).toContain("Last reported state: running.");
+      // A runtime that honors the signal can stop work nobody will read.
+      expect(seenSignal?.aborted).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("names the operation that timed out, so a caller can branch on which one", async () => {
+    vi.useFakeTimers();
+    try {
+      const registry = new AgentSessionRuntimeRegistry();
+      const runtime = registry.register({
+        id: "t3-fleet",
+        provider: "p",
+        inspect: async () => ({ state: "running" }),
+        continue: () => new Promise<never>(() => {}),
+      });
+      const pending = dispatchAgentSession(runtime, REF, { op: "continue", prompt: "go" }, { now: NOW, timeoutMs: 1_000 });
+      await vi.advanceTimersByTimeAsync(1_001);
+      expect((await pending).error?.code).toBe("continue_timeout");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("still returns the answer when it arrives inside the deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      const registry = new AgentSessionRuntimeRegistry();
+      const runtime = registry.register({
+        id: "t3-fleet",
+        provider: "p",
+        inspect: () => new Promise((resolve) => setTimeout(() => resolve({ state: "idle" }), 500)),
+      });
+      const pending = dispatchAgentSession(runtime, REF, { op: "inspect" }, { now: NOW, timeoutMs: 5_000 });
+      await vi.advanceTimersByTimeAsync(600);
+      expect((await pending).state).toBe("idle");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("withAgentSessionTimeout aborts the operation and rejects, identifiably", async () => {
+    vi.useFakeTimers();
+    try {
+      let aborted = false;
+      const pending = withAgentSessionTimeout((signal) => {
+        signal.addEventListener("abort", () => {
+          aborted = true;
+        });
+        return new Promise<never>(() => {});
+      }, 1_000).catch((err) => err);
+      await vi.advanceTimersByTimeAsync(1_001);
+      expect(isAgentSessionTimeout(await pending)).toBe(true);
+      expect(aborted).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("a blocked delegation is never an ordinary finished task", () => {
+  const blockedSnapshot = {
+    jobId: "job-1",
+    status: "completed_no_summary",
+    fleetAttachment: {
+      runtime: "t3-fleet",
+      handle: "thr-abc123",
+      status: "needs_input",
+      latestResponse: "should I force-push?",
+      remoteUrl: "https://t3.example/threads/abc123",
+      delegatedTurnId: "job-1",
+    },
+  };
+
+  it("describes what is blocked, what it asked, and where to answer it", () => {
+    const notice = blockedDelegationNotice(blockedSnapshot)!;
+    expect(notice).toContain("t3-fleet/thr-abc123");
+    expect(notice).toContain("waiting for input");
+    expect(notice).toContain("should I force-push?");
+    expect(notice).toContain("https://t3.example/threads/abc123");
+
+    expect(describeBlockedAgentSession({ ...blockedSnapshot.fleetAttachment, status: "needs_permission" })).toContain(
+      "waiting for permission",
+    );
+  });
+
+  it("says nothing for a running job, an unblocked session, or another turn's delegation", () => {
+    expect(blockedDelegationNotice({ ...blockedSnapshot, status: "running" })).toBeUndefined();
+    expect(
+      blockedDelegationNotice({
+        ...blockedSnapshot,
+        fleetAttachment: { ...blockedSnapshot.fleetAttachment, status: "running" },
+      }),
+    ).toBeUndefined();
+    // Delegated to an earlier turn: it says nothing about THIS one.
+    expect(
+      blockedDelegationNotice({
+        ...blockedSnapshot,
+        fleetAttachment: { ...blockedSnapshot.fleetAttachment, delegatedTurnId: "job-0" },
+      }),
+    ).toBeUndefined();
+    expect(blockedDelegationNotice({ jobId: "job-1", status: "completed" })).toBeUndefined();
+  });
+
+  it("round-trips the state through the terminalReason a job carries", () => {
+    expect(delegateBlockedTerminalReason("needs_input")).toBe("delegate-blocked:needs_input");
+    expect(isDelegateBlockedTerminalReason("delegate-blocked:needs_permission")).toBe(true);
+    expect(isDelegateBlockedTerminalReason("late-recovery-exhausted")).toBe(false);
+    expect(isDelegateBlockedTerminalReason(undefined)).toBe(false);
   });
 });
 

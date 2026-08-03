@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AgentSessionRuntimeRegistry, type AgentSessionObservation, type AgentSessionRef } from "./agent-session.ts";
+import {
+  AGENT_SESSION_CALL_TIMEOUT_MS,
+  AgentSessionRuntimeRegistry,
+  blockedDelegationNotice,
+  type AgentSessionObservation,
+  type AgentSessionRef,
+} from "./agent-session.ts";
 import { FLEET_RESULT_SUMMARY_MAX, SessionManager } from "./session.ts";
 import type { OpenClawGateway, RunObservation } from "./gateway.ts";
 import type { FleetAdapter, FleetHandoff } from "./fleet-adapter.ts";
@@ -1164,7 +1170,11 @@ describe("managed agent sessions on a host-registered runtime", () => {
     const recovered = sessions.getJob(job.jobId)!;
     expect(recovered.status).toBe("completed");
     expect(recovered.summary).toBe("the T3 session's real answer");
-    expect(recovered.resultSource).toBe("fleet-transcript");
+    // NOT "fleet-transcript": that value is a specific claim about provenance
+    // (a Claude Code transcript read off disk) that an arbitrary runtime's
+    // reply does not support. See ResultSource.
+    expect(recovered.resultSource).toBe("agent-session");
+    expect(recovered.terminalReason).toBe("agent-session-recovery");
     const attachment = sessions.getFleetAttachment(job.sessionKey)!;
     expect(attachment.lastResult?.summary).toBe("the T3 session's real answer");
     expect(attachment.lastResult?.outputRef).toBe("thr-abc123");
@@ -1206,7 +1216,82 @@ describe("managed agent sessions on a host-registered runtime", () => {
       // The attachment stays actionable, which is the whole point.
       expect(sessions.getFleetAttachment(job.sessionKey)?.status, blocked).toBe(blocked);
       expect(sessions.getFleetAttachment(job.sessionKey)?.lastResult, blocked).toBeUndefined();
+
+      // …and the JOB says so too, rather than reading as an ordinary turn that
+      // simply had nothing to report: same status (no new JobStatus, so every
+      // existing consumer keeps working), different terminalReason and summary.
+      expect(settled.terminalReason, blocked).toBe(`delegate-blocked:${blocked}`);
+      expect(settled.summary, blocked).not.toBe(NO_SUMMARY_SENTINEL);
+      expect(settled.summary, blocked).toContain("t3-fleet/thr-abc123");
+      expect(settled.summary, blocked).toContain(
+        blocked === "needs_permission" ? "waiting for permission" : "waiting for input",
+      );
+      const snapshot = sessions.buildSnapshot(settled);
+      expect(blockedDelegationNotice(snapshot), blocked).toBe(settled.summary);
     }
+  });
+
+  it("leaves an ordinary empty turn exactly as it was — sentinel summary, unchanged reason", async () => {
+    const t3 = fakeT3Runtime({ inspect: async () => ({ state: "running" }) });
+    const ctrl = fakeGateway({ pollTranscriptForFinalText: async () => undefined });
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, t3.registry);
+    const job = sessions.submitTask({ task: "ship it", context: T3_MARKER });
+    ctrl.finishChat(NO_SUMMARY_SENTINEL, 0);
+    await wait();
+
+    const settled = sessions.getJob(job.jobId)!;
+    expect(settled.status).toBe("completed_no_summary");
+    expect(settled.summary).toBe(NO_SUMMARY_SENTINEL);
+    expect(settled.terminalReason).toBe("late-recovery-exhausted");
+    expect(blockedDelegationNotice(sessions.buildSnapshot(settled))).toBeUndefined();
+  });
+
+  it("relabels a terminal turn when a later poll is what discovers the block", async () => {
+    let state = "running";
+    const t3 = fakeT3Runtime({ inspect: async () => ({ state }) });
+    const ctrl = fakeGateway({ pollTranscriptForFinalText: async () => undefined });
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, t3.registry);
+    const job = sessions.submitTask({ task: "ship it", context: T3_MARKER });
+    ctrl.finishChat(NO_SUMMARY_SENTINEL, 0);
+    await wait();
+
+    // Nothing was blocked when the turn gave up.
+    expect(sessions.getJob(job.jobId)?.terminalReason).toBe("late-recovery-exhausted");
+
+    // The session asks a question afterwards; the next poll is what sees it.
+    state = "needs_input";
+    await sessions.waitForJob(job.jobId, 0, undefined, "wait", 1);
+
+    const settled = sessions.getJob(job.jobId)!;
+    expect(settled.status).toBe("completed_no_summary");
+    expect(settled.terminalReason).toBe("delegate-blocked:needs_input");
+    expect(settled.summary).toContain("t3-fleet/thr-abc123");
+    // Idempotent: polling again neither re-labels nor re-logs.
+    const version = settled.outcomeVersion;
+    await sessions.waitForJob(job.jobId, 0, undefined, "wait", 1);
+    expect(sessions.getJob(job.jobId)?.outcomeVersion).toBe(version);
+  });
+
+  it("does not blame this turn for a block on a delegation an EARLIER turn owned", async () => {
+    const ctrl = fakeGateway({ pollTranscriptForFinalText: async () => undefined });
+    const t3 = fakeT3Runtime({ inspect: async () => ({ state: "needs_input" }) });
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, t3.registry);
+    const turn1 = sessions.submitTask({
+      task: "delegate it",
+      context: agentSessionMarker({ runtime: "t3-fleet", sessionId: "thr-abc123", host: "minip3", state: "needs_input" }),
+    });
+    ctrl.finishChat("handed off", 0);
+    await wait();
+
+    // A later turn on the same session that never claimed the attachment.
+    const turn2 = sessions.submitTask({ task: "something unrelated", sessionKey: turn1.sessionKey });
+    ctrl.finishChat(NO_SUMMARY_SENTINEL, 1);
+    await wait();
+
+    const settled = sessions.getJob(turn2.jobId)!;
+    expect(settled.terminalReason).toBe("late-recovery-exhausted");
+    expect(settled.summary).toBe(NO_SUMMARY_SENTINEL);
+    expect(blockedDelegationNotice(sessions.buildSnapshot(settled))).toBeUndefined();
   });
 
   it("refuses a result it cannot date — an undatable answer is not proof of this turn", async () => {
@@ -1412,6 +1497,224 @@ describe("managed agent sessions on a host-registered runtime", () => {
     expect(seen.map((r) => r.sessionId)).toEqual(["cf-foo"]);
     expect(adapter.isLiveCalls).toHaveLength(0);
     expect(sessions.getFleetAttachment(job.sessionKey)?.status).toBe("idle");
+  });
+
+  /**
+   * The observation token is durable (it lives on the record) while its
+   * counter is in-memory. A process that restarts at zero mints tokens the
+   * compare-and-set is bound to refuse, so every observation — and every
+   * recovery that depends on one landing — silently does nothing.
+   */
+  describe("after a restart, the observation token resumes above what was persisted", () => {
+    function persistedState(sessionKey: string, overrides: Partial<FleetAttachmentRecord> = {}): SessionFleetState {
+      const record: FleetAttachmentRecord = {
+        id: "att-1",
+        runtime: "t3-fleet",
+        provider: "anthropic-claude-code",
+        handle: "thr-abc123",
+        host: "minip3",
+        attachedAt: 1_000,
+        status: "running",
+        observationToken: 42,
+        ...overrides,
+      };
+      return { sessionKey, currentAttachmentId: record.id, attachments: { [record.id]: record } };
+    }
+
+    it("lets the first post-restart observation land instead of refusing it", async () => {
+      const t3 = fakeT3Runtime({ inspect: async () => ({ state: "needs_input", latestResponse: "which branch?" }) });
+      const store = new FakeFleetAttachmentStore([persistedState("sess-restart")]);
+      const sessions = new SessionManager(fakeGateway().gateway, "main", undefined, store, undefined, t3.registry);
+
+      await sessions.runAgentSessionOp("sess-restart", { op: "inspect" });
+
+      const attachment = sessions.getFleetAttachment("sess-restart")!;
+      expect(attachment.status).toBe("needs_input");
+      expect(attachment.latestResponse).toBe("which branch?");
+      // Strictly above the persisted high-water mark, so the CAS still orders
+      // reads correctly across the restart boundary.
+      expect(attachment.observationToken).toBeGreaterThan(42);
+    });
+
+    it("resumes above a SUPERSEDED record's token too — lineage carries the high-water mark", async () => {
+      const current: FleetAttachmentRecord = {
+        id: "att-current",
+        runtime: "t3-fleet",
+        handle: "thr-abc123",
+        attachedAt: 2_000,
+        status: "running",
+        observationToken: 3,
+      };
+      const superseded: FleetAttachmentRecord = {
+        id: "att-old",
+        runtime: "t3-fleet",
+        handle: "thr-older",
+        attachedAt: 1_000,
+        status: "superseded",
+        observationToken: 99,
+      };
+      const store = new FakeFleetAttachmentStore([
+        {
+          sessionKey: "sess-lineage",
+          currentAttachmentId: current.id,
+          attachments: { [current.id]: current, [superseded.id]: superseded },
+        },
+      ]);
+      const t3 = fakeT3Runtime({ inspect: async () => ({ state: "idle" }) });
+      const sessions = new SessionManager(fakeGateway().gateway, "main", undefined, store, undefined, t3.registry);
+
+      await sessions.runAgentSessionOp("sess-lineage", { op: "inspect" });
+      expect(sessions.getFleetAttachment("sess-lineage")?.observationToken).toBeGreaterThan(99);
+    });
+
+    it("recovers a delegated turn's result after a restart, which a stale token would silently block", async () => {
+      const t3 = fakeT3Runtime({
+        inspect: async () => ({
+          state: "completed",
+          finalResponse: "the answer, produced after the connector restarted",
+          lastEventAt: Date.now(),
+        }),
+      });
+      const store = new FakeFleetAttachmentStore([persistedState("sess-restart")]);
+      const ctrl = fakeGateway({ pollTranscriptForFinalText: async () => undefined });
+      const sessions = new SessionManager(ctrl.gateway, "main", undefined, store, undefined, t3.registry);
+
+      // The new turn re-states the attachment (Clawdy passes the marker every
+      // turn), which is what delegates it to THIS job. No `state` in the
+      // marker, so nothing re-stamps the token on the way in.
+      const job = sessions.submitTask({
+        task: "keep going",
+        sessionKey: "sess-restart",
+        context: agentSessionMarker({ runtime: "t3-fleet", sessionId: "thr-abc123", host: "minip3" }),
+      });
+      ctrl.finishChat(NO_SUMMARY_SENTINEL, 0);
+      await wait();
+
+      const recovered = sessions.getJob(job.jobId)!;
+      expect(recovered.status).toBe("completed");
+      expect(recovered.summary).toBe("the answer, produced after the connector restarted");
+      expect(recovered.resultSource).toBe("agent-session");
+    });
+  });
+
+  it("abandons a runtime that never answers instead of wedging the turn out of ever finishing", async () => {
+    vi.useFakeTimers();
+    try {
+      // Never resolves, and never rejects — the shape a hung HTTP call takes.
+      const t3 = fakeT3Runtime({ inspect: () => new Promise<never>(() => {}) });
+      const ctrl = fakeGateway({ pollTranscriptForFinalText: async () => undefined });
+      const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, t3.registry);
+      const job = sessions.submitTask({ task: "ship it", context: T3_MARKER });
+
+      ctrl.finishChat(NO_SUMMARY_SENTINEL, 0);
+      await vi.advanceTimersByTimeAsync(10);
+      // Recovery is out at the runtime and has nothing back yet.
+      expect(sessions.getJob(job.jobId)?.status).toBe("running");
+
+      await vi.advanceTimersByTimeAsync(AGENT_SESSION_CALL_TIMEOUT_MS + 100);
+
+      const settled = sessions.getJob(job.jobId)!;
+      expect(settled.status).toBe("completed_no_summary");
+      expect(settled.terminalReason).toBe("late-recovery-exhausted");
+      // The read failed; the SESSION's last known state is untouched by that.
+      expect(sessions.getFleetAttachment(job.sessionKey)?.status).toBe("running");
+      expect(sessions.getFleetAttachment(job.sessionKey)?.error).toMatchObject({ code: "inspect_timeout" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not present a prior turn's finished result as the current turn's state", async () => {
+    const t3 = fakeT3Runtime({
+      inspect: async () => ({
+        state: "completed",
+        finalResponse: "turn one's answer",
+        latestResponse: "turn one's answer",
+        alive: false,
+        lastEventAt: Date.now(),
+        termination: { reason: "completed" },
+      }),
+    });
+    const ctrl = fakeGateway();
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, t3.registry);
+    const turn1 = sessions.submitTask({ task: "ship it", context: T3_MARKER });
+    await sessions.runAgentSessionOp(turn1.sessionKey, { op: "inspect" });
+
+    const afterTurn1 = sessions.getFleetAttachment(turn1.sessionKey)!;
+    expect(afterTurn1.lastResult?.summary).toBe("turn one's answer");
+    expect(afterTurn1.status).toBe("completed");
+    ctrl.finishChat("turn one done", 0);
+    await wait();
+
+    // A NEW turn claims the same session — the marker names it again, with no
+    // state of its own to assert.
+    const turn2 = sessions.submitTask({
+      task: "now do the next thing",
+      sessionKey: turn1.sessionKey,
+      context: agentSessionMarker({ runtime: "t3-fleet", sessionId: "thr-abc123", host: "minip3" }),
+    });
+
+    const attachment = sessions.getFleetAttachment(turn1.sessionKey)!;
+    expect(attachment.delegatedTurnId).toBe(turn2.jobId);
+    // Everything that described turn one's OUTCOME is gone…
+    expect(attachment.lastResult).toBeUndefined();
+    expect(attachment.termination).toBeUndefined();
+    expect(attachment.latestResponse).toBeUndefined();
+    expect(attachment.alive).toBeUndefined();
+    expect(attachment.status).toBe("starting");
+    // …while the session's identity and lineage are exactly as they were.
+    expect(attachment.id).toBe(afterTurn1.id);
+    expect(attachment.attachedAt).toBe(afterTurn1.attachedAt);
+    expect(attachment.runtime).toBe("t3-fleet");
+    expect(attachment.handle).toBe("thr-abc123");
+    expect(attachment.metadata).toEqual({ t3ProjectId: "proj-1", turnId: "turn-1" });
+    expect(sessions.getFleetLineage(turn1.sessionKey)).toHaveLength(1);
+  });
+
+  it("clears a prior turn's outcome on a continue from a later turn, keeping a stated status", async () => {
+    const t3 = fakeT3Runtime({
+      inspect: async () => ({ state: "idle", finalResponse: "turn one's answer", lastEventAt: Date.now() }),
+    });
+    const ctrl = fakeGateway();
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, t3.registry);
+    const turn1 = sessions.submitTask({ task: "ship it", context: T3_MARKER });
+    await sessions.runAgentSessionOp(turn1.sessionKey, { op: "inspect" });
+    expect(sessions.getFleetAttachment(turn1.sessionKey)?.lastResult).toBeDefined();
+    ctrl.finishChat("turn one done", 0);
+    await wait();
+
+    const turn2 = sessions.submitTask({
+      task: "keep going",
+      sessionKey: turn1.sessionKey,
+      context: fleetBlock({ op: "continue", status: "running" }),
+    });
+
+    const attachment = sessions.getFleetAttachment(turn1.sessionKey)!;
+    expect(attachment.delegatedTurnId).toBe(turn2.jobId);
+    expect(attachment.lastResult).toBeUndefined();
+    // A status the directive states outranks the reset's "starting".
+    expect(attachment.status).toBe("running");
+  });
+
+  it("takes the provider from the registered runtime, not from what the marker claimed", async () => {
+    const t3 = fakeT3Runtime({ inspect: async () => ({ state: "running" }) });
+    const ctrl = fakeGateway();
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, t3.registry);
+    const job = sessions.submitTask({
+      task: "ship it",
+      context: agentSessionMarker({
+        runtime: "t3-fleet",
+        provider: "some-other-model",
+        sessionId: "thr-abc123",
+        host: "minip3",
+      }),
+    });
+
+    const status = await sessions.runAgentSessionOp(job.sessionKey, { op: "inspect" });
+    expect(t3.inspectCalls[0].provider).toBe("anthropic-claude-code");
+    expect(status?.provider).toBe("anthropic-claude-code");
+    // The record heals to what the runtime says, so every later snapshot is right too.
+    expect(sessions.getFleetAttachment(job.sessionKey)?.provider).toBe("anthropic-claude-code");
   });
 
   it("exposes registered runtimes for wiring assertions without exposing any session", () => {

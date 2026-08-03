@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { delegateBlockedTerminalReason } from "./agent-session.ts";
 import { GatewayPool } from "./gateway-pool.ts";
 import {
   runTask,
@@ -415,5 +416,47 @@ describe("list_sessions returns known sessions, not just active ones", () => {
     const byKey = new Map(listSessions(pool).map((s) => [s.sessionKey, s.agent]));
     expect(byKey.get(a.sessionKey)).toBe("clawdy");
     expect(byKey.get(b.sessionKey)).toBe("hank");
+  });
+});
+
+describe("a blocked delegation is listed as needing a human, not as done", () => {
+  /**
+   * A turn that ended with nothing to show because the session it delegated to
+   * is waiting on a human is terminal for the JOB and unfinished for the WORK.
+   * Listing it as "done" is exactly how an actionable block goes unnoticed.
+   */
+  function blockJob(pool: GatewayPool, jobId: string, state: "needs_input" | "needs_permission") {
+    const job = pool.forJob(jobId)?.sessions.getJob(jobId);
+    if (!job) throw new Error(`fixture job ${jobId} not found`);
+    job.status = "completed_no_summary";
+    job.summary = "the delegated session is waiting for input";
+    job.terminalReason = delegateBlockedTerminalReason(state);
+    return job;
+  }
+
+  it("maps the blocked terminalReason to needs-human on every listing surface", () => {
+    for (const state of ["needs_input", "needs_permission"] as const) {
+      const pool = freshPool();
+      const run = runTask(pool, { task: "delegate it" });
+      blockJob(pool, run.jobId, state);
+
+      expect(listTasks(pool).find((t) => t.taskId === run.jobId)?.status, state).toBe("needs-human");
+      const session = getSession(pool, { sessionId: run.sessionKey, mode: "tasks" });
+      expect(session.found && session.tasks?.[0]?.status, state).toBe("needs-human");
+    }
+  });
+
+  it("leaves every ordinary terminal job's row status exactly as it was", () => {
+    const pool = freshPool();
+    const done = runTask(pool, { task: "do it" });
+    completeJob(pool, done.jobId, "the answer");
+    const quiet = runTask(pool, { task: "do it quietly" });
+    const quietJob = pool.forJob(quiet.jobId)!.sessions.getJob(quiet.jobId)!;
+    quietJob.status = "completed_no_summary";
+    quietJob.terminalReason = "late-recovery-exhausted";
+
+    const byId = new Map(listTasks(pool).map((t) => [t.taskId, t.status]));
+    expect(byId.get(done.jobId)).toBe("done");
+    expect(byId.get(quiet.jobId)).toBe("done");
   });
 });

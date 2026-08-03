@@ -240,6 +240,57 @@ describe("check_task model-facing text carries the resume cursor", () => {
     expect(text).toBe("the answer");
     expect(text).not.toContain("knownLogCount");
   });
+
+  /**
+   * A turn whose delegated session is waiting on a human is terminal for the
+   * job and unfinished for the user. Reading back as an ordinary finished task
+   * with nothing to say is how the block goes unnoticed.
+   */
+  it("a terminal response leads with the block when the delegated session is waiting on a human", () => {
+    const snapshot = runningSnapshot({
+      status: "completed_no_summary",
+      summary: "Stream finished with no response collected.",
+      fleetAttachment: {
+        id: "att-1",
+        runtime: "t3-fleet",
+        handle: "thr-abc123",
+        attachedAt: 1,
+        status: "needs_input",
+        latestResponse: "should I force-push?",
+        delegatedTurnId: "job-1",
+      },
+    });
+    const text = checkTaskText(snapshot, true);
+    expect(text.startsWith("This turn produced no result")).toBe(true);
+    expect(text).toContain("t3-fleet/thr-abc123");
+    expect(text).toContain("should I force-push?");
+    // The job's own summary still follows, never replaced.
+    expect(text).toContain("Stream finished with no response collected.");
+  });
+
+  it("says nothing extra for an unblocked attachment or another turn's delegation", () => {
+    const attachment = {
+      id: "att-1",
+      runtime: "t3-fleet",
+      handle: "thr-abc123",
+      attachedAt: 1,
+      status: "needs_input" as const,
+      delegatedTurnId: "job-0",
+    };
+    expect(checkTaskText(runningSnapshot({ status: "completed", summary: "the answer", fleetAttachment: attachment }), true)).toBe(
+      "the answer",
+    );
+    expect(
+      checkTaskText(
+        runningSnapshot({
+          status: "completed",
+          summary: "the answer",
+          fleetAttachment: { ...attachment, status: "running", delegatedTurnId: "job-1" },
+        }),
+        true,
+      ),
+    ).toBe("the answer");
+  });
 });
 
 describe("production entrypoint wiring — FleetAdapter", () => {

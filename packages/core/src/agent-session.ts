@@ -109,6 +109,51 @@ export function isBlockedAgentSessionState(state: string | undefined): boolean {
 }
 
 /**
+ * `terminalReason` written on a parent turn that ended with nothing to show
+ * because the session it delegated to is waiting on a human. The state rides
+ * in the suffix so a caller can branch on WHICH block without a second field.
+ *
+ * A blocked delegation is the one "no summary" outcome that is not an ordinary
+ * quiet finish: it is actionable, and every public surface has to be able to
+ * tell the two apart (see describeBlockedAgentSession, and the needs-human
+ * mapping in tools.ts).
+ */
+export const DELEGATE_BLOCKED_TERMINAL_REASON = "delegate-blocked";
+
+export function delegateBlockedTerminalReason(state: AgentSessionState): string {
+  return `${DELEGATE_BLOCKED_TERMINAL_REASON}:${state}`;
+}
+
+export function isDelegateBlockedTerminalReason(reason: string | undefined): boolean {
+  return reason?.startsWith(`${DELEGATE_BLOCKED_TERMINAL_REASON}:`) === true;
+}
+
+/**
+ * One sentence a caller can act on, for an attachment that is waiting on a
+ * human — shared by every text surface so the MCP and ChatGPT transports
+ * cannot drift on how a blocked delegation reads.
+ *
+ * Structurally typed rather than importing FleetAttachmentRecord: types.ts
+ * already imports from this module, and the record's shape is the only thing
+ * this needs to know.
+ */
+export function describeBlockedAgentSession(
+  attachment:
+    | { runtime: string; handle: string; status: string; latestResponse?: string; remoteUrl?: string }
+    | undefined,
+): string | undefined {
+  if (!attachment || !isBlockedAgentSessionState(attachment.status)) return undefined;
+  const waiting = attachment.status === "needs_permission" ? "waiting for permission" : "waiting for input";
+  const asked = attachment.latestResponse ? ` It last said: ${attachment.latestResponse}` : "";
+  const where = attachment.remoteUrl ? ` Open it at ${attachment.remoteUrl}.` : "";
+  return (
+    `This turn produced no result of its own: the delegated session ` +
+    `${attachment.runtime}/${attachment.handle} is ${waiting}.${asked}${where} ` +
+    `Answer it through that session — the task is not finished.`
+  );
+}
+
+/**
  * A state name from outside — a marker's JSON, a host callback's return value.
  * Anything outside the vocabulary is rejected rather than passed through.
  */
@@ -215,6 +260,36 @@ export type AgentSessionStatus = {
   reconciledAt: number;
 };
 
+/**
+ * The same notice, decided from a TERMINAL job snapshot — the form both
+ * transports' text formatters use, so neither can quietly present a blocked
+ * delegation as an ordinary finished task.
+ *
+ * Derived from the snapshot rather than from the job's terminalReason on
+ * purpose: the block can be discovered by a read that lands AFTER the job went
+ * terminal, and this stays right in that case too. Scoped to the turn that
+ * actually delegated (`delegatedTurnId === jobId`), for the same reason
+ * recovery is: an attachment left current from an earlier turn says nothing
+ * about this one.
+ */
+export function blockedDelegationNotice(snapshot: {
+  jobId: string;
+  status: string;
+  fleetAttachment?: {
+    runtime: string;
+    handle: string;
+    status: string;
+    latestResponse?: string;
+    remoteUrl?: string;
+    delegatedTurnId?: string;
+  };
+}): string | undefined {
+  if (snapshot.status === "running") return undefined;
+  const attachment = snapshot.fleetAttachment;
+  if (!attachment || attachment.delegatedTurnId !== snapshot.jobId) return undefined;
+  return describeBlockedAgentSession(attachment);
+}
+
 // ── The callback seam ────────────────────────────────────────────────────────
 
 /**
@@ -251,8 +326,83 @@ export type AgentSessionRuntimeCallbacks = {
 export type AgentSessionCallOptions = {
   /** Injected clock, so a caller's single `now` is used for the whole operation. */
   now: number;
+  /**
+   * Aborted when the operation is abandoned — either by the caller's own
+   * signal, or by the bounded deadline below. A runtime that honors it can
+   * stop work it will never be asked about again; one that ignores it is
+   * still abandoned, because the deadline does not depend on cooperation.
+   */
   signal?: AbortSignal;
+  /**
+   * Deadline for ONE callback, in ms. Defaults to
+   * AGENT_SESSION_CALL_TIMEOUT_MS; <= 0 or non-finite disables the bound
+   * (tests that drive their own clock, and nothing in production).
+   */
+  timeoutMs?: number;
 };
+
+/**
+ * How long ONE runtime callback may run before the read is abandoned as
+ * `unavailable`.
+ *
+ * A callback is host code reaching a service ClawConnect knows nothing about.
+ * Without a deadline, a hung HTTP request inside a host's `inspect` wedges a
+ * ClawConnect turn forever — terminal recovery awaits that call, so the job
+ * never reaches ANY terminal status and the caller polls a job that will never
+ * move. A timeout is not a failure of the session: it comes back through the
+ * same best-effort `unavailable` path as every other unanswerable read,
+ * carrying the last state anyone reported.
+ */
+export const AGENT_SESSION_CALL_TIMEOUT_MS = 60_000;
+
+/** Thrown only by withAgentSessionTimeout; branch on it with isAgentSessionTimeout. */
+class AgentSessionTimeoutError extends Error {
+  readonly isAgentSessionTimeout = true;
+}
+
+export function isAgentSessionTimeout(err: unknown): boolean {
+  return err instanceof AgentSessionTimeoutError;
+}
+
+/**
+ * Runs one asynchronous operation under a deadline, aborting it (and any
+ * caller-supplied signal chain) when the deadline passes. Used for every call
+ * out of ClawConnect into code it does not own: the registry callbacks below,
+ * and the claude-fleet adapter's transcript read in session.ts.
+ */
+export async function withAgentSessionTimeout<T>(
+  op: (signal: AbortSignal) => Promise<T>,
+  timeoutMs: number = AGENT_SESSION_CALL_TIMEOUT_MS,
+  outer?: AbortSignal,
+): Promise<T> {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return op(outer ?? new AbortController().signal);
+  const controller = new AbortController();
+  const forwardAbort = () => controller.abort(outer?.reason);
+  if (outer) {
+    if (outer.aborted) controller.abort(outer.reason);
+    else outer.addEventListener("abort", forwardAbort, { once: true });
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      op(controller.signal),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          const err = new AgentSessionTimeoutError(`No answer within ${timeoutMs}ms.`);
+          // Abort first: the operation is abandoned whether or not it ever
+          // settles, and a runtime that honors the signal can stop now.
+          controller.abort(err);
+          reject(err);
+        }, timeoutMs);
+        // A pending deadline is never a reason to hold the process open.
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+    outer?.removeEventListener("abort", forwardAbort);
+  }
+}
 
 /** Derived, never declared — see AgentSessionRuntimeCallbacks. */
 export type AgentSessionCapabilities = {
@@ -513,15 +663,31 @@ export async function dispatchAgentSession(
       `Runtime "${ref.runtime}" registered no ${request.op} callback, so this session cannot be asked to ${request.op}.`,
     );
   }
+  // Which agent runs INSIDE the session is a property of the runtime that
+  // answers for it, not of the text that named the session: a marker cannot
+  // claim a provider the registered runtime does not have, and a marker that
+  // omits one cannot erase what the runtime already told us. Applied to the
+  // ref itself, so the callback and the normalized status agree.
+  const boundRef = ref.provider === runtime.provider ? ref : { ...ref, provider: runtime.provider };
   try {
-    const observed = await callRuntime(runtime, ref, request, opts);
-    return normalizeAgentSessionObservation(ref, observed ?? NOT_FOUND, now);
+    const observed = await withAgentSessionTimeout(
+      (signal) => callRuntime(runtime, boundRef, request, { ...opts, signal }),
+      opts.timeoutMs,
+      opts.signal,
+    );
+    return normalizeAgentSessionObservation(boundRef, observed ?? NOT_FOUND, now);
   } catch (err) {
+    const timedOut = isAgentSessionTimeout(err);
     return unavailableAgentSessionStatus(
-      ref,
+      boundRef,
       now,
-      { code: `${request.op}_failed`, message: err instanceof Error ? err.message : String(err) },
-      `Runtime "${ref.runtime}" could not ${request.op} this session.`,
+      {
+        code: timedOut ? `${request.op}_timeout` : `${request.op}_failed`,
+        message: err instanceof Error ? err.message : String(err),
+      },
+      timedOut
+        ? `Runtime "${ref.runtime}" did not answer the ${request.op} in time and was abandoned — the session itself may be fine.`
+        : `Runtime "${ref.runtime}" could not ${request.op} this session.`,
     );
   }
 }

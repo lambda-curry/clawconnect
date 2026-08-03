@@ -1,3 +1,4 @@
+import { isDelegateBlockedTerminalReason } from "./agent-session.ts";
 import { GatewayPool } from "./gateway-pool.ts";
 import { recordTelemetry } from "./telemetry.ts";
 import type {
@@ -63,8 +64,19 @@ function mapTaskStatus(status: string): TaskSummary["status"] {
   return "failed";
 }
 
-function deriveTaskStatus(job: { status: string; error?: string; artifacts: { needsHumanDecision: boolean } }): TaskSummary["status"] {
+function deriveTaskStatus(job: {
+  status: string;
+  error?: string;
+  terminalReason?: string;
+  artifacts: { needsHumanDecision: boolean };
+}): TaskSummary["status"] {
   if (job.status === "running") return "running";
+  // A turn that ended with nothing to show because the session it delegated
+  // to is waiting on a human is NOT done — listing it as such is exactly how
+  // an actionable block goes unnoticed. Checked before the terminal mapping
+  // below, and only for that one terminalReason, so every ordinary terminal
+  // job keeps its existing row status.
+  if (isDelegateBlockedTerminalReason(job.terminalReason)) return "needs-human";
   if (job.status === "completed" || job.status === "completed_no_summary") return "done";
   if (job.artifacts.needsHumanDecision) return "needs-human";
   if (job.error?.includes("session busy")) return "blocked";
