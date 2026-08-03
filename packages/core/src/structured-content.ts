@@ -51,6 +51,14 @@ export function buildGetTaskStructuredContent(result: FoundCheckTaskResult, deta
     nextAction: snapshot.nextAction,
     isTerminal,
     isError,
+    resultSource: snapshot.resultSource,
+    terminalReason: snapshot.terminalReason,
+    // Unconditional, same treatment as `recovery` above — Clawdy needs the
+    // session's current Fleet attachment on every get_task call, not just
+    // under a detail preset. Absent entirely when there is no attachment
+    // (buildSnapshot never sets the key), so this stays undefined for every
+    // session that has never used Fleet.
+    fleetAttachment: snapshot.fleetAttachment,
   };
   if (d === "summary" || has("summary")) payload.summary = snapshot.summary;
   if (has("updates")) {

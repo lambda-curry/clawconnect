@@ -19,6 +19,8 @@ export type PersistedJob = {
   lastEventAt: number;
   pollCount: number;
   prompt: JobPrompt;
+  /** OpenClaw's runId for this job, once chat.send's onRunId has fired. Absent on records written before this field existed — old files still load fine. */
+  parentRunId?: string;
 };
 
 export interface JobStore {

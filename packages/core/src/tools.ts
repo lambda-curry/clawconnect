@@ -306,6 +306,8 @@ export function getSession(
       ? entry.sessions.getJobHistory(opts.sessionId).map((historyJob) => toTaskSummary(historyJob, entry.agent.id))
       : undefined;
 
+  const fleetAttachment = entry.sessions.getFleetAttachment(opts.sessionId);
+
   return {
     found: true,
     sessionKey: job.sessionKey,
@@ -319,5 +321,6 @@ export function getSession(
     ...(mode === "snapshot" || mode === "tasks" ? {} : { events }),
     ...(mode === "tail" ? { nextAfter: after + events.length } : {}),
     ...(tasks ? { tasks } : {}),
+    ...(fleetAttachment ? { fleetAttachment } : {}),
   };
 }

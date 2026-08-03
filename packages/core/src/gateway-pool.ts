@@ -1,4 +1,6 @@
 import { join } from "node:path";
+import type { FleetAdapter } from "./fleet-adapter.ts";
+import { JsonFileFleetAttachmentStore } from "./fleet-attachment-store.ts";
 import { OpenClawGateway } from "./gateway.ts";
 import { SessionManager } from "./session.ts";
 import { JsonFileJobStore } from "./job-store.ts";
@@ -20,10 +22,17 @@ export class GatewayPool {
    * (`<jobStoreDir>/<agentId>.json`) so an in-flight job survives a process
    * restart — see job-store.ts. Omit to keep the pool fully in-memory
    * (e.g. the stdio MCP server, or tests).
+   *
+   * `fleetStoreDir` defaults to `jobStoreDir` (a sibling `<agentId>.fleet.json`
+   * file in the same directory) since both exist for the same "survive a
+   * restart" reason and a deployment that configures one almost always wants
+   * the other too. Pass an explicit path only to put them somewhere else.
    */
   constructor(
     private readonly registry: AgentRegistry,
     private readonly jobStoreDir?: string,
+    private readonly fleetAdapter?: FleetAdapter,
+    private readonly fleetStoreDir: string | undefined = jobStoreDir,
   ) {}
 
   list(): AgentEntry[] {
@@ -40,7 +49,10 @@ export class GatewayPool {
     const agent = resolveAgent(this.registry, agentId);
     const gateway = new OpenClawGateway({ url: agent.url, token: agent.password });
     const store = this.jobStoreDir ? new JsonFileJobStore(join(this.jobStoreDir, `${agent.id}.json`)) : undefined;
-    const sessions = new SessionManager(gateway, agent.openclawAgentId, store);
+    const fleetStore = this.fleetStoreDir
+      ? new JsonFileFleetAttachmentStore(join(this.fleetStoreDir, `${agent.id}.fleet.json`))
+      : undefined;
+    const sessions = new SessionManager(gateway, agent.openclawAgentId, store, fleetStore, this.fleetAdapter);
     const entry: PoolEntry = { agent, gateway, sessions };
     this.entries.set(agent.id, entry);
     return entry;

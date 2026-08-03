@@ -6,10 +6,28 @@ import {
   deriveNextStep,
 } from "./artifacts.ts";
 import { classifyError } from "./errors.ts";
+import type { FleetAdapter, FleetHandoff } from "./fleet-adapter.ts";
+import type { FleetAttachmentStore } from "./fleet-attachment-store.ts";
+import { parseFleetDirective } from "./fleet-handoff.ts";
 import { OpenClawGateway, type RunObservation } from "./gateway.ts";
 import type { JobStore, PersistedJob } from "./job-store.ts";
 import { projectLogWindow } from "./log-projection.ts";
-import { NO_SUMMARY_SENTINEL, type CheckMode, type ContinuationState, type GatewayEvent, type Job, type JobSnapshot, type JobStatus, type LogEntry, type NextAction, type TaskInput } from "./types.ts";
+import {
+  NO_SUMMARY_SENTINEL,
+  type CheckMode,
+  type ContinuationState,
+  type FleetAttachmentRecord,
+  type FleetDirective,
+  type GatewayEvent,
+  type Job,
+  type JobSnapshot,
+  type JobStatus,
+  type LogEntry,
+  type NextAction,
+  type ResultSource,
+  type SessionFleetState,
+  type TaskInput,
+} from "./types.ts";
 
 function readEnvMs(name: string, fallbackMs: number): number {
   const raw = process.env[name];
@@ -54,6 +72,12 @@ export const RECONCILE_QUIET_MS = readEnvMs("CLAWCONNECT_RECONCILE_QUIET_MS", 12
 // Gap between the two transcript reads a single reconciliation round takes.
 // Long enough that a run still writing will visibly move between them.
 const RECONCILE_SAMPLE_INTERVAL_MS = readEnvMs("CLAWCONNECT_RECONCILE_SAMPLE_INTERVAL_MS", 15_000);
+// Cap on FleetAttachmentRecord.lastResult.summary — the durable pointer
+// (outputRef) is what makes the full text re-derivable, so this only needs
+// to be a useful preview, not the whole answer. Job.summary itself is never
+// capped (matches the existing, unbounded convention for every other
+// terminal path in this file).
+export const FLEET_RESULT_SUMMARY_MAX = 2_000;
 
 /**
  * Job.logs is authoritative full history — server-retained, never trimmed or
@@ -209,13 +233,26 @@ export class SessionManager {
       snapshotKey: string;
     }
   >();
+  /**
+   * Session-scoped Fleet attachment state, keyed by sessionKey — deliberately
+   * NOT part of ContinuationState (which is fully reconstructed, not merged,
+   * at 8 call sites in this file) so attach/continue/replace/detach/inspect
+   * transitions have zero blast radius on that existing, separately-tested
+   * machinery. Mutated only by attachOrReplaceFleet/detachFleet/
+   * applyFleetObservation — never by job-completion code paths. See
+   * docs/architecture/2026-08-02-managed-fleet-attachment-plan.md.
+   */
+  private fleetAttachments = new Map<string, SessionFleetState>();
 
   constructor(
     private readonly gateway: OpenClawGateway,
     private readonly agentId: string = "main",
     private readonly store?: JobStore,
+    private readonly fleetStore?: FleetAttachmentStore,
+    private readonly fleetAdapter?: FleetAdapter,
   ) {
     if (store) this.rehydrateFromStore(store);
+    if (fleetStore) this.rehydrateFleetFromStore(fleetStore);
   }
 
   /**
@@ -241,6 +278,7 @@ export class SessionManager {
         artifacts,
         pollCount: pj.pollCount,
         prompt: pj.prompt,
+        parentRunId: pj.parentRunId,
       };
       this.jobs.set(pj.jobId, job);
       this.latestJobBySession.set(pj.sessionKey, pj.jobId);
@@ -249,6 +287,13 @@ export class SessionManager {
       this.jobHistoryBySession.set(pj.sessionKey, history);
       logDebug(`[job ${pj.jobId.slice(0, 8)}] reloaded from job store, reattaching via transcript recovery`);
       this.recoverLateFinalText(job, pj.sessionKey, pj.jobId, artifacts);
+    }
+  }
+
+  /** Restart-recovery counterpart to rehydrateFromStore, for Fleet attachment lineage. See fleet-attachment-store.ts. */
+  private rehydrateFleetFromStore(store: FleetAttachmentStore): void {
+    for (const state of store.load()) {
+      this.fleetAttachments.set(state.sessionKey, state);
     }
   }
 
@@ -270,17 +315,232 @@ export class SessionManager {
         lastEventAt: j.lastEventAt,
         pollCount: j.pollCount,
         prompt: j.prompt,
+        parentRunId: j.parentRunId,
       }));
     this.store.save(active);
   }
 
+  /**
+   * Whole-map overwrite, same shape as persistActiveJobs but for Fleet
+   * attachment state. Unlike persistActiveJobs this saves EVERY session that
+   * has ever had an attachment (including detached/superseded lineage), not
+   * just an active subset — see fleet-attachment-store.ts for why that's
+   * still bounded. Called after every attach/replace/detach/observation
+   * write, never on a hot path like buildSnapshot.
+   */
+  private persistFleetState(): void {
+    if (!this.fleetStore) return;
+    this.fleetStore.save([...this.fleetAttachments.values()]);
+  }
+
+  // ── Managed Fleet attachment ──────────────────────────────────────────
+  //
+  // Every read below touches ONLY `fleetAttachments.get(sessionKey)` — one
+  // session, O(1) — or hands the resulting single record to the injected
+  // FleetAdapter. There is no code path anywhere in this block that iterates
+  // sessions/handles/hosts, which is what "no heuristic scanning" (mission
+  // requirement 4) means structurally, not just by convention.
+
+  /** The session's current attachment, or undefined if it has never attached / is currently detached. */
+  getFleetAttachment(sessionKey: string): FleetAttachmentRecord | undefined {
+    const state = this.fleetAttachments.get(sessionKey);
+    return state?.currentAttachmentId ? state.attachments[state.currentAttachmentId] : undefined;
+  }
+
+  /** Every attachment lineage record this session has ever had, current and superseded/detached alike. */
+  getFleetLineage(sessionKey: string): FleetAttachmentRecord[] {
+    const state = this.fleetAttachments.get(sessionKey);
+    return state ? Object.values(state.attachments) : [];
+  }
+
+  /**
+   * attach and replace share this implementation: both create a fresh
+   * record and make it current. The only real difference is lineage —
+   * "replace" REQUIRES the caller to supply a reason (enforced by
+   * fleet-handoff.ts's parser before this is ever called), while "attach"
+   * only carries one when there happened to be something to supersede. An
+   * "attach" that arrives while an attachment is already current is treated
+   * as an implicit replace rather than a silent no-op or an overwrite — the
+   * prior record is never orphaned without an updated status.
+   */
+  private attachOrReplaceFleet(
+    sessionKey: string,
+    directive: Extract<FleetDirective, { op: "attach" | "replace" }>,
+  ): FleetAttachmentRecord {
+    const state = this.fleetAttachments.get(sessionKey) ?? { sessionKey, attachments: {} };
+    const previous = state.currentAttachmentId ? state.attachments[state.currentAttachmentId] : undefined;
+
+    const record: FleetAttachmentRecord = {
+      id: randomUUID(),
+      runtime: "claude-fleet",
+      handle: directive.handle,
+      providerSessionId: directive.providerSessionId,
+      host: directive.host,
+      worktree: directive.worktree,
+      remoteUrl: directive.remoteUrl,
+      attachedAt: Date.now(),
+      status: directive.status ?? "starting",
+      ...(previous ? { replacesAttachmentId: previous.id } : {}),
+    };
+
+    const nextAttachments = { ...state.attachments, [record.id]: record };
+    if (previous) {
+      nextAttachments[previous.id] = {
+        ...previous,
+        status: "superseded",
+        reason: directive.reason ?? "superseded by a new attachment",
+      };
+    }
+
+    this.fleetAttachments.set(sessionKey, { sessionKey, currentAttachmentId: record.id, attachments: nextAttachments });
+    this.persistFleetState();
+    logDebug(
+      `[fleet] session ${sessionKey.slice(-12)} ${directive.op}ed ${record.handle} (${record.id.slice(0, 8)})` +
+        (previous ? `, superseding ${previous.handle} (${previous.id.slice(0, 8)})` : ""),
+    );
+    return record;
+  }
+
+  private detachFleet(sessionKey: string, reason: string): FleetAttachmentRecord | undefined {
+    const state = this.fleetAttachments.get(sessionKey);
+    const current = state?.currentAttachmentId ? state.attachments[state.currentAttachmentId] : undefined;
+    if (!state || !current) return undefined;
+    const detached: FleetAttachmentRecord = { ...current, status: "detached", reason };
+    this.fleetAttachments.set(sessionKey, {
+      sessionKey,
+      currentAttachmentId: undefined,
+      attachments: { ...state.attachments, [detached.id]: detached },
+    });
+    this.persistFleetState();
+    logDebug(`[fleet] session ${sessionKey.slice(-12)} detached ${detached.handle}: ${reason}`);
+    return detached;
+  }
+
+  private writeFleetAttachment(sessionKey: string, attachmentId: string, patch: Partial<FleetAttachmentRecord>): void {
+    const state = this.fleetAttachments.get(sessionKey);
+    const current = state?.attachments[attachmentId];
+    if (!state || !current) return;
+    const updated: FleetAttachmentRecord = { ...current, ...patch };
+    this.fleetAttachments.set(sessionKey, { ...state, attachments: { ...state.attachments, [attachmentId]: updated } });
+    this.persistFleetState();
+  }
+
+  /**
+   * continue: applies an optional Clawdy-reported status to the CURRENT
+   * attachment. No-op (and no persistence) if there is no current attachment
+   * or nothing changed — "continue" with no directive at all is simply
+   * omitting a directive, which already leaves the existing attachment
+   * exposed on every subsequent snapshot untouched.
+   *
+   * inspect: the same, plus — only when Clawdy did NOT supply an explicit
+   * status — a bounded, single-handle liveness check via the injected
+   * FleetAdapter. Deliberately NOT awaited by the caller (submitTask stays
+   * synchronous, matching its existing public contract): the liveness result
+   * lands a tick later via the fire-and-forget promise below, same pattern
+   * as this file's other background recovery work (recoverLateFinalText).
+   */
+  private applyFleetObservation(sessionKey: string, directive: Extract<FleetDirective, { op: "continue" | "inspect" }>): void {
+    const state = this.fleetAttachments.get(sessionKey);
+    const current = state?.currentAttachmentId ? state.attachments[state.currentAttachmentId] : undefined;
+    if (!state || !current) return;
+
+    if (directive.status && directive.status !== current.status) {
+      this.writeFleetAttachment(sessionKey, current.id, { status: directive.status, lastObservedAt: Date.now() });
+      return;
+    }
+    if (directive.op !== "inspect" || !this.fleetAdapter) return;
+    const adapter = this.fleetAdapter;
+    const attachmentId = current.id;
+    adapter.isLive(current).then(
+      (live) => {
+        this.writeFleetAttachment(sessionKey, attachmentId, {
+          lastObservedAt: Date.now(),
+          ...(live && current.status !== "running" ? { status: "running" } : {}),
+        });
+      },
+      () => this.writeFleetAttachment(sessionKey, attachmentId, { lastObservedAt: Date.now() }),
+    );
+  }
+
+  /**
+   * Parses a Fleet directive out of `context` (if any), applies the
+   * resulting transition synchronously, and returns the context with the
+   * directive block stripped — buildSubmitMessage must receive this
+   * stripped text, not the original, so the agent's prompt never sees raw
+   * directive JSON. A directive applies even when the job it rides in on is
+   * refused for "session busy": attachment transitions are session metadata,
+   * not gated on a chat turn actually dispatching.
+   */
+  private applyFleetDirectiveFromContext(sessionKey: string, context: string | undefined): string | undefined {
+    const parsed = parseFleetDirective(context);
+    if (!parsed) return context;
+    const { directive } = parsed;
+    switch (directive.op) {
+      case "attach":
+      case "replace":
+        this.attachOrReplaceFleet(sessionKey, directive);
+        break;
+      case "detach":
+        this.detachFleet(sessionKey, directive.reason);
+        break;
+      case "continue":
+      case "inspect":
+        this.applyFleetObservation(sessionKey, directive);
+        break;
+    }
+    return parsed.strippedText;
+  }
+
+  /**
+   * Recovery order tier 3 (see docs/architecture/2026-08-02-managed-fleet-
+   * attachment-plan.md §8) — reached ONLY from the two places in this file
+   * where the parent's own live+transcript recovery has already given up.
+   * Consults ONLY the session's known current attachment via the injected
+   * FleetAdapter; returns undefined (never synthesizes a fake completion)
+   * when there is no attachment, no adapter configured, or the adapter has
+   * nothing trustworthy yet — including a still-live or needs_input
+   * attachment, which must stay actionable rather than being reported done.
+   */
+  private async tryFleetRecovery(sessionKey: string): Promise<{ summary: string; attachmentId: string } | undefined> {
+    if (!this.fleetAdapter) return undefined;
+    const current = this.getFleetAttachment(sessionKey);
+    if (!current) return undefined;
+
+    let handoff: FleetHandoff | null;
+    try {
+      handoff = await this.fleetAdapter.readTerminalHandoff(current);
+    } catch (err) {
+      logDebug(`[fleet] readTerminalHandoff threw for ${current.handle}: ${err instanceof Error ? err.message : String(err)}`);
+      return undefined;
+    }
+    if (!handoff || !handoff.text) return undefined;
+
+    const capped =
+      handoff.text.length > FLEET_RESULT_SUMMARY_MAX
+        ? `${handoff.text.slice(0, FLEET_RESULT_SUMMARY_MAX - 1)}…`
+        : handoff.text;
+    const outputRef = current.worktree ? `${current.handle}:${current.worktree}` : current.handle;
+    this.writeFleetAttachment(sessionKey, current.id, {
+      lastResult: { summary: capped, outputRef, observedAt: handoff.observedAt },
+      lastObservedAt: Date.now(),
+    });
+    return { summary: handoff.text, attachmentId: current.id };
+  }
+
   submitTask(input: TaskInput): Job {
+    const { sessionKey, migratedFromLegacy } = resolveSessionKey(input.sessionKey, this.agentId);
+
+    // Parse+apply a Fleet directive (if any) BEFORE building the message, so
+    // buildSubmitMessage never sees the raw directive block — and before the
+    // busy check, since an attachment transition is session metadata, not
+    // gated on whether this particular chat turn gets dispatched.
+    const strippedContext = this.applyFleetDirectiveFromContext(sessionKey, input.context);
+    const effectiveInput: TaskInput = strippedContext === input.context ? input : { ...input, context: strippedContext };
+
     // buildSubmitMessage prepends the `message`-tool veto preamble, the
     // sender identity, and optional context block in the canonical order
     // tested in session.test.ts.
-    const message = buildSubmitMessage(input);
-
-    const { sessionKey, migratedFromLegacy } = resolveSessionKey(input.sessionKey, this.agentId);
+    const message = buildSubmitMessage(effectiveInput);
 
     // Concurrency guard: a second chat.send to an OpenClaw session that
     // already has a run in progress aborts the in-flight run, and the new
@@ -310,7 +570,7 @@ export class SessionManager {
         logs: [],
         artifacts: emptyArtifacts(),
         pollCount: 0,
-        prompt: { task: input.task, context: input.context, senderName: input.senderName },
+        prompt: { task: effectiveInput.task, context: effectiveInput.context, senderName: effectiveInput.senderName },
       };
       this.jobs.set(busyJobId, busyJob);
       logDebug(
@@ -333,7 +593,7 @@ export class SessionManager {
       logs: [],
       artifacts,
       pollCount: 0,
-      prompt: { task: input.task, context: input.context, senderName: input.senderName },
+      prompt: { task: effectiveInput.task, context: effectiveInput.context, senderName: effectiveInput.senderName },
     };
     if (!input.sessionKey) {
       pushLog(job, { ts: now, type: "lifecycle", text: `Started new thread session: ${sessionKey}` });
@@ -377,6 +637,11 @@ export class SessionManager {
           // it so "is THIS run still going?" is answered by upstream rather
           // than inferred from transcript stillness.
           this.upstreamRunIds.set(jobId, runId);
+          // Persisted immediately (not just kept in the in-memory
+          // upstreamRunIds map, which is cleared on clearReconciler) so a
+          // restart doesn't lose which upstream run this job corresponds to.
+          job.parentRunId = runId;
+          this.persistActiveJobs();
           logDebug(`[job ${jobId.slice(0, 8)}] upstream runId ${runId}`);
         },
       )
@@ -401,7 +666,11 @@ export class SessionManager {
             this.recheckSettled.delete(jobId);
             if (!noSummary && wasProvisional) {
               job.lastEventAt = Date.now();
-              this.setOutcome(job, "completed", reply);
+              // Real terminal text always wins over a provisional inference
+              // — including one this file itself produced via Fleet
+              // recovery — so resultSource is reset to "parent" here
+              // unconditionally.
+              this.setOutcome(job, "completed", reply, undefined, { resultSource: "parent", terminalReason: "live-final-late" });
               extractPatternsFromSummary(artifacts, reply);
               // Reconciliation freed this session, so a newer job may already
               // own it — this reply is minutes stale by construction. Upgrade
@@ -436,7 +705,7 @@ export class SessionManager {
             this.recoverLateFinalText(job, sessionKey, jobId, artifacts);
             return;
           }
-          this.setOutcome(job, "completed", reply);
+          this.setOutcome(job, "completed", reply, undefined, { resultSource: "parent", terminalReason: "live-final" });
           extractPatternsFromSummary(artifacts, reply);
           this.sessions.set(sessionKey, {
             sessionKey,
@@ -464,7 +733,7 @@ export class SessionManager {
           }
           job.lastEventAt = Date.now();
           const message = err instanceof Error ? err.message : String(err);
-          this.setOutcome(job, "error", undefined, message);
+          this.setOutcome(job, "error", undefined, message, { resultSource: "parent", terminalReason: "chat-error" });
           this.sessions.set(sessionKey, {
             sessionKey,
             lastJobId: jobId,
@@ -752,7 +1021,10 @@ export class SessionManager {
     this.clearReconciler(job.jobId);
     this.provisionalOutcomes.add(job.jobId);
     job.lastEventAt = Date.now();
-    this.setOutcome(job, status, status === "completed" ? summary : NO_SUMMARY_SENTINEL);
+    this.setOutcome(job, status, status === "completed" ? summary : NO_SUMMARY_SENTINEL, undefined, {
+      resultSource: "parent",
+      terminalReason: status === "completed" ? "reconciled-transcript-match" : "reconciled-no-text",
+    });
     if (status === "completed") extractPatternsFromSummary(job.artifacts, summary);
     pushLog(job, {
       ts: Date.now(),
@@ -826,7 +1098,7 @@ export class SessionManager {
         shouldAbort: () => job.status !== "running",
       })
       .then(
-        (recovered) => {
+        async (recovered) => {
           if (job.status !== "running") return;
           // Same ownership check its two siblings make. Reachable: a job
           // store carrying two entries for one sessionKey makes both jobs
@@ -837,7 +1109,10 @@ export class SessionManager {
           if (this.latestJobBySession.get(sessionKey) !== jobId) return;
           job.lastEventAt = Date.now();
           if (recovered && recovered.length > 0) {
-            this.setOutcome(job, "completed", recovered);
+            this.setOutcome(job, "completed", recovered, undefined, {
+              resultSource: "parent",
+              terminalReason: "late-recovery-transcript",
+            });
             job.recovery = undefined;
             extractPatternsFromSummary(artifacts, recovered);
             this.sessions.set(sessionKey, {
@@ -853,7 +1128,47 @@ export class SessionManager {
             );
             return;
           }
-          this.setOutcome(job, "completed_no_summary", NO_SUMMARY_SENTINEL);
+          // Recovery order tier 3: the parent's own live+transcript avenues
+          // are exhausted (this is the ONLY branch where this is called from
+          // a still-`running` job, and only after the checks above already
+          // confirmed nothing upstream is left to wait for). Consults only
+          // this session's known current Fleet attachment, never a scan —
+          // see tryFleetRecovery.
+          const fleet = await this.tryFleetRecovery(sessionKey);
+          if (fleet && job.status === "running" && this.latestJobBySession.get(sessionKey) === jobId) {
+            // Marked provisional so the existing lazy-recheck path
+            // (maybeRecoverTerminalJob) keeps re-reading the PARENT
+            // transcript on later polls and can still upgrade this to a real
+            // parent result — see the "late parent final replaces
+            // provisional Fleet result" requirement.
+            this.provisionalOutcomes.add(jobId);
+            job.lastEventAt = Date.now();
+            this.setOutcome(job, "completed", fleet.summary, undefined, {
+              resultSource: "fleet-transcript",
+              terminalReason: "fleet-transcript-recovery",
+            });
+            job.recovery = undefined;
+            extractPatternsFromSummary(artifacts, fleet.summary);
+            pushLog(job, {
+              ts: Date.now(),
+              type: "recovery",
+              text: `Recovered the final response from the attached Fleet session (${fleet.attachmentId.slice(0, 8)}) after the parent transcript produced nothing`,
+            });
+            this.sessions.set(sessionKey, {
+              sessionKey,
+              lastJobId: jobId,
+              lastSummary: fleet.summary.slice(0, 500),
+              artifacts,
+              recommendedNextStep: deriveNextStep(artifacts, job.status),
+            });
+            this.persistActiveJobs();
+            logDebug(`[job ${jobId}] recovered via Fleet attachment (${fleet.summary.length} chars)`);
+            return;
+          }
+          this.setOutcome(job, "completed_no_summary", NO_SUMMARY_SENTINEL, undefined, {
+            resultSource: "parent",
+            terminalReason: "late-recovery-exhausted",
+          });
           job.recovery = undefined;
           this.sessions.set(sessionKey, {
             sessionKey,
@@ -874,7 +1189,10 @@ export class SessionManager {
           // entire in-memory jobs map. Mark the job terminal cleanly instead.
           if (job.status !== "running") return;
           job.lastEventAt = Date.now();
-          this.setOutcome(job, "completed_no_summary", NO_SUMMARY_SENTINEL);
+          this.setOutcome(job, "completed_no_summary", NO_SUMMARY_SENTINEL, undefined, {
+            resultSource: "parent",
+            terminalReason: "late-recovery-threw",
+          });
           job.recovery = undefined;
           this.sessions.set(sessionKey, {
             sessionKey,
@@ -900,18 +1218,27 @@ export class SessionManager {
    * Route every status/summary assignment through here. The invariant is
    * "an outcome write is a version bump"; enforcing it by construction is why
    * this exists rather than a comment asking future callers to remember.
+   *
+   * `meta.resultSource`/`meta.terminalReason` follow the same one-writer
+   * discipline even though the structural tripwire test (see
+   * completion-reconciliation.test.ts) only regex-checks status/summary/
+   * error/errorInfo — every terminal write in this file passes them
+   * explicitly rather than leaving them to a prior call's stale value.
    */
   private setOutcome(
     job: Job,
     status: JobStatus,
     summary: string | undefined,
     error?: string,
+    meta?: { resultSource?: ResultSource; terminalReason?: string },
   ): void {
     job.status = status;
     job.summary = summary;
     job.error = error;
     job.errorInfo = error === undefined ? undefined : classifyError(error);
     job.outcomeVersion = (job.outcomeVersion ?? 0) + 1;
+    job.resultSource = meta?.resultSource;
+    job.terminalReason = meta?.terminalReason;
   }
 
   /**
@@ -983,7 +1310,46 @@ export class SessionManager {
       // of ever being re-read again.
       job.recheckInFlight = false;
     }
-    if (!recovered) return;
+    if (!recovered) {
+      // Recovery order tier 3, revisited on every subsequent poll: the
+      // parent transcript still has nothing. Only meaningful when the job is
+      // ALREADY sitting at completed_no_summary — a job that's "completed"
+      // with a provisional Fleet result already has the best answer this
+      // path can produce, and an "error" job's chat() genuinely rejected,
+      // which is a different failure mode entirely. Never runs while the
+      // job is `running` — that path is recoverLateFinalText's, not this
+      // lazy re-check's.
+      if (job.status === "completed_no_summary") {
+        const fleet = await this.tryFleetRecovery(job.sessionKey);
+        if (
+          fleet &&
+          this.latestJobBySession.get(job.sessionKey) === job.jobId &&
+          (job.outcomeVersion ?? 0) === outcomeAtStart
+        ) {
+          this.provisionalOutcomes.add(job.jobId);
+          job.lastEventAt = Date.now();
+          this.setOutcome(job, "completed", fleet.summary, undefined, {
+            resultSource: "fleet-transcript",
+            terminalReason: "fleet-transcript-recovery",
+          });
+          extractPatternsFromSummary(job.artifacts, fleet.summary);
+          pushLog(job, {
+            ts: Date.now(),
+            type: "recovery",
+            text: `Recovered the final response from the attached Fleet session (${fleet.attachmentId.slice(0, 8)}) after a lazy parent-transcript recheck found nothing`,
+          });
+          this.sessions.set(job.sessionKey, {
+            sessionKey: job.sessionKey,
+            lastJobId: job.jobId,
+            lastSummary: fleet.summary.slice(0, 500),
+            artifacts: job.artifacts,
+            recommendedNextStep: deriveNextStep(job.artifacts, "completed"),
+          });
+          logDebug(`[job ${job.jobId}] lazy-recheck: recovered via Fleet attachment (${fleet.summary.length} chars)`);
+        }
+      }
+      return;
+    }
     // The poll above takes seconds, so re-check ownership: a new job may have
     // claimed the session while it ran.
     if (this.latestJobBySession.get(job.sessionKey) !== job.jobId) return;
@@ -1007,7 +1373,10 @@ export class SessionManager {
     const healed = recovered !== job.summary || job.status !== "completed";
     if (healed) this.recheckSettled.add(job.jobId);
     job.lastEventAt = Date.now();
-    this.setOutcome(job, "completed", recovered);
+    // A real parent-transcript read always wins over a provisional Fleet
+    // result, so resultSource is reset to "parent" here unconditionally —
+    // same rule as the live-final-late branch in submitTask.
+    this.setOutcome(job, "completed", recovered, undefined, { resultSource: "parent", terminalReason: "lazy-recheck-transcript" });
     extractPatternsFromSummary(job.artifacts, recovered);
     this.sessions.set(job.sessionKey, {
       sessionKey: job.sessionKey,
@@ -1030,6 +1399,7 @@ export class SessionManager {
    */
   buildSnapshot(job: Job, cursor?: number): JobSnapshot {
     const continuation = this.sessions.get(job.sessionKey);
+    const fleetAttachment = this.getFleetAttachment(job.sessionKey);
     const continuePolling = job.status === "running";
     const window = projectLogWindow(job.logs, cursor);
     return {
@@ -1056,7 +1426,13 @@ export class SessionManager {
       // check_task faster than that just burns round-trips for no new info.
       retryAfterMs: continuePolling ? (job.recovery ? 10_000 : 0) : 0,
       nextAction: buildNextAction(job),
+      resultSource: job.resultSource,
+      terminalReason: job.terminalReason,
       ...(continuation ? { continuationState: continuation } : {}),
+      // Unconditional, like `recovery` above — Clawdy needs to see the
+      // session's current attachment on every turn to decide continue vs.
+      // replace vs. detach, not just under a detail preset.
+      ...(fleetAttachment ? { fleetAttachment } : {}),
     };
   }
 

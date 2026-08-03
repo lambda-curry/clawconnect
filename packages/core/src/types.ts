@@ -49,6 +49,100 @@ export type LogEntry = { ts: number; type: string; text: string; isError?: boole
 export type JobStatus = "running" | "completed" | "completed_no_summary" | "error";
 export type TaskStatus = "queued" | "running" | "blocked" | "needs-human" | "done" | "failed";
 
+/**
+ * Where a job's terminal summary text actually came from. Absent (undefined)
+ * on every pre-existing terminal path — including the ordinary live-final and
+ * transcript-reconciliation paths that predate this field — and reads as the
+ * implicit historical default "parent". The only writer that ever sets it to
+ * "fleet-transcript" is the Fleet-adapter recovery fallback in session.ts,
+ * gated behind the parent's own live+transcript recovery already having given
+ * up (see docs/architecture/2026-08-02-managed-fleet-attachment-plan.md §8).
+ */
+export type ResultSource = "parent" | "fleet-transcript";
+
+// ── Managed Fleet attachment ──────────────────────────────────────────────
+
+/**
+ * The substates a directive may report Clawdy observing directly (Clawdy
+ * supervises the Fleet session and knows things — e.g. "it's asking me
+ * something" — that ClawConnect's own tmux-liveness-only adapter cannot
+ * determine on its own). Deliberately excludes "superseded"/"detached":
+ * those are lineage states only session.ts's own replace/detach transitions
+ * may set, never a directive directly — see FleetDirective.
+ */
+export type FleetLiveStatus = "starting" | "running" | "idle" | "needs_input" | "failed";
+
+/**
+ * One session may have at most one CURRENT Fleet attachment at a time, but
+ * every attachment a session has ever had is kept (see SessionFleetState) —
+ * `id` is ClawConnect's own identifier for this record, distinct from
+ * `handle` (the Fleet session's own name), so replacement lineage can chain
+ * through `replacesAttachmentId` even if a handle were ever reused.
+ */
+export type FleetAttachmentRecord = {
+  id: string;
+  runtime: "claude-fleet";
+  handle: string;
+  providerSessionId?: string;
+  host: string;
+  worktree?: string;
+  remoteUrl?: string;
+  attachedAt: number;
+  lastObservedAt?: number;
+  status: FleetLiveStatus | "superseded" | "detached";
+  /** Set only on a record created by an explicit `replace` transition. */
+  replacesAttachmentId?: string;
+  /** Set only when status is "detached" or "superseded" — why it stopped being current. */
+  reason?: string;
+  /**
+   * Best-effort terminal result observed from the attached Fleet session.
+   * `summary` is capped (see FLEET_RESULT_SUMMARY_MAX in session.ts) —
+   * `outputRef` is the durable pointer (transcript path / session key) so the
+   * full text is always re-derivable rather than duplicated unbounded here.
+   */
+  lastResult?: {
+    summary?: string;
+    outputRef?: string;
+    observedAt: number;
+  };
+};
+
+/**
+ * Session-scoped, not job-scoped: survives across every job submitted on the
+ * same sessionKey. `attachments` never drops a record — replacement and
+ * detachment both leave their prior record in place with an updated status,
+ * so the full lineage is always readable.
+ */
+export type SessionFleetState = {
+  sessionKey: string;
+  /** undefined when nothing is currently attached (never attached, or detached). */
+  currentAttachmentId?: string;
+  attachments: Record<string, FleetAttachmentRecord>;
+};
+
+/**
+ * Structured directive Clawdy embeds in TaskInput.context to drive an
+ * explicit attachment transition — parsed and stripped by fleet-handoff.ts
+ * before the message reaches the agent. See docs/architecture/2026-08-02-
+ * managed-fleet-attachment-plan.md §4; this is deliberately not a new public
+ * MCP tool.
+ */
+export type FleetDirective =
+  | {
+      op: "attach" | "replace";
+      handle: string;
+      providerSessionId?: string;
+      host: string;
+      worktree?: string;
+      remoteUrl?: string;
+      /** Required for "replace"; ignored for "attach". */
+      reason?: string;
+      status?: FleetLiveStatus;
+    }
+  | { op: "continue"; status?: FleetLiveStatus }
+  | { op: "detach"; reason: string }
+  | { op: "inspect"; status?: FleetLiveStatus };
+
 export type JobRecoveryState = {
   reason: "no_live_final_text";
   startedAt: number;
@@ -107,6 +201,17 @@ export type Job = {
   pollCount: number;
   /** The original submitted task/context/senderName. See JobPrompt. */
   prompt: JobPrompt;
+  /**
+   * OpenClaw's handle for this job's run, persisted the moment chat.send's
+   * onRunId fires — unlike the in-memory-only upstreamRunIds map this
+   * survives a restart, so a reloaded job still knows which upstream run it
+   * corresponds to.
+   */
+  parentRunId?: string;
+  /** See ResultSource. Written only by setOutcome. */
+  resultSource?: ResultSource;
+  /** Short diagnostic code for why the job went terminal. Written only by setOutcome. */
+  terminalReason?: string;
 };
 
 /**
@@ -145,6 +250,10 @@ export type JobSnapshot = {
   artifacts: Artifacts;
   recovery?: JobRecoveryState;
   continuationState?: ContinuationState;
+  resultSource?: ResultSource;
+  terminalReason?: string;
+  /** The session's CURRENT Fleet attachment, if any — not the full lineage. See FleetAttachmentRecord. */
+  fleetAttachment?: FleetAttachmentRecord;
   /**
    * OPAQUE cursor. Pass it back verbatim as the next call's `knownLogCount`
    * to resume exactly where this snapshot left off — never a duplicate,
@@ -261,6 +370,8 @@ export type SessionInspectResult =
       nextAfter?: number;
       /** mode="tasks": every job ever submitted under this session, newest first. Plain core surface — not UI-specific. */
       tasks?: TaskSummary[];
+      /** The session's CURRENT Fleet attachment, if any — not the full lineage. */
+      fleetAttachment?: FleetAttachmentRecord;
     };
 
 export type CheckTaskOpts = {
