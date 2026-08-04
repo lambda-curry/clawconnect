@@ -127,6 +127,43 @@ function resolveWaitMs(requested: number | undefined): number {
   return Math.min(Math.max(requested, MIN_WAIT_MS), MAX_WAIT_MS);
 }
 
+/**
+ * How old a piece of evidence is, in words, for a message that must not imply
+ * it was gathered just now. "just now" is reserved for the case where it
+ * genuinely was — anything else states the gap.
+ */
+function describeAge(ageMs: number): string {
+  if (ageMs < 15_000) return "just now";
+  if (ageMs < 90_000) return `${Math.round(ageMs / 1000)}s ago`;
+  return `${Math.round(ageMs / 60_000)}m ago`;
+}
+
+/**
+ * The advice for a turn the parent stopped watching while its run was, as far
+ * as anyone could tell, still executing.
+ *
+ * Both strings come from here because they are two renderings of ONE decision
+ * and they are read together: `errorInfo.suggestedRecovery` on the job, and
+ * `recommendedNextStep` on the session's continuation state. The generic
+ * derivation for an `error` job says "Fix the issue and retry." — which on
+ * this outcome means "send again on a session whose run is still going", i.e.
+ * abort the very run whose answer the caller is waiting for. A caller reading
+ * one surface must not be told the opposite of the other.
+ */
+function upstreamStillActiveGuidance(
+  jobId: string,
+  parentRunId: string | undefined,
+): { suggestedRecovery: string; nextStep: string } {
+  const inspect = parentRunId ? `run ${parentRunId}` : "the run";
+  return {
+    suggestedRecovery:
+      `Do not re-submit on this session while the run is executing — a second send aborts it. ` +
+      `Call check_task again with jobId ${jobId} to pick up the response if it lands, or inspect ` +
+      `${inspect} upstream to see what it is doing.`,
+    nextStep: `Keep polling check_task (jobId ${jobId}) — do not re-submit on this session while ${inspect} is executing.`,
+  };
+}
+
 function buildNextAction(job: { jobId: string; sessionKey: string; status: JobStatus }): NextAction {
   // args keys are check_task's own parameter names (jobId, not the taskId
   // alias) so the object is directly callable — see NextAction in types.ts.
@@ -1783,7 +1820,16 @@ export class SessionManager {
     // union narrows to it at declaration, and a write from inside a closure
     // does not widen it back — every comparison below would then be flagged as
     // impossible while being exactly the comparison that matters.
-    const observed: { upstream: RunObservation["upstream"] } = { upstream: "unknown" };
+    //
+    // `at` is when this observation was MADE, and it only advances on a read
+    // that actually reached upstream. A run of failed reads therefore leaves
+    // the verdict standing (deliberately — see the extension branch) while its
+    // age grows, which is what stops a minutes-old "active" from being
+    // reported as a fresh confirmation.
+    const observed: { upstream: RunObservation["upstream"]; at: number } = {
+      upstream: "unknown",
+      at: window.startedAt,
+    };
     let extensions = 0;
     let recovered: string | undefined;
 
@@ -1812,6 +1858,7 @@ export class SessionManager {
           // this whole path exists to remove.
           if (job.status !== "running") return;
           observed.upstream = sample.upstream;
+          observed.at = sample.checkedAt;
           // Recorded on EVERY read, exactly as reconcileQuietRun records its
           // own rounds. Without it a job spends its whole recovery with
           // liveness frozen at whatever the last quiet round saw — or with
@@ -1819,6 +1866,11 @@ export class SessionManager {
           // every 10 seconds. A consumer that ages liveness out (the widget
           // does, at 5 minutes) then reports a watched, demonstrably live run
           // as one nothing has looked at.
+          //
+          // Only a read that REACHED upstream gets here (the gateway skips a
+          // failed sample), so `checkedAt` measures the evidence, not the
+          // attempt — a stretch of failed reads correctly ages this out
+          // instead of refreshing a verdict nobody re-confirmed.
           job.liveness = { checkedAt: sample.checkedAt, upstream: sample.upstream, producing: sample.changed };
         },
       });
@@ -1835,16 +1887,28 @@ export class SessionManager {
 
       extensions += 1;
       const watchedS = Math.round((Date.now() - window.startedAt) / 1000);
+      const evidenceAgeMs = Date.now() - observed.at;
+      // The verdict still holds the watch open even when it is old — a stale
+      // "active" is still the last thing anyone actually saw, and letting an
+      // unreadable gateway release the busy guard would hand the failure mode
+      // straight back. What must NOT survive the staleness is the CLAIM: an
+      // observation minutes old is reported as one, not as a confirmation of
+      // now.
+      const fresh = evidenceAgeMs <= window.intervalMs * 3;
       pushLog(job, {
         ts: Date.now(),
         type: "recovery",
-        text:
-          `Upstream confirms the run is still executing after ${watchedS}s with a still transcript — ` +
-          `still watching for its final response`,
+        text: fresh
+          ? `Upstream confirms the run is still executing (checked ${describeAge(evidenceAgeMs)}) after ` +
+            `${watchedS}s with a still transcript — still watching for its final response`
+          : `Upstream last reported the run executing ${describeAge(evidenceAgeMs)} and has not been ` +
+            `readable since; after ${watchedS}s with a still transcript — still watching rather than ` +
+            `assuming it ended`,
       });
       logDebug(
-        `[job ${jobId}] transcript idle but upstream${job.parentRunId ? ` run ${job.parentRunId}` : ""} still ` +
-          `executing after ${watchedS}s — extending the watch (extension ${extensions})`,
+        `[job ${jobId}] transcript idle but upstream${job.parentRunId ? ` run ${job.parentRunId}` : ""} last ` +
+          `reported executing ${describeAge(evidenceAgeMs)} (watched ${watchedS}s) — extending the watch ` +
+          `(extension ${extensions})`,
       );
     }
 
@@ -1868,48 +1932,6 @@ export class SessionManager {
       });
       this.persistActiveJobs();
       logDebug(`[job ${jobId}] late-recovery succeeded via transcript (${recovered.length} chars)`);
-      return;
-    }
-
-    // The hard cap ran out while upstream was STILL reporting the run as
-    // executing. Every avenue below reads the silence as "the turn produced
-    // nothing", which is a claim about a FINISHED run — so none of them apply,
-    // and publishing `completed_no_summary` here would state as fact the one
-    // thing the evidence contradicts. End it honestly instead: what was
-    // observed, for how long, and the one retry that helps (the job stays
-    // eligible for the lazy transcript re-check on every later poll, so an
-    // answer that lands afterwards still reaches the caller — see
-    // maybeRecoverTerminalJob).
-    if (observed.upstream === "active") {
-      const watchedMin = Math.max(1, Math.round((Date.now() - window.startedAt) / 60_000));
-      const runLabel = job.parentRunId ? `upstream run ${job.parentRunId}` : "the upstream run";
-      const message =
-        `Stopped watching after ${watchedMin}m: ${runLabel} was still reported as executing, ` +
-        `but wrote no visible response to the transcript in that time.`;
-      this.setOutcome(job, "error", undefined, message, {
-        resultSource: "parent",
-        terminalReason: "late-recovery-upstream-still-active",
-        errorInfo: {
-          category: "timeout",
-          message,
-          suggestedRecovery:
-            `Do not re-submit on this session while the run is executing — a second send aborts it. ` +
-            `Call check_task again with jobId ${jobId} to pick up the response if it lands, or inspect ` +
-            (job.parentRunId ? `run ${job.parentRunId} ` : "the run ") +
-            `upstream to see what it is doing.`,
-        },
-      });
-      job.recovery = undefined;
-      pushLog(job, { ts: Date.now(), type: "recovery", text: message });
-      this.sessions.set(sessionKey, {
-        sessionKey,
-        lastJobId: jobId,
-        lastSummary: message.slice(0, 500),
-        artifacts,
-        recommendedNextStep: deriveNextStep(artifacts, job.status),
-      });
-      this.persistActiveJobs();
-      logDebug(`[job ${jobId}] late-recovery hit the hard cap with upstream still active — error, not a quiet finish`);
       return;
     }
 
@@ -1956,30 +1978,97 @@ export class SessionManager {
     // stays `completed_no_summary` (no new JobStatus, so every existing
     // consumer keeps working) — what changes is that the summary and
     // terminalReason say what is actually blocked. See blockedDelegation.
+    //
+    // Checked BEFORE the still-active branch below, and deliberately: a
+    // blocked delegate is a MORE specific answer to "why has nothing
+    // happened" than "the parent gave up on a run that was still ticking",
+    // and it is the one that carries the action a human can take. The
+    // resulting `completed_no_summary` is not the "quietly finished with
+    // nothing to say" outcome this path otherwise refuses to publish over an
+    // active run — it carries a notice and reads as `needs-human` on every
+    // listing (see deriveTaskStatus / isDelegateBlockedTerminalReason).
     const blocked = this.blockedDelegation(job);
     const blockedNotice = describeBlockedAgentSession(blocked);
-    this.setOutcome(job, "completed_no_summary", blockedNotice ?? NO_SUMMARY_SENTINEL, undefined, {
+    if (blocked && blockedNotice) {
+      this.setOutcome(job, "completed_no_summary", blockedNotice, undefined, {
+        resultSource: "parent",
+        terminalReason: delegateBlockedTerminalReason(blocked.status as AgentSessionState),
+      });
+      job.recovery = undefined;
+      pushLog(job, { ts: Date.now(), type: "recovery", text: blockedNotice });
+      this.sessions.set(sessionKey, {
+        sessionKey,
+        lastJobId: jobId,
+        lastSummary: blockedNotice.slice(0, 500),
+        artifacts,
+        recommendedNextStep: deriveNextStep(artifacts, job.status),
+      });
+      this.persistActiveJobs();
+      logDebug(
+        `[job ${jobId}] late-recovery exhausted — delegate is ${blocked.status}, so the turn is blocked, not finished`,
+      );
+      return;
+    }
+
+    // Nothing was recoverable from anywhere, and the hard cap ran out while
+    // upstream had reported the run executing. Falling through to
+    // `completed_no_summary` here would state as fact the one thing the
+    // evidence contradicts — that the turn finished with nothing to say — so
+    // this ends honestly instead: what was observed and WHEN, and the one
+    // action that helps. The job stays eligible for the lazy transcript
+    // re-check on every later poll, so an answer that lands afterwards still
+    // reaches the caller (see maybeRecoverTerminalJob).
+    if (observed.upstream === "active") {
+      const watchedMin = Math.max(1, Math.round((Date.now() - window.startedAt) / 60_000));
+      const runLabel = job.parentRunId ? `upstream run ${job.parentRunId}` : "the upstream run";
+      // Never present-tense: `observed` is the last read that SUCCEEDED, and
+      // if the later reads failed it can be minutes old. Saying "is still
+      // executing" off a stale read manufactures a confirmation nobody made.
+      const message =
+        `Stopped watching after ${watchedMin}m: ${runLabel} was last reported executing ` +
+        `${describeAge(Date.now() - observed.at)}, and wrote no visible response to the transcript ` +
+        `in that time.`;
+      const guidance = upstreamStillActiveGuidance(jobId, job.parentRunId);
+      this.setOutcome(job, "error", undefined, message, {
+        resultSource: "parent",
+        terminalReason: "late-recovery-upstream-still-active",
+        errorInfo: { category: "timeout", message, suggestedRecovery: guidance.suggestedRecovery },
+      });
+      job.recovery = undefined;
+      pushLog(job, { ts: Date.now(), type: "recovery", text: message });
+      this.sessions.set(sessionKey, {
+        sessionKey,
+        lastJobId: jobId,
+        lastSummary: message.slice(0, 500),
+        artifacts,
+        // NOT deriveNextStep: its `error` answer is "Fix the issue and retry.",
+        // which on this one outcome tells the caller to do the exact thing
+        // errorInfo tells them not to. Two surfaces of the same job disagreeing
+        // about whether to retry is worse than either being silent, so both
+        // come from one place — see upstreamStillActiveGuidance.
+        recommendedNextStep: guidance.nextStep,
+      });
+      this.persistActiveJobs();
+      logDebug(`[job ${jobId}] late-recovery hit the hard cap with upstream still active — error, not a quiet finish`);
+      return;
+    }
+
+    this.setOutcome(job, "completed_no_summary", NO_SUMMARY_SENTINEL, undefined, {
       resultSource: "parent",
-      terminalReason: blocked
-        ? delegateBlockedTerminalReason(blocked.status as AgentSessionState)
-        : "late-recovery-exhausted",
+      terminalReason: "late-recovery-exhausted",
     });
     job.recovery = undefined;
-    if (blockedNotice) {
-      pushLog(job, { ts: Date.now(), type: "recovery", text: blockedNotice });
-    }
     this.sessions.set(sessionKey, {
       sessionKey,
       lastJobId: jobId,
-      lastSummary: (blockedNotice ?? NO_SUMMARY_SENTINEL).slice(0, 500),
+      lastSummary: NO_SUMMARY_SENTINEL.slice(0, 500),
       artifacts,
       recommendedNextStep: deriveNextStep(artifacts, job.status),
     });
     this.persistActiveJobs();
     logDebug(
       `[job ${jobId}] late-recovery exhausted (idle-timeout=${window.idleTimeoutMs / 1000}s, ` +
-        `hard-cap=${window.hardCapMs / 1000}s, extensions=${extensions}) — completed_no_summary` +
-        `${blocked ? ` (delegate ${blocked.status})` : ""}`,
+        `hard-cap=${window.hardCapMs / 1000}s, extensions=${extensions}) — completed_no_summary`,
     );
   }
 

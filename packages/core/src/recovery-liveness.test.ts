@@ -2,6 +2,8 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { isDelegateBlockedTerminalReason } from "./agent-session.ts";
+import type { FleetAdapter, FleetHandoff } from "./fleet-adapter.ts";
 import type { JobStore, PersistedJob } from "./job-store.ts";
 import type { GatewayEvent, Job, JobSnapshot } from "./types.ts";
 
@@ -108,6 +110,7 @@ function harness(initial: Sample) {
     return sample;
   };
 
+
   return {
     gateway,
     reads,
@@ -142,11 +145,25 @@ function expectCoherent(snapshot: JobSnapshot, now: number): void {
     expect(snapshot.recovery).toBeUndefined();
     expect(snapshot.retryAfterMs).toBe(0);
     // The contradiction this file exists to prevent: a turn published as
-    // having quietly finished, over a still-fresh check that says the run
-    // is executing.
+    // having quietly finished with nothing to say, over a still-fresh check
+    // that says the run is executing.
+    //
+    // A delegate-blocked turn is exempt and deliberately so: it is also
+    // `completed_no_summary`, but it is the opposite of "nothing to say" — it
+    // carries the notice and reads as `needs-human` everywhere (see
+    // deriveTaskStatus). Blurring the two is what this exemption is written
+    // down to prevent.
     const livenessIsFresh = snapshot.liveness !== undefined && now - snapshot.liveness.checkedAt <= IDLE_TIMEOUT_MS;
-    if (livenessIsFresh && snapshot.liveness?.upstream === "active") {
+    const blockedDelegate = isDelegateBlockedTerminalReason(snapshot.terminalReason);
+    if (livenessIsFresh && snapshot.liveness?.upstream === "active" && !blockedDelegate) {
       expect(snapshot.status).not.toBe("completed_no_summary");
+    }
+    // Whatever the outcome, the two surfaces that tell a caller what to do
+    // next may not disagree about the one thing that matters most here.
+    const guidance = snapshot.continuationState?.recommendedNextStep ?? "";
+    if (/do not re-submit/i.test(snapshot.errorInfo?.suggestedRecovery ?? "")) {
+      expect(guidance).not.toMatch(/\bretry\b/i);
+      expect(guidance).toMatch(/do not re-submit/i);
     }
   } else if (snapshot.recovery) {
     expect(snapshot.retryAfterMs).toBeGreaterThan(0);
@@ -260,8 +277,9 @@ describe("late recovery — a still transcript is not a finished run", () => {
     expect(live.status).not.toBe("completed_no_summary");
     expect(live.status).toBe("error");
     expect(live.terminalReason).toBe("late-recovery-upstream-still-active");
-    // A real failure says what was actually observed...
-    expect(live.error).toContain("still reported as executing");
+    // A real failure says what was actually observed, and WHEN — never a
+    // present-tense claim off a read that may be minutes old.
+    expect(live.error).toMatch(/was last reported executing/);
     expect(live.error).toContain(UPSTREAM_RUN_ID);
     // ...and what to do about it, which is NOT "resubmit and collide".
     expect(live.errorInfo?.suggestedRecovery).toContain("check_task");
@@ -490,5 +508,170 @@ describe("late recovery — reattaching after a restart", () => {
     expect(ctrl.reads.length).toBeGreaterThan(0);
     expect(ctrl.reads.every((r) => r.runId === UPSTREAM_RUN_ID)).toBe(true);
     expect(sessions.buildSnapshot(sessions.getJob(persisted.jobId) as Job).parentRunId).toBe(UPSTREAM_RUN_ID);
+  });
+});
+
+describe("late recovery — the ceiling never skips the recovery tiers below it", () => {
+  /** Exactly one already-known attachment is ever inspected — see FleetAdapter. */
+  function fakeFleetAdapter(handoff: FleetHandoff | null): FleetAdapter & { handoffCalls: number } {
+    const adapter = {
+      handoffCalls: 0,
+      async isLive() {
+        return false;
+      },
+      async readTerminalHandoff() {
+        adapter.handoffCalls += 1;
+        return handoff;
+      },
+    };
+    return adapter;
+  }
+
+  const attachContext = (extra: Record<string, unknown> = {}) =>
+    "[[clawconnect:agent-session]]" +
+    JSON.stringify({
+      op: "attach",
+      runtime: "claude-fleet",
+      handle: "fleet-worktree-20260804",
+      host: "build-host",
+      ...extra,
+    }) +
+    "[[/clawconnect:agent-session]]";
+
+  it("publishes the delegate's answer rather than failing, when the ceiling arrives and the delegate has one", { timeout: 30_000 }, async () => {
+    vi.useFakeTimers();
+    // The parent transcript never moves and upstream never stops claiming the
+    // run — but the work was delegated, and the delegate finished. Reaching
+    // the ceiling must not skip past an answer that is already sitting there.
+    const ctrl = harness(frozenAndActive);
+    const adapter = fakeFleetAdapter({ text: "the delegate's finished report", resultAt: Date.now() + 60_000 });
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
+    const job = sessions.submitTask({ task: "delegate the worktree build", context: attachContext() });
+    ctrl.closeStream();
+
+    await vi.advanceTimersByTimeAsync(HARD_CAP_MS + PAST_IDLE_MS);
+
+    const live = sessions.getJob(job.jobId)!;
+    expect(adapter.handoffCalls).toBeGreaterThan(0);
+    expect(live.status).toBe("completed");
+    expect(live.summary).toBe("the delegate's finished report");
+    expect(live.resultSource).toBe("fleet-transcript");
+    expect(live.terminalReason).toBe("fleet-transcript-recovery");
+    expect(live.terminalReason).not.toBe("late-recovery-upstream-still-active");
+    expect(live.error).toBeUndefined();
+    expectCoherent(sessions.buildSnapshot(live), Date.now());
+  });
+
+  it("keeps a blocked delegate's actionable state rather than reporting a parent failure over it", { timeout: 30_000 }, async () => {
+    vi.useFakeTimers();
+    // The delegate is waiting on a human. That is the real answer to "why has
+    // nothing happened", and it is more actionable than "the parent stopped
+    // watching" — so it must survive the ceiling, not be overwritten by it.
+    const ctrl = harness(frozenAndActive);
+    const adapter = fakeFleetAdapter(null);
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
+    const job = sessions.submitTask({
+      task: "delegate the worktree build",
+      context: attachContext({ status: "needs_input" }),
+    });
+    ctrl.closeStream();
+
+    await vi.advanceTimersByTimeAsync(HARD_CAP_MS + PAST_IDLE_MS);
+
+    const live = sessions.getJob(job.jobId)!;
+    expect(live.status).toBe("completed_no_summary");
+    expect(isDelegateBlockedTerminalReason(live.terminalReason)).toBe(true);
+    expect(live.terminalReason).not.toBe("late-recovery-upstream-still-active");
+    // The notice, not the generic sentinel — and on the log too, so a caller
+    // reading the timeline sees why.
+    expect(live.summary).not.toBe(NO_SUMMARY_SENTINEL);
+    expect(live.summary).toMatch(/delegated session/i);
+    expect(live.logs.some((l) => l.type === "recovery" && /delegated session/i.test(l.text))).toBe(true);
+    // A blocked delegate is never asked for a result — that is what keeps a
+    // block from being papered over with leftover output.
+    expect(adapter.handoffCalls).toBe(0);
+    expectCoherent(sessions.buildSnapshot(live), Date.now());
+  });
+
+  it("only reaches the still-active error when neither tier had anything to say", { timeout: 30_000 }, async () => {
+    vi.useFakeTimers();
+    const ctrl = harness(frozenAndActive);
+    const adapter = fakeFleetAdapter(null);
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
+    const job = sessions.submitTask({ task: "delegate the worktree build", context: attachContext() });
+    ctrl.closeStream();
+
+    await vi.advanceTimersByTimeAsync(HARD_CAP_MS + PAST_IDLE_MS);
+
+    const live = sessions.getJob(job.jobId)!;
+    expect(adapter.handoffCalls).toBeGreaterThan(0);
+    expect(live.status).toBe("error");
+    expect(live.terminalReason).toBe("late-recovery-upstream-still-active");
+  });
+});
+
+describe("late recovery — what a caller is told to do next", () => {
+  it("never tells the caller to retry on a surface while another tells them not to", { timeout: 30_000 }, async () => {
+    vi.useFakeTimers();
+    const ctrl = harness(frozenAndActive);
+    const sessions = new SessionManager(ctrl.gateway);
+    const job = sessions.submitTask({ task: "recover the fleet worktree" });
+    ctrl.closeStream();
+
+    await vi.advanceTimersByTimeAsync(HARD_CAP_MS + PAST_IDLE_MS);
+
+    const snapshot = sessions.buildSnapshot(sessions.getJob(job.jobId)!);
+    const nextStep = snapshot.continuationState?.recommendedNextStep ?? "";
+    // The generic derivation for an `error` job — the one this outcome must
+    // NOT inherit, because "retry" here means "abort the run you are waiting
+    // for".
+    expect(nextStep).not.toBe("Fix the issue and retry.");
+    expect(nextStep).not.toMatch(/\bretry\b/i);
+    // ...and it has to actually say something useful, not just stay silent.
+    expect(nextStep).toMatch(/check_task/);
+    expect(nextStep).toMatch(/do not re-submit/i);
+    expect(nextStep).toContain(job.jobId);
+    // Both surfaces, one decision.
+    expect(snapshot.errorInfo?.suggestedRecovery).toMatch(/do not re-submit/i);
+    expect(snapshot.errorInfo?.suggestedRecovery).toContain(job.jobId);
+    expectCoherent(snapshot, Date.now());
+  });
+});
+
+describe("late recovery — stale evidence is never presented as a fresh confirmation", () => {
+  it("dates its claim, and stops refreshing liveness when upstream goes unreadable", { timeout: 30_000 }, async () => {
+    vi.useFakeTimers();
+    const ctrl = harness(frozenAndActive);
+    const sessions = new SessionManager(ctrl.gateway);
+    const job = sessions.submitTask({ task: "recover the fleet worktree" });
+    ctrl.closeStream();
+
+    // One window of real confirmations...
+    await vi.advanceTimersByTimeAsync(PAST_IDLE_MS);
+    const live = sessions.getJob(job.jobId)!;
+    const confirmedAt = live.liveness!.checkedAt;
+    expect(live.liveness?.upstream).toBe("active");
+    expect(live.logs.some((l) => /Upstream confirms the run is still executing/.test(l.text))).toBe(true);
+
+    // ...then the gateway stops answering entirely.
+    ctrl.setSample(null);
+    await vi.advanceTimersByTimeAsync(PAST_IDLE_MS);
+
+    // The watch holds — releasing the busy guard because we cannot SEE the
+    // run is how the original failure gets handed straight back.
+    expect(sessions.getJob(job.jobId)?.status).toBe("running");
+    // But nothing is re-confirmed: the evidence ages instead of refreshing.
+    expect(sessions.getJob(job.jobId)?.liveness?.checkedAt).toBe(confirmedAt);
+    // And the claim is dated rather than asserted in the present tense.
+    const stale = live.logs.filter((l) => /has not been readable since/.test(l.text));
+    expect(stale.length).toBeGreaterThan(0);
+    expect(stale.at(-1)!.text).toMatch(/last reported the run executing \d+[sm] ago/);
+
+    // The terminal message says when, too — not "is still executing".
+    await vi.advanceTimersByTimeAsync(HARD_CAP_MS);
+    const settled = sessions.getJob(job.jobId)!;
+    expect(settled.status).toBe("error");
+    expect(settled.error).toMatch(/was last reported executing \d+m ago/);
+    expect(settled.error).not.toMatch(/is still (reported as )?executing/);
   });
 });

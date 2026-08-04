@@ -263,8 +263,8 @@ export type AgentSessionDirective =
   | { op: "inspect"; status?: AttachmentLiveStatus };
 
 /**
- * What the quiet watchdog last learned from upstream about whether this run is
- * still executing — the difference between "working quietly" and "stalled".
+ * What upstream last told us about whether this run is still executing — the
+ * difference between "working quietly" and "stalled".
  *
  * A caller cannot derive this from `lastEventAt` alone. A coding agent inside
  * a long shell command or a compaction pass legitimately emits nothing for
@@ -272,20 +272,28 @@ export type AgentSessionDirective =
  * the evidence that separates them, and it is deliberately NOT a self-report:
  * a heartbeat emitted by the same process that is wedged proves nothing, so
  * `upstream` comes from openclaw's own run registry (see classifyUpstreamRun)
- * and `producing` from the transcript advancing between two samples.
+ * and `producing` from the transcript advancing between reads.
  *
- * Only ever written by a reconcile round, which runs only after
- * RECONCILE_QUIET_MS of live silence. So absence means "not quiet long enough
- * to have been checked yet", never "checked and found dead" — a consumer must
- * not read undefined as bad news. For the same reason `upstream: "unknown"` is
- * the absence of positive evidence, never evidence of the opposite.
+ * Written by the two places that read upstream on a job's behalf: a quiet
+ * reconcile round (only after RECONCILE_QUIET_MS of live silence), and the
+ * late-recovery transcript watch (every read, ~10s, for as long as it runs).
+ * Both write only from a read that actually REACHED upstream, so `checkedAt`
+ * dates the evidence rather than the attempt — a stretch of failed reads ages
+ * this out instead of refreshing it.
+ *
+ * Absence means "nothing has had cause to look yet", never "checked and found
+ * dead" — a consumer must not read undefined as bad news. For the same reason
+ * `upstream: "unknown"` is the absence of positive evidence, never evidence of
+ * the opposite. And `checkedAt` matters: this is a statement about the moment
+ * it was made, so a consumer that acts on it should age it out (the widget
+ * does, at 5 minutes).
  */
 export type JobLiveness = {
-  /** When the check ran. */
+  /** When the check ran — i.e. how old this evidence is. Only ever a read that reached upstream. */
   checkedAt: number;
-  /** Positive evidence execution is ongoing. `unknown` is not the converse. */
+  /** Positive evidence execution is ongoing, as of `checkedAt`. `unknown` is not the converse. */
   upstream: "active" | "unknown";
-  /** The transcript advanced between this round's two samples. */
+  /** The transcript advanced since the previous read. */
   producing: boolean;
 };
 
@@ -372,7 +380,7 @@ export type Job = {
   logs: LogEntry[];
   artifacts: Artifacts;
   recovery?: JobRecoveryState;
-  /** Last upstream liveness check. Unset until the run has been quiet long enough to warrant one. */
+  /** Last upstream liveness check. Unset until something has had cause to look — see JobLiveness. */
   liveness?: JobLiveness;
   /** Timestamp of the most recent lazy-transcript-recheck for a terminal job
    *  (completed_no_summary / error). Used to rate-limit re-reads so a poll
@@ -552,7 +560,8 @@ export type TaskSummary = {
   /**
    * Evidence about a quiet run, carried on the ROW so a listing can label it
    * honestly without a per-row get_task — the fan-out this type exists to
-   * avoid. Unset until the run has been quiet long enough to be checked.
+   * avoid. Unset until something has had cause to look; read `checkedAt`
+   * before trusting it, since it dates the evidence. See JobLiveness.
    */
   liveness?: JobLiveness;
   /** Bounded preview (see TASK_SUMMARY_PREVIEW_MAX). Use get_task for the full text. */
