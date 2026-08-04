@@ -59,6 +59,23 @@ export function buildGetTaskStructuredContent(result: FoundCheckTaskResult, deta
     // (buildSnapshot never sets the key), so this stays undefined for every
     // session that has never had an attachment.
     agentSession: snapshot.agentSession,
+    // Also unconditional, and for a sharper reason than convenience: a
+    // TaskSummary ROW already carries `liveness` (see tools.ts) precisely so a
+    // listing can say "working quietly" without a per-row get_task. Omitting it
+    // from the drill-down made the two surfaces contradict each other — a
+    // caller who saw the row's evidence and called get_task to confirm it got
+    // NOTHING back, which JobLiveness explicitly says to read as "nothing has
+    // had cause to look yet" rather than as bad news. The detail read must be
+    // able to confirm what the listing already claimed.
+    //
+    // `parentRunId` rides the same rule: it exists to correlate this job with
+    // the run openclaw is actually executing, so a diagnostic that names no run
+    // cannot be checked against anything. Both are small scalars, so no preset
+    // gate — the presets exist to bound payload SIZE (logs, artifacts, prompt),
+    // and gating an identifier behind one just hides it from the caller who
+    // needs it most.
+    liveness: snapshot.liveness,
+    parentRunId: snapshot.parentRunId,
   };
   if (d === "summary" || has("summary")) payload.summary = snapshot.summary;
   if (has("updates")) {

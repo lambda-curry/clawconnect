@@ -110,6 +110,64 @@ describe("buildGetTaskStructuredContent", () => {
     expect(diag.diagnostics).toBeDefined();
   });
 
+  const ALL_DETAILS = ["core", "summary", "updates", "artifacts", "diagnostics", "full", "fullWithDiagnostics"] as const;
+
+  /**
+   * A TaskSummary ROW carries `liveness` (see toTaskSummary) so a listing can
+   * label a quiet run honestly without a per-row get_task. The drill-down has
+   * to be able to CONFIRM what the row claimed: JobLiveness says absence means
+   * "nothing has had cause to look yet", so a get_task that dropped the field
+   * told the caller the opposite of the row they were drilling into.
+   */
+  it("lets the detail read confirm the freshness evidence a listing row already claimed", () => {
+    const liveness = { checkedAt: 1900, upstream: "active" as const, producing: false };
+    const result = fixtureFoundResult({ liveness, parentRunId: "run-abc123" });
+
+    for (const detail of ALL_DETAILS) {
+      const payload = buildGetTaskStructuredContent(result, detail);
+      expect(payload.liveness, `liveness missing at detail=${detail}`).toEqual(liveness);
+      expect(payload.parentRunId, `parentRunId missing at detail=${detail}`).toBe("run-abc123");
+    }
+  });
+
+  it("adds no key for a job that has neither — absence stays absence on the wire", () => {
+    const result = fixtureFoundResult({});
+    for (const detail of ALL_DETAILS) {
+      // Round-tripped, because that is what a client actually receives: an
+      // explicit `undefined` value is dropped by JSON.stringify, so this proves
+      // the field is genuinely absent rather than present-and-empty.
+      const wire = JSON.parse(JSON.stringify(buildGetTaskStructuredContent(result, detail)));
+      expect(wire).not.toHaveProperty("liveness");
+      expect(wire).not.toHaveProperty("parentRunId");
+    }
+  });
+
+  it("keeps the diagnosable failure diagnosable: the run id survives next to the error that names it", () => {
+    // The late-recovery hard-cap outcome — an `error` whose whole point is that
+    // a human can go look at the upstream run it names. A payload that carries
+    // the complaint but not the id cannot be checked against anything.
+    const result = fixtureFoundResult({
+      status: "error",
+      error: "Stopped watching after 90m: upstream run run-abc123 was last reported executing 4m ago",
+      errorInfo: { category: "timeout", message: "…", suggestedRecovery: "Do not re-submit on this session…" },
+      terminalReason: "late-recovery-upstream-still-active",
+      parentRunId: "run-abc123",
+      liveness: { checkedAt: 1900, upstream: "active", producing: false },
+      nextAction: null,
+    });
+
+    const diag = buildGetTaskStructuredContent(result, "fullWithDiagnostics");
+    expect(diag.parentRunId).toBe("run-abc123");
+    // The error text itself is preset-gated under `diagnostics` (it is
+    // unbounded); the run id is not, so the id is reachable even from a
+    // caller who never asks for diagnostics — which is the point.
+    const diagnostics = diag.diagnostics as { error?: string };
+    expect(diagnostics.error).toContain(String(diag.parentRunId));
+    // And the evidence behind the complaint travels with it, so a caller can
+    // see the claim is dated rather than a present-tense confirmation.
+    expect(diag.liveness).toEqual({ checkedAt: 1900, upstream: "active", producing: false });
+  });
+
   it("never includes the prompt — that's a distinct read path (getTaskPrompt), not a detail preset value covered by this builder", () => {
     const result = fixtureFoundResult({});
     for (const detail of ["core", "summary", "updates", "artifacts", "diagnostics", "full", "fullWithDiagnostics"] as const) {
