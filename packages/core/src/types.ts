@@ -154,11 +154,53 @@ export type FleetDirective =
   | { op: "inspect"; status?: FleetLiveStatus };
 
 export type JobRecoveryState = {
-  reason: "no_live_final_text";
+  /**
+   * "no_live_final_text" — chat() settled without visible final text.
+   * "parent_observation_timeout" — chat()'s own wait window elapsed while the
+   * run was, as far as anyone knows, still executing upstream. Both reasons
+   * drive the same durable transcript recovery; they differ only in what the
+   * caller is told about why the parent stopped watching.
+   */
+  reason: "no_live_final_text" | "parent_observation_timeout";
   startedAt: number;
   idleTimeoutMs: number;
   hardCapMs: number;
 };
+
+/**
+ * chat()'s wait window elapsed before any terminal event arrived. Distinct
+ * from every other chat() rejection because it says nothing about the run:
+ * error/aborted/RPC/connection failures are upstream verdicts, this one is
+ * only the parent giving up on watching. session.ts routes it into transcript
+ * recovery instead of a terminal error.
+ *
+ * Lives here for the same reason NO_SUMMARY_SENTINEL does: gateway.ts throws
+ * it and session.ts tests for it, and gateway.ts is mocked wholesale by
+ * several test files, so a definition either side could drift from would
+ * silently break the comparison.
+ */
+export class ParentObservationTimeoutError extends Error {
+  readonly timeoutMs: number;
+
+  constructor(timeoutMs: number) {
+    super("OpenClaw task timed out");
+    this.name = "ParentObservationTimeoutError";
+    this.timeoutMs = timeoutMs;
+  }
+}
+
+/**
+ * `instanceof` alone would miss an error crossing a module-instance boundary
+ * (two copies of this module in one process, structured-cloned rejections),
+ * and the class carries a stable `name` precisely so the check can fall back
+ * to it. Deliberately does NOT sniff the message: "OpenClaw handshake
+ * timeout" and "RPC timeout: chat.send" are genuine failures that must stay
+ * terminal.
+ */
+export function isParentObservationTimeout(err: unknown): boolean {
+  if (err instanceof ParentObservationTimeoutError) return true;
+  return err instanceof Error && err.name === "ParentObservationTimeoutError";
+}
 
 /**
  * What `chat()` resolves with when a run ended without producing visible text,

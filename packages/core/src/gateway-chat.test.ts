@@ -243,6 +243,43 @@ describe("OpenClawGateway.chat — run correlation across the send boundary", ()
       /did not return a runId/,
     );
   });
+
+  it("rejects the elapsed wait window with the typed parent-observation error, not a generic one", async () => {
+    // The type is the whole signal: session.ts routes THIS rejection into
+    // transcript recovery (the run is probably still going) and every other
+    // one into a terminal error. A plain Error here would silently restore
+    // the old "timeout means the task failed" behaviour.
+    const gateway = await harness((frame, socket) => {
+      // Acknowledged, correlated — and then nothing. The run is alive
+      // upstream; only our willingness to keep watching runs out.
+      if (frame.method === "chat.send") socket.send(sendAck(frame.id, "run-timeout"));
+    });
+
+    await expect(gateway.chat("agent:main:main:thread:test", "hi", 150)).rejects.toMatchObject({
+      name: "ParentObservationTimeoutError",
+      timeoutMs: 150,
+    });
+  });
+
+  it("rejects an upstream run error with a plain error — that IS a verdict on the run", async () => {
+    const gateway = await harness((frame, socket) => {
+      if (frame.method !== "chat.send") return;
+      socket.send(sendAck(frame.id, "run-failed"));
+      socket.send(
+        JSON.stringify({
+          type: "event",
+          event: "chat",
+          payload: { runId: "run-failed", sessionKey: "agent:main:main:thread:test", state: "error", errorMessage: "provider returned 500" },
+        }),
+      );
+    });
+
+    const rejection = await gateway
+      .chat("agent:main:main:thread:test", "hi", 10_000)
+      .then(() => undefined, (err: Error) => err);
+    expect(rejection?.message).toBe("provider returned 500");
+    expect(rejection?.name).not.toBe("ParentObservationTimeoutError");
+  });
 });
 
 describe("OpenClawGateway reconnect — a failed attempt must re-arm", () => {

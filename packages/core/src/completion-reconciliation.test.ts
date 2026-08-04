@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { RECONCILE_QUIET_MS, SessionManager } from "./session.ts";
 import type { OpenClawGateway, RunObservation } from "./gateway.ts";
-import { NO_SUMMARY_SENTINEL, type GatewayEvent } from "./types.ts";
+import { NO_SUMMARY_SENTINEL, ParentObservationTimeoutError, type GatewayEvent } from "./types.ts";
 
 /**
  * Bounded completion reconciliation: what happens to a job whose live chat
@@ -215,8 +215,10 @@ describe("completion reconciliation — a terminal event that never arrived", ()
     expect(sessions.getJob(job.jobId)?.summary).toBeUndefined();
   });
 
-  it("an unreadable upstream never forces a terminal status — chat()'s own timeout remains the bound", async () => {
+  it("an unreadable upstream never forces a terminal status — the bound is the transcript recovery chat()'s timeout hands off to", async () => {
     vi.useFakeTimers();
+    // The default fake transcript poll yields nothing, so recovery exhausts
+    // immediately once it takes over.
     const ctrl = fakeGateway({ observations: [unreadable()] });
     const sessions = new SessionManager(ctrl.gateway);
     const job = sessions.submitTask({ task: "tool-heavy job" });
@@ -227,11 +229,16 @@ describe("completion reconciliation — a terminal event that never arrived", ()
       expect(sessions.getJob(job.jobId)?.status).toBe("running");
     }
 
-    // Boundedness is not lost, it is just owned by the layer that can
-    // actually tell the difference: chat() times out and ends the job.
-    ctrl.failChat(new Error("OpenClaw task timed out"));
+    // Boundedness is not lost, it just isn't chat()'s to declare: the wait
+    // window elapsing says the parent stopped watching, not that the run
+    // failed, so the job goes to transcript recovery and ends there — with a
+    // non-error terminal status when the transcript has nothing to give.
+    ctrl.failChat(new ParentObservationTimeoutError(30 * 60_000));
     await vi.advanceTimersByTimeAsync(0);
-    expect(sessions.getJob(job.jobId)?.status).toBe("error");
+    await vi.advanceTimersByTimeAsync(0);
+    const live = sessions.getJob(job.jobId)!;
+    expect(live.status).toBe("completed_no_summary");
+    expect(live.error).toBeUndefined();
   });
 
   it("waits a full quiet window on a continued session that has produced no events yet", async () => {
@@ -598,7 +605,7 @@ describe("completion reconciliation — the live job 9f21545a shape", () => {
 
     const polling = sessions.waitForJob(job.jobId, 0, undefined, "wait", 1_000);
     await vi.advanceTimersByTimeAsync(0);
-    ctrl.failChat(new Error("OpenClaw task timed out"));
+    ctrl.failChat(new ParentObservationTimeoutError(30 * 60_000));
     await vi.advanceTimersByTimeAsync(0);
 
     readGate.resolve("the corrected final from the transcript");
@@ -780,7 +787,7 @@ describe("completion reconciliation — the live job 9f21545a shape", () => {
     await sessions.waitForJob(job.jobId, 0, undefined, "wait", 1_000);
     expect(pollSpy).toHaveBeenCalledTimes(1);
 
-    ctrl.failChat(new Error("OpenClaw task timed out"));
+    ctrl.failChat(new ParentObservationTimeoutError(30 * 60_000));
     await vi.advanceTimersByTimeAsync(0);
 
     await vi.advanceTimersByTimeAsync(21_000);
@@ -978,7 +985,7 @@ describe("completion reconciliation — handing the job off safely", () => {
     await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
     expect(sessions.getJob(job.jobId)?.status).toBe("completed");
 
-    ctrl.failChat(new Error("OpenClaw task timed out"));
+    ctrl.failChat(new ParentObservationTimeoutError(30 * 60_000));
     await vi.advanceTimersByTimeAsync(0);
 
     const live = sessions.getJob(job.jobId)!;
@@ -1063,6 +1070,156 @@ describe("completion reconciliation — caller-visible effects", () => {
     const next = sessions.submitTask({ task: "third ask", sessionKey });
     expect(next.status).toBe("running");
     expect(next.errorInfo).toBeUndefined();
+  });
+});
+
+/**
+ * The parent's 30-minute observation window (TIMEOUT_MS) elapsing is the ONE
+ * chat() rejection that carries no verdict about the run: nothing aborted it,
+ * openclaw is very likely still executing, and the answer lands in the durable
+ * transcript afterwards. Every other rejection — error/aborted/RPC/connection
+ * — IS an upstream verdict and must stay terminal.
+ */
+describe("completion reconciliation — a parent observation timeout is not the run's verdict", () => {
+  it("keeps the job pollable across the timeout boundary and completes it from the transcript the still-running run later writes", async () => {
+    vi.useFakeTimers();
+    // The run is demonstrably alive the whole time the parent is watching:
+    // upstream keeps reporting an advancing transcript.
+    const recoveryGate = deferred<string | undefined>();
+    const ctrl = fakeGateway({
+      observations: [advancing("advancing-1", "active")],
+      pollTranscriptForFinalText: () => recoveryGate.promise,
+    });
+    const sessions = new SessionManager(ctrl.gateway);
+    const job = sessions.submitTask({ task: "a two-hour refactor" });
+    emitToolRound(ctrl);
+
+    for (let round = 0; round < 3; round++) {
+      await vi.advanceTimersByTimeAsync(PAST_QUIET_MS);
+      expect(sessions.getJob(job.jobId)?.status).toBe("running");
+    }
+
+    // The parent gives up watching. The run does not stop.
+    ctrl.failChat(new ParentObservationTimeoutError(30 * 60_000));
+    await vi.advanceTimersByTimeAsync(0);
+
+    const live = sessions.getJob(job.jobId)!;
+    expect(live.status).toBe("running");
+    expect(live.error).toBeUndefined();
+    expect(live.errorInfo).toBeUndefined();
+    expect(live.recovery?.reason).toBe("parent_observation_timeout");
+
+    // ...and the caller sees a job it is told to keep polling, not a failure.
+    const crossing = sessions.buildSnapshot(live);
+    expect(crossing.status).toBe("running");
+    expect(crossing.continuePolling).toBe(true);
+    expect(crossing.nextAction).toEqual({
+      tool: "check_task",
+      args: { jobId: job.jobId, sessionKey: job.sessionKey },
+    });
+    expect(crossing.error).toBeUndefined();
+
+    // A check_task wait window elapsing on the far side of the boundary is
+    // still just a timeout: same job, still running, no duplicate submitted.
+    const polling = sessions.waitForJob(job.jobId, 0, undefined, "wait", 2_000);
+    await vi.advanceTimersByTimeAsync(2_500);
+    const polled = await polling;
+    expect(polled?.jobId).toBe(job.jobId);
+    expect(polled?.status).toBe("running");
+    expect(sessions.buildSnapshot(polled!).continuePolling).toBe(true);
+    expect(sessions.getJobHistory(job.sessionKey).map((j) => j.jobId)).toEqual([job.jobId]);
+
+    // The run finally writes its answer to the durable transcript.
+    recoveryGate.resolve("the answer the run wrote 40 minutes in");
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(live.status).toBe("completed");
+    expect(live.summary).toBe("the answer the run wrote 40 minutes in");
+    expect(live.resultSource).toBe("parent");
+    expect(live.terminalReason).toBe("late-recovery-transcript");
+    expect(live.error).toBeUndefined();
+    expect(live.recovery).toBeUndefined();
+    const settledSnapshot = sessions.buildSnapshot(live);
+    expect(settledSnapshot.continuePolling).toBe(false);
+    expect(settledSnapshot.nextAction).toBeNull();
+  });
+
+  it("holds the session's busy guard while the timed-out run is still being recovered", async () => {
+    vi.useFakeTimers();
+    // The corollary of staying `running`: a second submit would collide with
+    // the live upstream run and abort it. check_task's contract already tells
+    // callers never to re-submit because a wait timed out — this is what
+    // enforces it.
+    const recoveryGate = deferred<string | undefined>();
+    const ctrl = fakeGateway({ pollTranscriptForFinalText: () => recoveryGate.promise });
+    const sessions = new SessionManager(ctrl.gateway);
+    const sessionKey = "agent:main:main:thread:parent-timeout";
+    const job = sessions.submitTask({ task: "a two-hour refactor", sessionKey });
+    emitToolRound(ctrl);
+
+    ctrl.failChat(new ParentObservationTimeoutError(30 * 60_000));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sessions.getJob(job.jobId)?.status).toBe("running");
+
+    const blocked = sessions.submitTask({ task: "same session, again", sessionKey });
+    expect(blocked.status).toBe("error");
+    expect(blocked.errorInfo?.message).toBe("session busy");
+
+    // Once recovery lands the answer, the session is usable again.
+    recoveryGate.resolve("the recovered answer");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sessions.getJob(job.jobId)?.status).toBe("completed");
+    expect(sessions.submitTask({ task: "next ask", sessionKey }).status).toBe("running");
+  });
+
+  it("still ends the job in error when the gateway reports the run itself failed", async () => {
+    vi.useFakeTimers();
+    const ctrl = fakeGateway({ pollTranscriptForFinalText: async () => "text that must never be used" });
+    const sessions = new SessionManager(ctrl.gateway);
+    const job = sessions.submitTask({ task: "doomed job" });
+    emitToolRound(ctrl);
+
+    ctrl.failChat(new Error("provider returned 500"));
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(0);
+
+    const live = sessions.getJob(job.jobId)!;
+    expect(live.status).toBe("error");
+    expect(live.error).toBe("provider returned 500");
+    expect(live.terminalReason).toBe("chat-error");
+    expect(live.recovery).toBeUndefined();
+    const snapshot = sessions.buildSnapshot(live);
+    expect(snapshot.continuePolling).toBe(false);
+    expect(snapshot.nextAction).toBeNull();
+  });
+
+  it("still ends the job in error when the run is aborted", async () => {
+    vi.useFakeTimers();
+    const ctrl = fakeGateway();
+    const sessions = new SessionManager(ctrl.gateway);
+    const job = sessions.submitTask({ task: "aborted job" });
+
+    ctrl.failChat(new Error("OpenClaw task aborted"));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(sessions.getJob(job.jobId)?.status).toBe("error");
+    expect(sessions.getJob(job.jobId)?.error).toBe("OpenClaw task aborted");
+  });
+
+  it("does not treat a message that merely mentions a timeout as the parent's own window", async () => {
+    vi.useFakeTimers();
+    // "OpenClaw handshake timeout" and "RPC timeout: chat.send" are real
+    // connection failures. Only the typed rejection chat()'s own timer raises
+    // means "the run is probably still going".
+    const ctrl = fakeGateway();
+    const sessions = new SessionManager(ctrl.gateway);
+    const job = sessions.submitTask({ task: "unreachable gateway" });
+
+    ctrl.failChat(new Error("RPC timeout: chat.send"));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(sessions.getJob(job.jobId)?.status).toBe("error");
+    expect(sessions.getJob(job.jobId)?.recovery).toBeUndefined();
   });
 });
 

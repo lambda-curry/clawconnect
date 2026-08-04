@@ -4,7 +4,12 @@ import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import WebSocket from "ws";
-import { NO_SUMMARY_SENTINEL, type GatewayConfig, type GatewayEvent } from "./types.ts";
+import {
+  NO_SUMMARY_SENTINEL,
+  ParentObservationTimeoutError,
+  type GatewayConfig,
+  type GatewayEvent,
+} from "./types.ts";
 
 function logDebug(message: string, ...args: unknown[]): void {
   console.error(message, ...args);
@@ -806,8 +811,10 @@ export class OpenClawGateway {
           .join("");
 
       const timer = setTimeout(() => {
+        // Only unsubscribes — nothing here aborts the upstream run, which is
+        // why this rejection is typed: the run is very likely still going.
         cleanup();
-        reject(new Error("OpenClaw task timed out"));
+        reject(new ParentObservationTimeoutError(timeoutMs));
       }, timeoutMs);
 
       const cleanup = () => {

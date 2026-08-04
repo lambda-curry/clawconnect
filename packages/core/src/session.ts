@@ -14,12 +14,14 @@ import type { JobStore, PersistedJob } from "./job-store.ts";
 import { projectLogWindow } from "./log-projection.ts";
 import {
   NO_SUMMARY_SENTINEL,
+  isParentObservationTimeout,
   type CheckMode,
   type ContinuationState,
   type FleetAttachmentRecord,
   type FleetDirective,
   type GatewayEvent,
   type Job,
+  type JobRecoveryState,
   type JobSnapshot,
   type JobStatus,
   type LogEntry,
@@ -896,6 +898,21 @@ export class SessionManager {
             return;
           }
           job.lastEventAt = Date.now();
+          if (isParentObservationTimeout(err)) {
+            // The parent's observation window elapsed. Nothing aborted the
+            // run — openclaw is very likely still executing it, and on real
+            // traffic a run that outlasts TIMEOUT_MS still writes its final
+            // answer to the durable transcript afterwards. Turning that into
+            // `error` invents a failure the caller then can't poll past, so
+            // hand the job to the same transcript recovery an empty
+            // chat:final uses: it stays `running` (pollable, non-error) and
+            // reaches a terminal status from durable evidence rather than
+            // from the parent's own impatience. Every other chat()
+            // rejection — error/aborted/RPC/connection — is an upstream
+            // verdict and stays terminal below.
+            this.recoverLateFinalText(job, sessionKey, jobId, artifacts, "parent_observation_timeout");
+            return;
+          }
           const message = err instanceof Error ? err.message : String(err);
           this.setOutcome(job, "error", undefined, message, { resultSource: "parent", terminalReason: "chat-error" });
           this.sessions.set(sessionKey, {
@@ -1218,12 +1235,20 @@ export class SessionManager {
    * eventually lands. If the poll exhausts, fall through to the original
    * `completed_no_summary` terminal state. The job stays in `running`
    * throughout, so callers polling `check_task` stay engaged.
+   *
+   * Three entry points, one behaviour: an empty chat:final
+   * ("no_live_final_text"), a restart reattaching to a job it can no longer
+   * stream (rehydrateFromStore), and chat()'s wait window elapsing on a run
+   * still executing upstream ("parent_observation_timeout"). All three lose
+   * the live channel without learning that the RUN failed, so all three ask
+   * the durable transcript instead of inventing a terminal error.
    */
   private recoverLateFinalText(
     job: Job,
     sessionKey: string,
     jobId: string,
     artifacts: Job["artifacts"],
+    reason: JobRecoveryState["reason"] = "no_live_final_text",
   ): void {
     const intervalMs = 10_000;
     // The poll auto-extends while the transcript is being actively written —
@@ -1234,7 +1259,7 @@ export class SessionManager {
     const idleTimeoutMs = 5 * 60_000;
     const hardCapMs = RECOVERY_TIMEOUT_MS;
     job.recovery = {
-      reason: "no_live_final_text",
+      reason,
       startedAt: Date.now(),
       idleTimeoutMs,
       hardCapMs,
@@ -1242,10 +1267,13 @@ export class SessionManager {
     pushLog(job, {
       ts: Date.now(),
       type: "recovery",
-      text: "Recovering late transcript final text after live stream ended without visible final text",
+      text:
+        reason === "parent_observation_timeout"
+          ? "The live stream's wait window elapsed while the run was still going — watching the upstream transcript for its final response"
+          : "Recovering late transcript final text after live stream ended without visible final text",
     });
     logDebug(
-      `[job ${jobId}] no live final text — starting transcript long-poll ` +
+      `[job ${jobId}] ${reason} — starting transcript long-poll ` +
         `(idle-timeout=${idleTimeoutMs / 1000}s, hard-cap=${hardCapMs / 1000}s)`,
     );
     void this.gateway
