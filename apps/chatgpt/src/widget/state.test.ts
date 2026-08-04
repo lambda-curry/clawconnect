@@ -633,10 +633,13 @@ describe("formatElapsed", () => {
 });
 
 describe("isStale / deriveActivityLabel — a liveness claim paired with the evidence behind it", () => {
-  it("is not stale within the threshold, stale beyond it", () => {
-    const now = 100_000;
-    expect(isStale(now - 10_000, now)).toBe(false);
-    expect(isStale(now - 91_000, now)).toBe(true);
+  it("stays quiet-free until the server's own first upstream check could have run", () => {
+    // The old threshold was 90s, but core does not ask upstream whether the run
+    // is alive until RECONCILE_QUIET_MS (120s) — so anything below that accused
+    // a task before a single thing had looked at it.
+    const now = 200_000;
+    expect(isStale(now - 91_000, now)).toBe(false);
+    expect(isStale(now - 121_000, now)).toBe(true);
   });
 
   it("an active task well within the threshold reads as active, with elapsed time as evidence", () => {
@@ -644,11 +647,46 @@ describe("isStale / deriveActivityLabel — a liveness claim paired with the evi
     expect(deriveActivityLabel(task({ status: "running", lastEventAt: now - 5_000 }), now)).toBe("active 5s ago");
   });
 
-  it("an active task past the stale threshold is flagged as possibly stuck — this is what makes \"is working\" trustworthy or not", () => {
-    const now = 200_000;
-    expect(deriveActivityLabel(task({ status: "running", lastEventAt: now - 120_000 }), now)).toBe(
-      "quiet for 2m 0s — may be stuck",
+  it("a quiet task is reported as quiet, not accused — silence alone is never stalling", () => {
+    const now = 900_000;
+    // Quiet well past the old 90s threshold, and past the stalled threshold too,
+    // but nothing has checked: the honest answer is "quiet", not "stuck".
+    expect(deriveActivityLabel(task({ status: "running", lastEventAt: now - 600_000 }), now)).toBe(
+      "working quietly · last activity 10m 0s ago",
     );
+  });
+
+  it("stays quiet when the server's check found the run genuinely alive, however long the silence", () => {
+    const now = 900_000;
+    const alive = { checkedAt: now - 30_000, upstream: "active", producing: false };
+    expect(deriveActivityLabel(task({ status: "running", lastEventAt: now - 600_000, liveness: alive }), now)).toBe(
+      "working quietly · last activity 10m 0s ago",
+    );
+    const producing = { checkedAt: now - 30_000, upstream: "unknown", producing: true };
+    expect(deriveActivityLabel(task({ status: "running", lastEventAt: now - 600_000, liveness: producing }), now)).toBe(
+      "working quietly · last activity 10m 0s ago",
+    );
+  });
+
+  it("claims stalled only when a fresh check found nothing AND the silence outlasted the stalled threshold", () => {
+    const now = 900_000;
+    const foundNothing = { checkedAt: now - 30_000, upstream: "unknown", producing: false };
+    // Every signal agrees: checked recently, no active run, no transcript
+    // progress, and quiet for longer than a normal silent stretch.
+    expect(
+      deriveActivityLabel(task({ status: "running", lastEventAt: now - 600_000, liveness: foundNothing }), now),
+    ).toBe("possibly stalled · no activity for 10m 0s");
+
+    // Same empty check, but the silence is still within normal range.
+    expect(
+      deriveActivityLabel(task({ status: "running", lastEventAt: now - 180_000, liveness: foundNothing }), now),
+    ).toBe("working quietly · last activity 3m 0s ago");
+
+    // A stale check says nothing about the run's state now, so it cannot accuse.
+    const staleCheck = { checkedAt: now - 600_000, upstream: "unknown", producing: false };
+    expect(
+      deriveActivityLabel(task({ status: "running", lastEventAt: now - 600_000, liveness: staleCheck }), now),
+    ).toBe("working quietly · last activity 10m 0s ago");
   });
 
   it("a terminal task reads as finished, not active/stale", () => {

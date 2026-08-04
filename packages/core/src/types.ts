@@ -262,6 +262,33 @@ export type AgentSessionDirective =
     }
   | { op: "inspect"; status?: AttachmentLiveStatus };
 
+/**
+ * What the quiet watchdog last learned from upstream about whether this run is
+ * still executing — the difference between "working quietly" and "stalled".
+ *
+ * A caller cannot derive this from `lastEventAt` alone. A coding agent inside
+ * a long shell command or a compaction pass legitimately emits nothing for
+ * minutes, and stillness looks identical to death from the outside. This is
+ * the evidence that separates them, and it is deliberately NOT a self-report:
+ * a heartbeat emitted by the same process that is wedged proves nothing, so
+ * `upstream` comes from openclaw's own run registry (see classifyUpstreamRun)
+ * and `producing` from the transcript advancing between two samples.
+ *
+ * Only ever written by a reconcile round, which runs only after
+ * RECONCILE_QUIET_MS of live silence. So absence means "not quiet long enough
+ * to have been checked yet", never "checked and found dead" — a consumer must
+ * not read undefined as bad news. For the same reason `upstream: "unknown"` is
+ * the absence of positive evidence, never evidence of the opposite.
+ */
+export type JobLiveness = {
+  /** When the check ran. */
+  checkedAt: number;
+  /** Positive evidence execution is ongoing. `unknown` is not the converse. */
+  upstream: "active" | "unknown";
+  /** The transcript advanced between this round's two samples. */
+  producing: boolean;
+};
+
 export type JobRecoveryState = {
   /**
    * "no_live_final_text" — chat() settled without visible final text.
@@ -345,6 +372,8 @@ export type Job = {
   logs: LogEntry[];
   artifacts: Artifacts;
   recovery?: JobRecoveryState;
+  /** Last upstream liveness check. Unset until the run has been quiet long enough to warrant one. */
+  liveness?: JobLiveness;
   /** Timestamp of the most recent lazy-transcript-recheck for a terminal job
    *  (completed_no_summary / error). Used to rate-limit re-reads so a poll
    *  storm doesn't hammer chat.history. Unset until the first recheck. */
@@ -410,6 +439,12 @@ export type JobSnapshot = {
   logs: LogEntry[];
   artifacts: Artifacts;
   recovery?: JobRecoveryState;
+  /**
+   * Evidence about whether a quiet run is still executing. Read this before
+   * telling anyone a task looks stuck — `lastEventAt` alone cannot tell
+   * "working silently" from "dead", and this is what separates them.
+   */
+  liveness?: JobLiveness;
   continuationState?: ContinuationState;
   resultSource?: ResultSource;
   terminalReason?: string;
@@ -506,6 +541,12 @@ export type TaskSummary = {
   status: TaskStatus;
   startedAt: number;
   lastEventAt: number;
+  /**
+   * Evidence about a quiet run, carried on the ROW so a listing can label it
+   * honestly without a per-row get_task — the fan-out this type exists to
+   * avoid. Unset until the run has been quiet long enough to be checked.
+   */
+  liveness?: JobLiveness;
   /** Bounded preview (see TASK_SUMMARY_PREVIEW_MAX). Use get_task for the full text. */
   summary?: string;
   /** True when `summary` was cut short — the full text is available from get_task. */

@@ -679,19 +679,61 @@ export function formatElapsed(ms) {
   return `${hours}h ${minutes % 60}m`;
 }
 
-const STALE_THRESHOLD_MS = 90_000;
+/**
+ * Silence is not stalling. A coding agent inside a long shell command, a
+ * compaction pass, or an extended reasoning stretch emits nothing for minutes
+ * and is perfectly healthy, so a threshold on `lastEventAt` alone can only
+ * ever guess — and this one guessed at 90s, which was WRONG BY CONSTRUCTION:
+ * the server does not even ask upstream whether the run is alive until it has
+ * been quiet for RECONCILE_QUIET_MS (120s, packages/core/src/session.ts). The
+ * card was accusing a task of being stuck a full 30 seconds before anything
+ * had looked. Observed live: healthy sessions labelled "may be stuck" while
+ * they were mid-command.
+ *
+ * So quiet now starts no earlier than the server's own first check, and
+ * "stalled" is never claimed from stillness alone — it needs the server's
+ * liveness evidence to have come back with nothing, and it needs the silence
+ * to have gone on long enough that a normal quiet stretch is ruled out.
+ */
+const QUIET_THRESHOLD_MS = 120_000;
+const STALLED_THRESHOLD_MS = 7 * 60_000;
+/** A liveness check older than this says nothing about the run's state now. */
+const LIVENESS_FRESH_MS = 5 * 60_000;
 
-export function isStale(lastEventAt, now, thresholdMs = STALE_THRESHOLD_MS) {
+export function isStale(lastEventAt, now, thresholdMs = QUIET_THRESHOLD_MS) {
   return now - lastEventAt > thresholdMs;
 }
 
-/** Ties a task's group to the evidence behind it: how long ago its last real event landed, and whether that's long enough to flag as possibly stuck. */
+/**
+ * Working / quiet / stalled, from every signal available rather than one clock.
+ *
+ * `liveness` is the server's upstream check (see JobLiveness). Its ABSENCE is
+ * not bad news — it means the run has not been quiet long enough to warrant a
+ * check — and `upstream: "unknown"` is the absence of positive evidence, not
+ * evidence of death. Only when a *fresh* check found neither an active run nor
+ * a transcript advancing, and the silence has outlasted STALLED_THRESHOLD_MS,
+ * do the signals actually agree that something may be wrong.
+ */
+export function deriveLivenessState(task, now) {
+  const group = groupStatus(task.status);
+  if (isTerminalGroup(group)) return "finished";
+  if (!isStale(task.lastEventAt, now)) return "working";
+
+  const liveness = task.liveness;
+  const checkIsFresh = liveness != null && now - liveness.checkedAt <= LIVENESS_FRESH_MS;
+  if (checkIsFresh && (liveness.upstream === "active" || liveness.producing)) return "quiet";
+  if (!checkIsFresh) return "quiet"; // nothing has looked recently — say so, don't accuse
+  return now - task.lastEventAt > STALLED_THRESHOLD_MS ? "stalled" : "quiet";
+}
+
+/** Ties a task's group to the evidence behind it: how long ago its last real event landed, and what the server's liveness check found. */
 export function deriveActivityLabel(task, now) {
   const elapsed = now - task.lastEventAt;
-  const group = groupStatus(task.status);
-  if (isTerminalGroup(group)) return `finished ${formatElapsed(elapsed)} ago`;
-  if (isStale(task.lastEventAt, now)) return `quiet for ${formatElapsed(elapsed)} — may be stuck`;
-  return `active ${formatElapsed(elapsed)} ago`;
+  const state = deriveLivenessState(task, now);
+  if (state === "finished") return `finished ${formatElapsed(elapsed)} ago`;
+  if (state === "working") return `active ${formatElapsed(elapsed)} ago`;
+  if (state === "stalled") return `possibly stalled · no activity for ${formatElapsed(elapsed)}`;
+  return `working quietly · last activity ${formatElapsed(elapsed)} ago`;
 }
 
 /**
