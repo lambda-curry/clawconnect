@@ -50,5 +50,6 @@ detection.
 ## Sources
 
 - [ClawConnect repository](https://github.com/lambda-curry/clawconnect)
-- Local ChatGPT stall report: `/Users/minip3/clawd/tasks/2026-07-27-clawconnect-chatgpt-stall/report.md`
-- [Arbor discussion](https://arborthreads.com/threads/thr_9dfe1478-deeb-4925-a10b-5de393e8113d)
+- A non-public incident report on a ChatGPT polling stall, and a non-public
+  discussion thread, both of which produced the decisions above. Neither is
+  reachable from this repository and neither is required to apply the contract.

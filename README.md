@@ -8,7 +8,7 @@ MCP server and CLI for connecting AI coding agents to [OpenClaw](https://github.
 
 | Package | Description |
 |---------|-------------|
-| `packages/core` | Shared gateway, session management, and tool handlers |
+| [`packages/core`](packages/core/README.md) | Shared gateway, session management, tool handlers, and the optional host-supplied runtime seam |
 | `packages/mcp` | MCP server (stdio transport) |
 | `packages/cli` | CLI (`clawconnect`) |
 | `apps/chatgpt` | ChatGPT MCP app (HTTP transport + widget) |
@@ -197,7 +197,7 @@ This gives you a URL like `https://your-machine.tail1234.ts.net:443`.
 
 In a new ChatGPT conversation, ask:
 
-> "Use the run_task tool to ask Clawdy to say hello"
+> "Use the run_task tool to ask my agent to say hello"
 
 ChatGPT will call `run_task`, then poll with `check_task` until the task completes. If the widget is enabled, you'll see live progress inline.
 
@@ -252,15 +252,24 @@ If neither env var is set, `/mcp` is open (no gate) — only do that on a privat
 
 Once configured, your AI agent has access to the MCP tools. Example flow:
 
-1. Ask your agent to delegate work: *"Ask clawdy to fix the login bug"*
+1. Ask your agent to delegate work: *"Ask my OpenClaw agent to fix the login bug"*
 2. The agent calls `run_task` with the task description
 3. It polls `check_task(mode: "wait")` until the task completes
 4. It presents the results: summary, files changed, PRs created, etc.
-5. Follow up: *"Tell clawdy to add tests for that fix"* — continues the same session
+5. Follow up: *"Tell it to add tests for that fix"* — continues the same session
 
 ### Session Continuation
 
 Every task returns a `sessionKey`. Passing it back to `run_task` continues the same conversation thread in OpenClaw, preserving context from previous tasks.
+
+### Managed runtime attachment (optional)
+
+ClawConnect can also attach a task to an agent session that **some other system already started** — an optional extension for hosts that embed ClawConnect inside their own orchestration.
+
+This is off unless you wire it up. Runtime integrations are **optional, host-supplied extensions**: a default install registers no runtime, every MCP tool behaves identically without one, and no specific runtime, vendor, provider, or CLI is assumed anywhere. ClawConnect never starts, chooses, or enumerates sessions — every operation addresses one already-known session, and there is no spawn or list callback to abuse.
+
+- [docs/architecture/runtime-boundary.md](docs/architecture/runtime-boundary.md) — normative ownership split, the normalized attachment and observation contracts, and the explicit non-goals
+- [docs/guides/runtime-integration.md](docs/guides/runtime-integration.md) — implementing `inspect`/`continue`/`detach` against one already-known session
 
 ## `/claw` Slash Command (Claude Code)
 
@@ -341,11 +350,23 @@ AI Agent (Claude Code / Cursor / Codex)
     |-- MCP (stdio) --> packages/mcp --> packages/core --> OpenClaw Gateway (WebSocket)
     |                                                            |
     |                                                      OpenClaw Agent
-    |                                                      (clawdy, molty, etc.)
+    |                                                      (your configured agents)
     |
 ChatGPT
     |
     |-- MCP (HTTP) --> apps/chatgpt --> packages/core --> OpenClaw Gateway (WebSocket)
 ```
 
-`packages/core` handles all communication with OpenClaw — the MCP server and ChatGPT app are thin layers that adapt the transport and response format. See `docs/architecture/2026-07-27-multi-client-compatibility.md` for the layer boundaries between client-neutral core/`structuredContent` and ChatGPT-only `_meta`/resource metadata.
+`packages/core` handles all communication with OpenClaw — the MCP server and ChatGPT app are thin layers that adapt the transport and response format. See `docs/architecture/2026-07-27-multi-client-compatibility.md` (historical implementation record) for the layer boundaries between client-neutral core/`structuredContent` and ChatGPT-only `_meta`/resource metadata.
+
+### Documentation map
+
+| Document | Status |
+|---|---|
+| [ARCHITECTURE.md](ARCHITECTURE.md) | Current — package structure and data flow |
+| [docs/architecture/runtime-boundary.md](docs/architecture/runtime-boundary.md) | Normative — what ClawConnect owns vs. an embedding host, for optional managed-runtime attachment |
+| [docs/guides/runtime-integration.md](docs/guides/runtime-integration.md) | Guide — implementing `inspect`/`continue`/`detach` for one already-known session |
+| [docs/decisions/2026-07-27-task-contract.md](docs/decisions/2026-07-27-task-contract.md) | Accepted decision record |
+| [docs/architecture/2026-07-27-multi-client-compatibility.md](docs/architecture/2026-07-27-multi-client-compatibility.md) | Historical implementation record |
+| [docs/architecture/2026-07-27-chatgpt-ui-reconciliation.md](docs/architecture/2026-07-27-chatgpt-ui-reconciliation.md) | Historical design note |
+| [docs/architecture/2026-08-02-managed-fleet-attachment-plan.md](docs/architecture/2026-08-02-managed-fleet-attachment-plan.md) | Historical, non-normative build record — superseded by the runtime boundary doc |

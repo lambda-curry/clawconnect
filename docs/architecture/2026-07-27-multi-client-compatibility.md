@@ -186,18 +186,21 @@ stuck"). The replacement:
 
 ## 8. Build gate — UI architecture work paused pending explorer review
 
+> **Non-normative historical record.** This section describes the state of two
+> unmerged local exploration branches at the time of the build. It is kept for
+> provenance; the branches are not part of this repository's published history
+> and nothing here is required to use or build ClawConnect.
+
 Two prior explorations were found mid-build, both diverged from the same
 `a60fb4f` base as this branch:
 
-- `fleet/cf-clawconnect-mcp-ui-explorer` (worktree
-  `~/.claude-fleet/cf-clawconnect-mcp-ui-explorer`): a full MCP Apps
+- `fleet/cf-clawconnect-mcp-ui-explorer` (a local worktree): a full MCP Apps
   (SEP-1865) task-progress card replacing `widget.html`, with a pure state
   machine, build/verify scripts, and a written report
   (`docs/chatgpt-mcp-apps-task-ui.md` on that branch) reaching the same
   "immediate read, never a long-held wait" conclusion as this doc's §6,
   independently, from the UI side. Not pushed, not deployed, not merged.
-- `fleet/cf-clawconnect-debugger-builder` (worktree
-  `~/.claude-fleet/cf-clawconnect-debugger-builder`): commits `333d975`
+- `fleet/cf-clawconnect-debugger-builder` (a local worktree): commits `333d975`
   (`pollCount`/`continuePolling`/`retryAfterMs`/`nextAction` on
   `JobSnapshot`+`RunTaskResult`) and `102a2d7` (parameterized `waitMs`, a
   `snapshot` `CheckMode`) — structurally very close to what this build needed
@@ -228,8 +231,7 @@ ChatGPT UI commits (this doc's §6, task list item "re-enable minimal
 read-only multi-session ChatGPT widget") are **paused** until the
 `cf-clawconnect-mcp-ui-explorer` report and prototype are formally reviewed
 against the accepted task contract and reconciled with whatever the debugger
-branch's overlapping work resolves to. The explorer's own draft finding
-(`docs/arbor/clawconnect-chatgpt-ui-finding.draft.md` on that branch) already
+branch's overlapping work resolves to. The explorer's own draft finding on that branch already
 flags the `CheckMode` collision with the debugger branch and asks for
 reconciliation "on one branch before either merges" — that reconciliation
 has not happened yet as of this build. Independent non-UI compatibility work

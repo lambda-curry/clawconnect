@@ -1,6 +1,39 @@
-# Managed, session-scoped Fleet attachment — implementation plan
+# Managed, session-scoped attachment — implementation plan
 
-Source of truth: Arbor artifact `art_4fc06b2b-96a7-4930-a248-835fc79caa54` v4 ("Follow-up decision — managed Fleet attachment" section), thread `thr_9dfe1478-deeb-4925-a10b-5de393e8113d`.
+> **Non-normative historical record.** This is the build plan for one slice of
+> work, written before the seam was generalized, and it is preserved for
+> provenance only. It names the specific host and runtime that motivated the
+> work; **none of them is required, assumed, or referenced by ClawConnect
+> itself.** For the current, normative ownership split and contracts, read
+> [runtime-boundary.md](runtime-boundary.md) — it supersedes this document
+> wherever the two disagree. This document is not part of the public
+> integration path; see [the integration guide](../guides/runtime-integration.md).
+
+## Ownership boundary as recorded on 2026-08-03
+
+- **The owning host owns** runtime choice, spawn/continue/watch, input and
+  approval handling, retries/fallbacks, result collection, and
+  worktree/session cleanup. Runtime CLI, transport, provider, and supervision
+  vocabulary stay in host-managed docs and adapters.
+- **ClawConnect owns** the normalized attachment record, one-current-session
+  authority, replacement lineage, parent/child and delegated-turn guards,
+  freshness/CAS protection, detach/replace state, and optional callbacks for a
+  single already-known attachment.
+- A host that owns a runtime may inject `AgentSessionRuntimeCallbacks` into
+  `createApp`/`createMcpServer`. The callbacks are keyed by the normalized
+  `(runtime, sessionId)` reference and return normalized observations. The
+  registry has no spawn or list/enumerate operation and ClawConnect does not
+  select a provider or inspect a runtime's state on its own.
+- The built-in `LocalTmuxFleetAdapter` remains only as a backward-compatible
+  legacy recovery path for existing `claude-fleet` artifacts. It is not a
+  runtime selector and not a bridge to any particular runtime. New runtime
+  wiring belongs to the owning host through the generic callback registry.
+
+Any richer supervision fields a host's own runtime publishes (turn-in-flight
+projections, phase reconciliation, retry state) are consumed by that host from
+its runtime's contract. ClawConnect receives only normalized
+observations/events; it must not reproduce any runtime's CLI syntax, pairing,
+project, transport, authentication, approval, retry, or worktree policy.
 
 Baseline verified: `origin/main` = `2c74d11` (already includes the landed stalled-run reconciliation feature). This work builds on top of it; greenfield — no existing Fleet/attachment code anywhere in the repo (confirmed by repo-wide grep).
 
@@ -19,7 +52,7 @@ Baseline verified: `origin/main` = `2c74d11` (already includes the landed stalle
 2. **Restart survival via a new, parallel, small JSON store** — `fleet-attachment-store.ts`, same shape/atomicity as `job-store.ts` (`JsonFileFleetAttachmentStore`, write-then-rename, best-effort). Wired into `GatewayPool` the same way `jobStoreDir` is (`gateway-pool.ts:24-27`), one file per agent. Rehydrated in the `SessionManager` constructor, symmetric to `rehydrateFromStore`. Unlike the job store (which only ever holds `running` jobs), this store holds every session that has ever had an attachment, including `superseded`/`detached` lineage — bounded because it's one record per *session*, not per event.
 3. **Lineage**: each attachment transition mints a new `FleetAttachmentRecord` with its own `id` (not the same as `handle`). `SessionFleetState = { sessionKey, currentAttachmentId?, attachments: Record<attachmentId, FleetAttachmentRecord> }`. Replace sets the new record's `replacesAttachmentId`, flips the old record's `status` to `"superseded"`, and both stay in `attachments` — nothing is deleted.
 4. **Transitions arrive as a structured directive parsed out of `TaskInput.context`**, not a new public tool (mission: "no public tool is required"). New pure module `fleet-handoff.ts`: `parseFleetDirective(text): { directive: FleetDirective; strippedText: string } | undefined`, matching a delimited block `[[clawconnect:fleet]]{...json...}[[/clawconnect:fleet]]`. `submitTask` parses `input.context` first, applies the directive to `fleetAttachments` (attach/continue/replace/detach/inspect), and passes the *stripped* context into `buildSubmitMessage` so the agent's prompt never sees the raw directive. This is the "structured handoff parsing" half of the vertical slice.
-5. **Emission**: `fleetAttachment` (current record only, not full lineage) is added to `JobSnapshot` (built in `buildSnapshot`, `session.ts:1031`) unconditionally — same treatment as `recovery`, not gated behind a detail preset, since Clawdy needs to see it on every turn to decide continue/replace/detach. `check_task`'s `buildCheckTaskStructuredContent` spreads the whole snapshot already, so it needs no change. `get_task`'s `buildGetTaskStructuredContent` gets one added line. `get_session`'s hand-built result in `tools.ts` gets one added field.
+5. **Emission**: `fleetAttachment` (current record only, not full lineage) is added to `JobSnapshot` (built in `buildSnapshot`, `session.ts:1031`) unconditionally — same treatment as `recovery`, not gated behind a detail preset, since the owning host needs to see it on every turn to decide continue/replace/detach. `check_task`'s `buildCheckTaskStructuredContent` spreads the whole snapshot already, so it needs no change. `get_task`'s `buildGetTaskStructuredContent` gets one added line. `get_session`'s hand-built result in `tools.ts` gets one added field.
 6. **`parentRunId` persistence** (requirement 1): add `parentRunId?: string` to `Job` and `PersistedJob`. Set it in the existing `onRunId` callback (`session.ts:375-381`) alongside `upstreamRunIds`, and persist immediately by calling the existing `persistActiveJobs()` right there — piggybacks on the already-tested atomic-write path instead of adding a new one.
 7. **`resultSource`/`terminalReason`** (requirement 7): add `resultSource?: "parent" | "fleet-transcript"` and `terminalReason?: string` to `Job`, written only inside `setOutcome` (extended with optional params), defaulting to `undefined` (read as `"parent"`) for every existing terminal path — old records / old code paths are unaffected. Surfaced in `JobSnapshot`.
 8. **Recovery order** (requirement 5/6): the existing three-tier fallback in `session.ts` already *is* "parent live final → exact parent transcript via sessionKey" (`recoverLateFinalText`, `maybeRecoverTerminalJob`, both keyed by `sessionKey` and now cross-checkable against the persisted `parentRunId`). This slice adds the **third** tier only: at the exact two points where those two functions currently give up and call `setOutcome(job, "completed_no_summary", ...)` (`session.ts:856` and the `!recovered` fallthrough at `986` in `maybeRecoverTerminalJob`), first consult `fleetAttachments.get(job.sessionKey)`'s *current* record (if any) via the new `FleetAdapter`. Only a known, single, already-attached handle is ever consulted — never a scan. If the adapter reports a trusted terminal handoff, `setOutcome(job, "completed", handoff.text, undefined, { resultSource: "fleet-transcript", terminalReason: "fleet-transcript-recovery" })` and mark the job provisional (reuse `provisionalOutcomes`, exactly like `finalizeReconciled` does) so the **existing** late-live-final-replaces-provisional path (`session.ts:388-424`) automatically satisfies "late parent final replaces provisional Fleet result" for free — no new replacement logic needed. If the adapter reports `needs_input` or anything non-terminal, no synthesis happens — the job still falls through to `completed_no_summary`, but the attachment's own `status` (visible via `fleetAttachment` on the snapshot) shows `needs_input`, which is what keeps it actionable.

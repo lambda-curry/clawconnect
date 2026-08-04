@@ -1,6 +1,6 @@
 # /claw — Chat with an OpenClaw instance
 
-Send a task to an OpenClaw agent (e.g. clawdy) via the clawconnect MCP server and handle the response.
+Send a task to your OpenClaw agent via the clawconnect MCP server and handle the response.
 
 **Usage:** `/claw <task description>`
 
@@ -24,7 +24,7 @@ Before sending the task, gather useful context to include:
 - If the task references specific files, read them and include key excerpts
 - If relevant, include a brief `git diff --stat` of recent changes
 
-Keep context concise — don't dump entire files. Summarize what clawdy needs to know.
+Keep context concise — don't dump entire files. Summarize what the agent needs to know.
 
 ### 2. Submit the task
 
@@ -67,12 +67,12 @@ If status is still `"running"`, call `check_task` again. Keep going until you ge
 When `check_task` returns a terminal status, the response includes:
 
 - `status`: "completed", "completed_no_summary", or "error"
-- `summary`: clawdy's response text
+- `summary`: the agent's response text
 - `artifacts.filesChanged`: list of files modified
-- `artifacts.branchName`: branch clawdy worked on
+- `artifacts.branchName`: branch the agent worked on
 - `artifacts.commitSha`: commit hash
 - `artifacts.prUrl`: PR URL if one was created
-- `artifacts.needsHumanDecision`: true if clawdy is waiting for input
+- `artifacts.needsHumanDecision`: true if the agent is waiting for input
 - `continuationState.sessionKey`: save this for session continuation
 - `continuationState.recommendedNextStep`: suggested follow-up
 - `errorInfo.category` and `errorInfo.suggestedRecovery`: on errors
@@ -80,13 +80,13 @@ When `check_task` returns a terminal status, the response includes:
 Present the results clearly:
 - Lead with the summary
 - List artifacts (files, branch, PR) if any
-- If `needsHumanDecision` is true, highlight that clawdy needs input
+- If `needsHumanDecision` is true, highlight that the agent needs input
 - If there's a branch, offer to pull and review changes
 - Always mention the session can be continued (you track the session key)
 
 ### 5. Session continuation
 
-When the user wants to follow up ("tell clawdy to also...", "ask clawdy about..."), reuse the `sessionKey` from the previous result. This continues the same conversation thread in OpenClaw.
+When the user wants to follow up ("tell it to also...", "ask it about..."), reuse the `sessionKey` from the previous result. This continues the same conversation thread in OpenClaw.
 
 ## Notes
 

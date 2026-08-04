@@ -22,7 +22,7 @@ AI Agent (Claude Code / Cursor / Codex / Windsurf)
     ├── MCP (stdio) ──▶ packages/mcp ──▶ packages/core ──▶ OpenClaw Gateway (WebSocket)
     │                                                              │
     │                                                        OpenClaw Agent
-ChatGPT                                                     (clawdy, etc.)
+ChatGPT                                                     (your configured agent)
     │
     ├── MCP (HTTP) ──▶ apps/chatgpt ──▶ packages/core ──▶ OpenClaw Gateway (WebSocket)
 ```
@@ -38,12 +38,31 @@ The core package owns all communication with OpenClaw. Nothing else speaks WebSo
 | `tools.ts` | MCP tool definitions and handlers (`run_task`, `check_task`, `list_sessions`) |
 | `artifacts.ts` | Extracts structured data (files changed, PRs, branches) from gateway events and summaries |
 | `errors.ts` | Classifies gateway errors into categories (auth, timeout, connection, etc.) |
+| `agent-session.ts` | Optional runtime seam — registry, normalization, and bounded dispatch for host-supplied managed agent sessions |
 | `types.ts` | Shared TypeScript types |
 
 Key design decisions:
 - Gateway accepts config explicitly — no environment variable reads in core
 - SessionManager is stateful but does not own the gateway (receives it as a dependency)
 - Device identity stored at `~/.openclaw/clawd-ui-device.json`
+
+## Runtime boundary (optional extension)
+
+ClawConnect can attach a task to an agent session that **some other system
+already started** — but it never starts, chooses, or enumerates one. Runtime
+integrations are optional, host-supplied extensions: a default install
+registers no runtime and every MCP tool behaves identically without one.
+
+The embedding host owns runtime choice, lifecycle, transport, authentication,
+approvals, and cleanup, and supplies `inspect`/`continue`/`detach` callbacks
+for one already-known session. ClawConnect owns the normalized attachment
+record, one-current-session authority, lineage, restart durability, and
+normalization of whatever the runtime reports.
+
+See [docs/architecture/runtime-boundary.md](docs/architecture/runtime-boundary.md)
+for the normative split, the attachment/observation contracts, and the
+non-goals; [docs/guides/runtime-integration.md](docs/guides/runtime-integration.md)
+is the host-side integration guide.
 
 ## packages/mcp
 
