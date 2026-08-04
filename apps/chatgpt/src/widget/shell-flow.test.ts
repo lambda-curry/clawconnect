@@ -488,6 +488,39 @@ describe("no fullscreen/Task Center affordance in the assembled widget", () => {
   });
 });
 
+describe("a dead chat stream is not a dead task", () => {
+  it("renders the recovery notice as reassurance, above the rows and outside any task's pill", async () => {
+    const base: Task = { taskId: TASK_ID, jobId: TASK_ID, sessionKey: SESSION_KEY, agent: "assistant", status: "running", lastEventAt: 0 };
+    const host = createHost({ mountedOnBoot: true, world: { tasks: [base] } });
+    const inner = host.callTool;
+    host.callTool = (name: string, args: Json): Promise<Json> => {
+      if (name === "get_task" && args.detail === "full") {
+        // The server says: the originating reply ended before the answer
+        // arrived, and it is recovering the job — which is still running.
+        return Promise.resolve({ structuredContent: { ...base, recovery: { reason: "no_live_final_text" }, updates: [], logCursor: 0 } });
+      }
+      return inner(name, args);
+    };
+
+    const { root } = mount(host);
+    await settle();
+
+    const notice = withClass(root, "cc-note").map(textOf).join(" ");
+    expect(notice).toContain("still running");
+    // The task keeps its own status; the notice must not have demoted it.
+    expect(withClass(root, "cc-pill").map(textOf).join(" ")).toContain("Running");
+    expect(rowTitles(root)).toEqual(["assistant is working…"]);
+  });
+
+  it("shows no notice at all when the stream is healthy", async () => {
+    const world = { tasks: [{ taskId: TASK_ID, jobId: TASK_ID, sessionKey: SESSION_KEY, agent: "assistant", status: "running", lastEventAt: 0 }] };
+    const host = createHost({ mountedOnBoot: true, world });
+    const { root } = mount(host);
+    await settle();
+    expect(withClass(root, "cc-note")).toHaveLength(0);
+  });
+});
+
 describe("resume signals", () => {
   it("reconciles when the network comes back, which backgrounds nothing and fires no other signal", async () => {
     // A dropped connection raises no visibilitychange/focus/pageshow, so

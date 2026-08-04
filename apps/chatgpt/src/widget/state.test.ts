@@ -27,6 +27,7 @@ import {
   deriveTimeline,
   deriveLatestUpdate,
   deriveStatusPill,
+  deriveConnectionNotice,
   deriveCounts,
   formatCounts,
   nextCardTab,
@@ -692,6 +693,43 @@ describe("isStale / deriveActivityLabel — a liveness claim paired with the evi
   it("a terminal task reads as finished, not active/stale", () => {
     const now = 100_000;
     expect(deriveActivityLabel(task({ status: "done", lastEventAt: now - 5_000 }), now)).toBe("finished 5s ago");
+  });
+});
+
+describe("deriveConnectionNotice — the task, the connector, and the chat stream are three different things", () => {
+  it("says nothing when everything is nominal", () => {
+    expect(deriveConnectionNotice({ pollFailures: 0, recovery: null })).toEqual({
+      connector: "connected",
+      stream: "active",
+      text: null,
+    });
+    expect(deriveConnectionNotice()).toEqual({ connector: "connected", stream: "active", text: null });
+  });
+
+  it("reports a dead chat stream as the task still running, never as a bare interruption", () => {
+    // This is the case that read as failure: the reply that dispatched the work
+    // ended before the answer arrived, and the job is explicitly still going.
+    for (const reason of ["no_live_final_text", "parent_observation_timeout"]) {
+      const notice = deriveConnectionNotice({ pollFailures: 0, recovery: { reason } });
+      expect(notice.stream).toBe("interrupted");
+      expect(notice.connector).toBe("connected"); // the connector is fine — don't blame it
+      expect(notice.text).toContain("still running");
+      expect(notice.text).not.toMatch(/failed|error|interrupted\.$/i);
+    }
+  });
+
+  it("keeps connector trouble separate from stream trouble, and tolerates one blip", () => {
+    expect(deriveConnectionNotice({ pollFailures: 1 }).text).toBeNull(); // a single miss is not news
+    const flaky = deriveConnectionNotice({ pollFailures: 3 });
+    expect(flaky).toMatchObject({ connector: "reconnecting", stream: "active" });
+    expect(flaky.text).toContain("keeps running");
+  });
+
+  it("an unrecognized recovery reason does not get reported as a dead stream", () => {
+    expect(deriveConnectionNotice({ recovery: { reason: "something-else" } })).toMatchObject({
+      stream: "active",
+      text: null,
+    });
   });
 });
 

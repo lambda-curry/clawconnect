@@ -36,7 +36,8 @@
  * @property {{ filesChanged?: string[], commandsRun?: string[], branchName?: string, commitSha?: string, prUrl?: string }} [artifacts]
  * @property {LogEntry[]} [updates]
  * @property {LogEntry[]} [logs]
- * @property {unknown} [recovery]
+ * @property {{ reason?: string }} [recovery]
+ * @property {{ checkedAt: number, upstream: "active"|"unknown", producing: boolean }} [liveness]
  *
  * @typedef {{ ts: number, type: string, text: string, isError?: boolean }} LogEntry
  *
@@ -724,6 +725,37 @@ export function deriveLivenessState(task, now) {
   if (checkIsFresh && (liveness.upstream === "active" || liveness.producing)) return "quiet";
   if (!checkIsFresh) return "quiet"; // nothing has looked recently — say so, don't accuse
   return now - task.lastEventAt > STALLED_THRESHOLD_MS ? "stalled" : "quiet";
+}
+
+/**
+ * Three things can independently be wrong, and collapsing them is why a
+ * transport hiccup read as a dead task:
+ *
+ *   the task        — running / finished / failed, decided upstream
+ *   the connector   — can this card reach the server right now (pollFailures)
+ *   the chat stream — did the reply that dispatched the task survive
+ *
+ * Only the first is the work. The other two are ways of *looking* at it, and
+ * neither failing means the task did. `recovery` is the server telling us the
+ * originating reply ended before the answer arrived — the job is explicitly
+ * still going and being recovered, so the copy has to say so rather than
+ * report a bare "connection interrupted" over work that is fine.
+ */
+export function deriveConnectionNotice({ pollFailures = 0, recovery = null } = {}) {
+  const streamEnded =
+    recovery != null &&
+    typeof recovery === "object" &&
+    (recovery.reason === "no_live_final_text" || recovery.reason === "parent_observation_timeout");
+  const connector = pollFailures >= 2 ? "reconnecting" : "connected";
+  const stream = streamEnded ? "interrupted" : "active";
+  // The task's own state is never asserted here — it has its own pill.
+  if (streamEnded) {
+    return { connector, stream, text: "The chat connection ended, but the task is still running — reconnecting to it." };
+  }
+  if (connector === "reconnecting") {
+    return { connector, stream, text: "Reconnecting to the task — it keeps running either way." };
+  }
+  return { connector, stream, text: null };
 }
 
 /** Ties a task's group to the evidence behind it: how long ago its last real event landed, and what the server's liveness check found. */
