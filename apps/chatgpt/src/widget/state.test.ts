@@ -34,6 +34,9 @@ import {
   mergeRingBuffer,
   RING_BUFFER_MAX,
   shouldRenderImmediately,
+  deriveDelegationIdentity,
+  deriveUpstreamEvidence,
+  normalizeDiagnostics,
 } from "./state.js";
 
 function task(overrides = {}) {
@@ -861,5 +864,139 @@ describe("deriveCounts / formatCounts — the inline card's compact session summ
 
   it("formats to an empty string for no history — the caller decides what to show instead", () => {
     expect(formatCounts(deriveCounts([]))).toBe("");
+  });
+});
+
+describe("deriveDelegationIdentity — who is actually doing the work, by id", () => {
+  const attached = (extra = {}) => ({
+    id: "att-1",
+    runtime: "claude-fleet",
+    handle: "t3-fleet-run-ccc4f7df7ace97de1cd45fafef4b2512",
+    providerSessionId: "coding-9f2b1c",
+    worktree: "/Users/x/.t3-fleet-worktrees/clawconnect-recovery-fix",
+    host: "build-host",
+    status: "running",
+    ...extra,
+  });
+
+  it("returns null for an ordinary turn, so a plain card grows no empty block", () => {
+    expect(deriveDelegationIdentity(task({}))).toBeNull();
+    expect(deriveDelegationIdentity({})).toBeNull();
+    expect(deriveDelegationIdentity(undefined)).toBeNull();
+  });
+
+  it("surfaces the Fleet run and coding-session ids VERBATIM — a truncated id cannot be looked up", () => {
+    const identity = deriveDelegationIdentity(task({ agentSession: attached() }));
+    expect(identity).toEqual({
+      runtime: "claude-fleet",
+      fleetRunId: "t3-fleet-run-ccc4f7df7ace97de1cd45fafef4b2512",
+      codingSessionId: "coding-9f2b1c",
+      worktree: "/Users/x/.t3-fleet-worktrees/clawconnect-recovery-fix",
+      host: "build-host",
+      status: "running",
+    });
+    // The exact failure this exists to prevent: recognising an id is not the
+    // same as being able to use it.
+    expect(identity?.fleetRunId).toHaveLength("t3-fleet-run-ccc4f7df7ace97de1cd45fafef4b2512".length);
+  });
+
+  it("degrades field by field rather than dropping the whole block", () => {
+    const identity = deriveDelegationIdentity(
+      task({ agentSession: { id: "a", runtime: "claude-fleet", handle: "run-1", status: "running" } }),
+    );
+    expect(identity?.fleetRunId).toBe("run-1");
+    expect(identity?.codingSessionId).toBeNull();
+    expect(identity?.worktree).toBeNull();
+  });
+
+  it("needs a handle to be worth showing — an attachment with no id identifies nothing", () => {
+    expect(deriveDelegationIdentity(task({ agentSession: { id: "a", runtime: "claude-fleet", status: "running" } }))).toBeNull();
+  });
+});
+
+describe("deriveUpstreamEvidence — dated evidence, never a manufactured confirmation", () => {
+  const NOW = 1_000_000;
+
+  it("reports a fresh check with its age rather than as a present-tense fact", () => {
+    const evidence = deriveUpstreamEvidence(
+      task({ liveness: { checkedAt: NOW - 30_000, upstream: "active", producing: false }, parentRunId: "run-abc" }),
+      NOW,
+    );
+    expect(evidence.upstream).toBe("run executing");
+    expect(evidence.checkedAgo).toBe("30s ago");
+    expect(evidence.runId).toBe("run-abc");
+  });
+
+  it("drops a stale claim entirely instead of showing it as current", () => {
+    // Past LIVENESS_FRESH_MS (5 min): the run may well still be executing, but
+    // nobody has confirmed it, and saying so would invent a confirmation.
+    const evidence = deriveUpstreamEvidence(
+      task({ liveness: { checkedAt: NOW - 6 * 60_000, upstream: "active", producing: false } }),
+      NOW,
+    );
+    expect(evidence.upstream).toBeNull();
+    expect(evidence.checkedAgo).toBeNull();
+  });
+
+  it("distinguishes no-positive-signal from active — `unknown` is not evidence of the opposite", () => {
+    const evidence = deriveUpstreamEvidence(
+      task({ liveness: { checkedAt: NOW - 1_000, upstream: "unknown", producing: false } }),
+      NOW,
+    );
+    expect(evidence.upstream).toBe("no positive signal");
+  });
+
+  it("states what recovery is DOING, and that upstream may still be active", () => {
+    const evidence = deriveUpstreamEvidence(task({ recovery: { reason: "no_live_final_text" } }), NOW);
+    expect(evidence.recoveryAction).toMatch(/may still be active/i);
+    expect(deriveUpstreamEvidence(task({}), NOW).recoveryAction).toBeNull();
+  });
+});
+
+describe("deriveCardTabs — a healthy delegated run still has ids worth reaching", () => {
+  it("offers diagnostics for a delegated turn that has not failed", () => {
+    const delegated = task({
+      status: "running",
+      agentSession: { id: "a", runtime: "claude-fleet", handle: "run-1", status: "running" },
+    });
+    expect(deriveCardTabs(delegated)).toContain("diagnostics");
+    // ...without pretending it failed: the card still opens on the response.
+    expect(defaultCardTab(delegated)).toBe("response");
+  });
+
+  it("still offers no diagnostics tab for an ordinary healthy turn", () => {
+    expect(deriveCardTabs(task({ status: "running" }))).not.toContain("diagnostics");
+  });
+});
+
+describe("normalizeDiagnostics — one place to read a failure from", () => {
+  it("lifts get_task's nested diagnostics block to the top level the rest of the card reads", () => {
+    const normalized = normalizeDiagnostics({
+      taskId: "t1",
+      status: "failed",
+      diagnostics: {
+        error: "Stopped watching after 90m",
+        errorInfo: { category: "timeout", suggestedRecovery: "Do not re-submit on this session" },
+        recovery: { reason: "no_live_final_text" },
+      },
+    });
+    expect(normalized?.error).toBe("Stopped watching after 90m");
+    expect(normalized?.errorInfo).toEqual({ category: "timeout", suggestedRecovery: "Do not re-submit on this session" });
+    expect(normalized?.recovery).toEqual({ reason: "no_live_final_text" });
+  });
+
+  it("never blanks an already-merged row: top level wins over an empty diagnostics block", () => {
+    const normalized = normalizeDiagnostics({
+      error: "session busy",
+      diagnostics: { error: undefined, errorInfo: undefined },
+    });
+    expect(normalized?.error).toBe("session busy");
+  });
+
+  it("passes through anything without a diagnostics block, including null/undefined", () => {
+    const plain = { taskId: "t1", status: "running" };
+    expect(normalizeDiagnostics(plain)).toBe(plain);
+    expect(normalizeDiagnostics(null)).toBeNull();
+    expect(normalizeDiagnostics(undefined)).toBeUndefined();
   });
 });

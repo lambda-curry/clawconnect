@@ -256,7 +256,7 @@ async function settle(): Promise<void> {
 const rowTitles = (root: El) => withClass(root, "cc-row").map((row) => textOf(withClass(row, "cc-title")[0]));
 const rowUpdateLines = (root: El) => withClass(root, "cc-update").map(textOf);
 const lastGetTaskArgs = (host: ReturnType<typeof createHost>) =>
-  [...host.calls].reverse().find((c) => c.name === "get_task" && c.args.detail === "full")?.args;
+  [...host.calls].reverse().find((c) => c.name === "get_task" && c.args.detail !== "prompt")?.args;
 
 describe("session registration: the mount payload can land after boot", () => {
   it("registers the session and starts polling once openai:set_globals delivers the mount payload", async () => {
@@ -494,7 +494,7 @@ describe("a dead chat stream is not a dead task", () => {
     const host = createHost({ mountedOnBoot: true, world: { tasks: [base] } });
     const inner = host.callTool;
     host.callTool = (name: string, args: Json): Promise<Json> => {
-      if (name === "get_task" && args.detail === "full") {
+      if (name === "get_task" && args.detail !== "prompt") {
         // The server says: the originating reply ended before the answer
         // arrived, and it is recovering the job — which is still running.
         return Promise.resolve({ structuredContent: { ...base, recovery: { reason: "no_live_final_text" }, updates: [], logCursor: 0 } });
@@ -663,5 +663,151 @@ describe("concurrent refreshes: only the newest read may write", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("a delegated run shows the ids someone can actually act on", () => {
+  const FLEET_RUN = "t3-fleet-run-ccc4f7df7ace97de1cd45fafef4b2512";
+  const CODING_SESSION = "coding-session-9f2b1c4d";
+
+  function delegatedHost(overrides: Json = {}) {
+    const base: Task = { taskId: TASK_ID, jobId: TASK_ID, sessionKey: SESSION_KEY, agent: "assistant", status: "running", lastEventAt: 0 };
+    const host = createHost({ mountedOnBoot: true, world: { tasks: [base] } });
+    const inner = host.callTool;
+    host.callTool = (name: string, args: Json): Promise<Json> => {
+      if (name === "get_task" && args.detail !== "prompt") {
+        return Promise.resolve({
+          structuredContent: {
+            ...base,
+            parentRunId: "openclaw-run-77",
+            liveness: { checkedAt: Date.now() - 20_000, upstream: "active", producing: false },
+            agentSession: {
+              id: "att-1",
+              runtime: "claude-fleet",
+              handle: FLEET_RUN,
+              providerSessionId: CODING_SESSION,
+              worktree: "/Users/x/.t3-fleet-worktrees/clawconnect-recovery-fix",
+              host: "build-host",
+              status: "running",
+            },
+            updates: [],
+            logCursor: 0,
+            ...overrides,
+          },
+        });
+      }
+      return inner(name, args);
+    };
+    return host;
+  }
+
+  it("renders the Fleet run and coding-session ids verbatim, reachable while the run is HEALTHY", async () => {
+    const host = delegatedHost();
+    const { root } = mount(host);
+    await settle();
+
+    // The tab exists even though nothing has failed — that is the point.
+    const diagnosticsTab = findTabButton(root, "Diagnostics");
+    click(diagnosticsTab);
+    await settle();
+
+    const shown = withClass(root, "cc-idvalue").map(textOf);
+    expect(shown).toContain(FLEET_RUN);
+    expect(shown).toContain(CODING_SESSION);
+    // Untruncated: a prefix identifies a run you already know and is useless
+    // for attaching to one you don't.
+    expect(shown.join(" ")).toContain(FLEET_RUN);
+    expect(textOf(root)).toContain("openclaw-run-77");
+  });
+
+  it("does not tell the operator a healthy delegated run has failed", async () => {
+    const host = delegatedHost();
+    const { root } = mount(host);
+    await settle();
+    click(findTabButton(root, "Diagnostics"));
+    await settle();
+
+    // The old unconditional fallback said exactly this over a working run.
+    expect(textOf(root)).not.toContain("The task failed without additional diagnostics.");
+    expect(withClass(root, "cc-diagnostics")).toHaveLength(0);
+    expect(withClass(root, "cc-pill").map(textOf).join(" ")).toContain("Running");
+  });
+
+  it("dates the upstream evidence rather than asserting it as current", async () => {
+    const host = delegatedHost();
+    const { root } = mount(host);
+    await settle();
+    click(findTabButton(root, "Diagnostics"));
+    await settle();
+
+    const text = textOf(root);
+    expect(text).toContain("run executing");
+    expect(text).toMatch(/checked \d+s ago/);
+  });
+
+  it("carries the ids into a real failure too, so the error names something checkable", async () => {
+    const host = delegatedHost({
+      status: "failed",
+      error: "Stopped watching after 90m: upstream run openclaw-run-77 was last reported executing 4m ago",
+    });
+    const { root } = mount(host);
+    await settle();
+    // A failed task opens on diagnostics by itself.
+    const text = textOf(root);
+    expect(text).toContain("Stopped watching after 90m");
+    expect(withClass(root, "cc-idvalue").map(textOf)).toContain(FLEET_RUN);
+  });
+});
+
+describe("the card asks for the payload it actually renders", () => {
+  it("requests a diagnostics-bearing preset — it renders a Diagnostics tab, so it must not ask for one that strips the failure", async () => {
+    const world = { tasks: [{ taskId: TASK_ID, jobId: TASK_ID, sessionKey: SESSION_KEY, agent: "assistant", status: "running", lastEventAt: 0 }] };
+    const host = createHost({ mountedOnBoot: true, world });
+    mount(host);
+    await settle();
+
+    const heartbeat = host.calls.filter((c) => c.name === "get_task" && c.args.detail !== "prompt");
+    expect(heartbeat.length).toBeGreaterThan(0);
+    // buildGetTaskStructuredContent emits error/errorInfo ONLY under these two.
+    for (const call of heartbeat) {
+      expect(["diagnostics", "fullWithDiagnostics"]).toContain(call.args.detail);
+    }
+  });
+
+  it("surfaces the recovery guidance through get_task's real nested shape, not just a flat fixture", async () => {
+    const base: Task = { taskId: TASK_ID, jobId: TASK_ID, sessionKey: SESSION_KEY, agent: "assistant", status: "failed", lastEventAt: 0 };
+    const host = createHost({ mountedOnBoot: true, world: { tasks: [base] } });
+    const inner = host.callTool;
+    host.callTool = (name: string, args: Json): Promise<Json> => {
+      if (name === "get_task" && args.detail !== "prompt") {
+        // Exactly what buildGetTaskStructuredContent returns: error/errorInfo
+        // NESTED under `diagnostics`, not at the top level.
+        return Promise.resolve({
+          structuredContent: {
+            ...base,
+            updates: [],
+            logCursor: 0,
+            diagnostics: {
+              error: "Stopped watching after 90m: upstream run openclaw-run-77 was last reported executing 4m ago",
+              errorInfo: {
+                category: "timeout",
+                message: "late recovery hit the hard cap",
+                suggestedRecovery: "Do not re-submit on this session while the run is executing — a second send aborts it.",
+              },
+            },
+          },
+        });
+      }
+      return inner(name, args);
+    };
+
+    const { root } = mount(host);
+    await settle();
+
+    const text = textOf(root);
+    expect(text).toContain("Stopped watching after 90m");
+    // The whole point: the action, not just the complaint.
+    expect(text).toContain("Do not re-submit on this session");
+    expect(withClass(root, "cc-guidance").length).toBeGreaterThan(0);
   });
 });

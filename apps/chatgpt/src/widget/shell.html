@@ -125,6 +125,21 @@
   .cc-response th, .cc-prompt-body th { background: var(--cc-bg-subtle); font-weight: 600; }
   .cc-response a, .cc-prompt-body a { color: var(--cc-active); text-decoration: underline; }
   .cc-diagnostics { margin-top: 8px; font-size: 12px; white-space: pre-wrap; color: var(--cc-failed); }
+  /* Guidance, not failure: the error above is already red, and colouring the
+     action the same way reads as a second thing going wrong. */
+  .cc-guidance { margin-top: 6px; font-size: 12px; padding: 7px 9px; border-radius: 7px; background: var(--cc-bg-subtle); color: var(--cc-fg); }
+  .cc-idblock { margin-top: 10px; font-size: 12px; }
+  .cc-idblock-head { font-weight: 600; color: var(--cc-fg-muted); margin-bottom: 4px; }
+  /* Label column sized to the longest label ("Last upstream check") so values
+     align; the value column takes the rest and wraps rather than truncating —
+     a clipped session id is not an id. */
+  .cc-idrow { display: grid; grid-template-columns: 132px 1fr; gap: 4px 10px; padding: 2px 0; align-items: baseline; }
+  .cc-idlabel { color: var(--cc-fg-muted); }
+  .cc-idvalue {
+    font: 11.5px ui-monospace, SFMono-Regular, Menlo, monospace;
+    overflow-wrap: anywhere; user-select: text;
+  }
+  @media (max-width: 420px) { .cc-idrow { grid-template-columns: 1fr; gap: 0; } }
   .cc-toolbar { display: flex; align-items: center; justify-content: flex-end; gap: 6px; flex-wrap: wrap; margin-bottom: 6px; min-height: 28px; }
   .cc-control {
     display: inline-flex; align-items: center; gap: 5px; min-height: 28px;
@@ -461,9 +476,17 @@ async function refresh() {
       // context text) that has no place in a recurring heartbeat — it's
       // fetched lazily, once, only when the user explicitly opens the
       // Request tab (see selectCardTab below).
-      const detail = await bridge.callTool("get_task", { taskId, detail: "full", knownLogCount: app.eventCursor.get(taskId) ?? 0 });
+      //
+      // "fullWithDiagnostics", not "full": this card RENDERS a Diagnostics tab,
+      // and `error`/`errorInfo` are emitted only under the diagnostics presets
+      // (see buildGetTaskStructuredContent). Asking for "full" meant the one
+      // surface that shows a failure was reading a payload with the failure
+      // stripped out of it — `errorInfo.suggestedRecovery` in particular, which
+      // is the guidance that stops a caller re-submitting and aborting the very
+      // run whose answer they are waiting for.
+      const detail = await bridge.callTool("get_task", { taskId, detail: "fullWithDiagnostics", knownLogCount: app.eventCursor.get(taskId) ?? 0 });
       if (!isCurrent()) return;
-      const snapshot = detail?.structuredContent ?? detail;
+      const snapshot = normalizeDiagnostics(detail?.structuredContent ?? detail);
       // isTaskSnapshot, not a bare id check: a not-found reply carries the id
       // it was asked about, and merging it would overwrite a retained row with
       // an error envelope — cancelling the retention guarantee for exactly the
@@ -748,8 +771,71 @@ function renderRow(row, opts = {}) {
       panelChildren.push(el("div", { class: "cc-prompt cc-prompt-loading" }, ["Loading request…"]));
     }
   } else if (activeTab === "diagnostics") {
-    const info = row.latestTask.error ?? row.latestTask.errorInfo?.message ?? row.latestTask.errorInfo?.category ?? "The task failed without additional diagnostics.";
-    panelChildren.push(el("div", { class: "cc-diagnostics" }, [String(info)]));
+    const task = row.latestTask;
+    const failed = groupStatus(task.status) === "failed" || Boolean(task.error) || Boolean(task.errorInfo);
+    // Only claim a failure when there is one. This tab is now also the place a
+    // HEALTHY delegated run shows its ids, and the old unconditional fallback
+    // ("The task failed without additional diagnostics.") would have told the
+    // operator their working run had failed.
+    if (failed) {
+      const info = task.error ?? task.errorInfo?.message ?? task.errorInfo?.category ?? "The task failed without additional diagnostics.";
+      panelChildren.push(el("div", { class: "cc-diagnostics" }, [String(info)]));
+      // The failure text says what went wrong; this says what to DO, and on the
+      // late-recovery outcome the two are not interchangeable — the guidance is
+      // "do not re-submit on this session", and a caller who acts on the error
+      // alone does the one thing that aborts the run they are waiting for.
+      const guidance = task.errorInfo?.suggestedRecovery;
+      if (guidance) panelChildren.push(el("div", { class: "cc-guidance" }, [String(guidance)]));
+    }
+
+    const delegation = deriveDelegationIdentity(task);
+    if (delegation) {
+      const rows = [
+        ["Runtime", delegation.runtime],
+        ["Fleet run", delegation.fleetRunId],
+        ["Coding session", delegation.codingSessionId],
+        ["Worktree", delegation.worktree],
+        ["Host", delegation.host],
+        ["Session state", delegation.status],
+      ].filter(([, value]) => value);
+      panelChildren.push(
+        el("div", { class: "cc-idblock" }, [
+          el("div", { class: "cc-idblock-head" }, ["Delegated to"]),
+          ...rows.map(([label, value]) =>
+            el("div", { class: "cc-idrow" }, [
+              el("span", { class: "cc-idlabel" }, [String(label)]),
+              // Selectable and untruncated — an id you cannot copy is an id you
+              // cannot use to attach to the run or look up its transcript.
+              el("span", { class: "cc-idvalue" }, [String(value)]),
+            ]),
+          ),
+        ]),
+      );
+    }
+
+    const evidence = deriveUpstreamEvidence(task, Date.now());
+    const evidenceRows = [
+      ["Upstream run", evidence.runId],
+      ["Last upstream check", evidence.upstream && evidence.checkedAgo ? `${evidence.upstream} · checked ${evidence.checkedAgo}` : null],
+      ["Recovery", evidence.recoveryAction],
+    ].filter(([, value]) => value);
+    if (evidenceRows.length > 0) {
+      panelChildren.push(
+        el("div", { class: "cc-idblock" }, [
+          el("div", { class: "cc-idblock-head" }, ["Upstream evidence"]),
+          ...evidenceRows.map(([label, value]) =>
+            el("div", { class: "cc-idrow" }, [
+              el("span", { class: "cc-idlabel" }, [String(label)]),
+              el("span", { class: "cc-idvalue" }, [String(value)]),
+            ]),
+          ),
+        ]),
+      );
+    }
+
+    if (panelChildren.length === 0) {
+      panelChildren.push(el("div", { class: "cc-meta" }, ["No diagnostics for this task yet."]));
+    }
   } else {
     if (row.latestTask.summary) {
       panelChildren.push(contentNode("cc-response", row.latestTask.summary));

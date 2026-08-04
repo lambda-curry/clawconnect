@@ -38,6 +38,21 @@
  * @property {LogEntry[]} [logs]
  * @property {{ reason?: string }} [recovery]
  * @property {{ checkedAt: number, upstream: "active"|"unknown", producing: boolean }} [liveness]
+ * @property {string} [parentRunId]
+ * @property {AgentSession} [agentSession]
+ *
+ * The session's CURRENT managed-session attachment, when the turn delegated to
+ * one. `handle` is the id the runtime publishes (for the Fleet runtime, the
+ * Fleet run); `providerSessionId` is the coding session running inside it.
+ * @typedef {object} AgentSession
+ * @property {string} id
+ * @property {string} runtime
+ * @property {string} handle
+ * @property {string} [providerSessionId]
+ * @property {string} [host]
+ * @property {string} [worktree]
+ * @property {string} status
+ * @property {number} [lastObservedAt]
  *
  * @typedef {{ ts: number, type: string, text: string, isError?: boolean }} LogEntry
  *
@@ -327,7 +342,13 @@ export function deriveCardTabs(task) {
   // string for status="blocked" — so status is the reliable signal and the
   // error fields are the fallback for anything it does not cover.
   const problem = task?.status === "failed" || task?.status === "blocked" || task?.status === "needs-human";
-  if (problem || task?.error || task?.errorInfo) tabs.push("diagnostics");
+  // A delegated turn earns the tab even when nothing is wrong: the Fleet run
+  // and coding-session ids live there, and they are exactly what an operator
+  // needs while the work is still HEALTHY — to attach to it, or to tell it
+  // apart from a duplicate. Offering the tab only on failure means the ids
+  // appear only once they are least useful.
+  const delegated = deriveDelegationIdentity(task) !== null;
+  if (problem || delegated || task?.error || task?.errorInfo) tabs.push("diagnostics");
   if (canReadPrompt(task)) tabs.push("request");
   return tabs;
 }
@@ -766,6 +787,91 @@ export function deriveActivityLabel(task, now) {
   if (state === "working") return `active ${formatElapsed(elapsed)} ago`;
   if (state === "stalled") return `possibly stalled · no activity for ${formatElapsed(elapsed)}`;
   return `working quietly · last activity ${formatElapsed(elapsed)} ago`;
+}
+
+/**
+ * get_task's diagnostics presets nest `error`/`errorInfo` under a `diagnostics`
+ * object, while every other surface this card reads (list_tasks' TaskSummary,
+ * check_task's whole snapshot) carries them at the top level. Flatten the one
+ * shape into the other so the rest of the widget has a single place to read a
+ * failure from.
+ *
+ * Top level wins on conflict: a TaskSummary row's `error` is the row the card
+ * already merged, and a diagnostics block that came back empty must not blank
+ * it out.
+ *
+ * @param {Record<string, unknown> | null | undefined} snapshot
+ * @returns {Record<string, unknown> | null | undefined}
+ */
+export function normalizeDiagnostics(snapshot) {
+  if (!snapshot || typeof snapshot !== "object") return snapshot;
+  const diagnostics = snapshot.diagnostics;
+  if (!diagnostics || typeof diagnostics !== "object") return snapshot;
+  return {
+    ...snapshot,
+    error: snapshot.error ?? diagnostics.error,
+    errorInfo: snapshot.errorInfo ?? diagnostics.errorInfo,
+    recovery: snapshot.recovery ?? diagnostics.recovery,
+    continuationState: snapshot.continuationState ?? diagnostics.continuationState,
+  };
+}
+
+/**
+ * Who is actually doing the work, by id, when the turn delegated to a managed
+ * session. This card is the only place an operator sees the delegation at all,
+ * and "a Fleet run is going" without the run's id is not something anyone can
+ * act on — you cannot attach to it, read its transcript, or tell it apart from
+ * a duplicate. So the ids are surfaced verbatim, never truncated: a prefix is
+ * enough to recognise an id you already have and useless for looking one up.
+ *
+ * Returns null when nothing was delegated, which is the common case — a plain
+ * turn must not grow an empty "delegated to" block.
+ *
+ * @param {Partial<WidgetTask> | undefined} task
+ * @returns {{ runtime: string, fleetRunId: string, codingSessionId: string | null, worktree: string | null, host: string | null, status: string } | null}
+ */
+export function deriveDelegationIdentity(task) {
+  const session = task?.agentSession;
+  if (!session || typeof session !== "object") return null;
+  if (!session.handle) return null;
+  return {
+    runtime: session.runtime ?? "unknown",
+    fleetRunId: session.handle,
+    codingSessionId: session.providerSessionId ?? null,
+    worktree: session.worktree ?? null,
+    host: session.host ?? null,
+    status: session.status ?? "unknown",
+  };
+}
+
+/**
+ * What the server last learned from upstream, and what it is doing about it —
+ * the two facts that make a quiet card readable instead of ominous.
+ *
+ * Deliberately dates the evidence rather than asserting the present tense.
+ * `liveness.checkedAt` is when a read actually REACHED upstream (see
+ * JobLiveness), so a stretch of unreadable reads ages it; reporting that as
+ * "upstream is active" would manufacture a confirmation nobody made. Past
+ * LIVENESS_FRESH_MS the claim is dropped entirely rather than shown stale.
+ *
+ * @param {Partial<WidgetTask> | undefined} task
+ * @param {number} now
+ * @returns {{ upstream: string | null, checkedAgo: string | null, recoveryAction: string | null, runId: string | null }}
+ */
+export function deriveUpstreamEvidence(task, now) {
+  const liveness = task?.liveness;
+  const fresh = liveness != null && now - liveness.checkedAt <= LIVENESS_FRESH_MS;
+  const recoveryReason = task?.recovery?.reason;
+  return {
+    upstream: fresh ? (liveness.upstream === "active" ? "run executing" : "no positive signal") : null,
+    checkedAgo: fresh ? `${formatElapsed(now - liveness.checkedAt)} ago` : null,
+    // The card says what is being DONE, not just that something is wrong —
+    // a "recovering" state with no stated action reads as a stall.
+    recoveryAction: recoveryReason
+      ? "Re-reading the durable transcript for the final response — upstream work may still be active."
+      : null,
+    runId: task?.parentRunId ?? null,
+  };
 }
 
 /**
