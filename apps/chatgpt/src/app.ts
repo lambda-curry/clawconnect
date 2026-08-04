@@ -334,7 +334,9 @@ Pass sessionKey from a previous result to continue the same thread.`,
         name: "check_task",
         description: `Wait for a dispatched run_task job and collect its result. The only tool that waits — get_task is the immediate, non-blocking read.
 
-mode="wait" (default) blocks up to waitMs and returns early only on a terminal status: completed, completed_no_summary, or error. A timeout return is neither an error nor terminal — continuePolling is true, so just call again with the same jobId. There is no cap on how many times. Never submit a new run_task because a check_task timed out; the session-busy guard would reject the duplicate anyway.
+mode="wait" (default) blocks up to waitMs and returns early only on a terminal status: completed, completed_no_summary, or error. A timeout return is neither an error nor terminal — continuePolling is true, so call again with the same jobId. Never submit a new run_task because a check_task timed out; the session-busy guard would reject the duplicate anyway.
+
+Do not wait indefinitely inside one reply. Each individual wait is bounded, but chaining them is not: several consecutive 45s waits keep one response open for minutes with nothing visible happening, and that is what breaks the connection — the host gives up on a reply that produces no output for long enough, and the user sees a failure even though the job is fine. After roughly two or three waits (~2 minutes), stop waiting and end your reply: say the task is still running and give the jobId. The job is durable and keeps going without you, its progress card keeps updating on its own, and you or the user can pick it up with another check_task whenever. Ending the reply is a handoff, not an abandonment — a run that outlives one reply is normal, not a failure to report.
 
 mode="poll" returns as soon as any new log activity appears (still bounded by waitMs) — for live progress UIs, not for collecting a final result.
 
