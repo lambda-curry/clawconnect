@@ -41,7 +41,7 @@ function seededFleetStore(): string {
   const dir = mkdtempSync(join(tmpdir(), "clawconnect-fleet-store-"));
   tmpDirs.push(dir);
   writeFileSync(
-    join(dir, "test-agent.fleet.json"),
+    join(dir, "test-agent.attachments.json"),
     JSON.stringify([
       {
         sessionKey: "sess-1",
@@ -317,7 +317,7 @@ describe("check_task model-facing text carries the resume cursor", () => {
     for (const state of ["needs_input", "needs_permission"] as const) {
       const response = defaultFormatCheckTask(
         runningResult({
-          fleetAttachment: {
+          agentSession: {
             id: "att-1",
             runtime: "example-runtime",
             handle: "thr-abc123",
@@ -349,7 +349,7 @@ describe("check_task model-facing text carries the resume cursor", () => {
   it("says nothing when the blocked attachment belongs to a different turn", () => {
     const response = defaultFormatCheckTask(
       runningResult({
-        fleetAttachment: {
+        agentSession: {
           id: "att-1",
           runtime: "example-runtime",
           handle: "thr-abc123",
@@ -413,7 +413,7 @@ describe("a terminal turn whose delegated session is waiting on a human", () => 
     const response = defaultFormatCheckTask(
       terminalResult({
         summary: "This turn produced no result of its own…",
-        fleetAttachment: blockedAttachment,
+        agentSession: blockedAttachment,
         terminalReason: "delegate-blocked:needs_input",
       }),
     );
@@ -438,7 +438,7 @@ describe("a terminal turn whose delegated session is waiting on a human", () => 
       defaultFormatCheckTask(
         terminalResult({
           summary: "the answer",
-          fleetAttachment: { ...blockedAttachment, status: "running" },
+          agentSession: { ...blockedAttachment, status: "running" },
         }),
       ).content[0].text,
     );
@@ -494,10 +494,10 @@ describe("production entrypoint wiring — FleetAdapter", () => {
    */
   it("createMcpServer reloads persisted attachment lineage when the deployment configures a directory", () => {
     const dir = seededFleetStore();
-    const { pool } = createMcpServer({ registry: fakeRegistry(), fleetStoreDir: dir });
+    const { pool } = createMcpServer({ registry: fakeRegistry(), attachmentStoreDir: dir });
     // Reachable without a request having touched this agent first: an agent
     // nobody has queried since the restart would otherwise look unattached.
-    expect(pool.forAgent("test-agent").sessions.getFleetAttachment("sess-1")).toMatchObject({
+    expect(pool.forAgent("test-agent").sessions.getAgentSessionAttachment("sess-1")).toMatchObject({
       runtime: "example-runtime",
       handle: "thr-abc123",
       status: "needs_input",
@@ -507,7 +507,7 @@ describe("production entrypoint wiring — FleetAdapter", () => {
   it("stays fully in-memory when no directory is configured, exactly as before", () => {
     const dir = seededFleetStore();
     const { pool } = createMcpServer({ registry: fakeRegistry() });
-    expect(pool.forAgent("test-agent").sessions.getFleetAttachment("sess-1")).toBeUndefined();
-    expect(readdirSync(dir)).toEqual(["test-agent.fleet.json"]);
+    expect(pool.forAgent("test-agent").sessions.getAgentSessionAttachment("sess-1")).toBeUndefined();
+    expect(readdirSync(dir)).toEqual(["test-agent.attachments.json"]);
   });
 });

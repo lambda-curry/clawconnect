@@ -125,7 +125,7 @@ export function defaultFormatCheckTask(result: CheckTaskResult): McpToolResponse
           : `Task is actively running (this is a non-terminal timeout, not an error). Call check_task again with the same jobId to continue waiting; pass knownLogCount=${snapshot.logCursor} to resume the log window.`,
       // Same key and same type as the terminal branch below, so a client does
       // not have to branch on job phase to read a blocked delegation.
-      ...(blocked ? { blockedDelegation: blocked.notice, delegatedSession: snapshot.fleetAttachment } : {}),
+      ...(blocked ? { blockedDelegation: blocked.notice, delegatedSession: snapshot.agentSession } : {}),
     };
     return {
       content: [{ type: "text" as const, text: JSON.stringify(payload) }],
@@ -156,7 +156,7 @@ export function defaultFormatCheckTask(result: CheckTaskResult): McpToolResponse
     ...(blockedNotice
       ? {
           blockedDelegation: blockedNotice,
-          delegatedSession: snapshot.fleetAttachment,
+          delegatedSession: snapshot.agentSession,
           terminalReason: snapshot.terminalReason,
         }
       : {}),
@@ -218,8 +218,8 @@ export function createMcpServer(config: {
    */
   agentSessionRuntimes?: AgentSessionRuntimeRegistry;
   /**
-   * Directory for per-agent attachment-lineage files (`<agentId>.fleet.json`,
-   * see fleet-attachment-store.ts). Attachment lineage is durable state the
+   * Directory for per-agent attachment-lineage files (`<agentId>.attachments.json`,
+   * see attachment-store.ts). Attachment lineage is durable state the
    * managed-session model depends on — which conversation is delegated to
    * which session, and its replacement history — so a stdio server that
    * restarts (the host reconnects, the machine sleeps) otherwise loses every
@@ -232,7 +232,7 @@ export function createMcpServer(config: {
    * off, unchanged: an in-flight job belongs to a live stdio connection that a
    * restart ends anyway, while an attachment outlives it.
    */
-  fleetStoreDir?: string;
+  attachmentStoreDir?: string;
 }) {
   const server = new McpServer({
     name: "ClawConnect",
@@ -244,13 +244,13 @@ export function createMcpServer(config: {
     config.registry,
     undefined,
     fleetAdapter,
-    config.fleetStoreDir,
+    config.attachmentStoreDir,
     config.agentSessionRuntimes,
   );
   // Rehydrate every configured agent's persisted attachment lineage now, not
   // lazily on the first request that happens to touch one — an agent nobody
   // has queried since the restart would otherwise look unattached.
-  if (config.fleetStoreDir) pool.warmAll();
+  if (config.attachmentStoreDir) pool.warmAll();
 
   const provider = config.provider ?? {};
   const defaultMode = provider.defaultCheckMode ?? "wait";

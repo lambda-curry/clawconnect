@@ -58,7 +58,7 @@ export function buildGetTaskStructuredContent(result: FoundCheckTaskResult, deta
     // under a detail preset. Absent entirely when there is no attachment
     // (buildSnapshot never sets the key), so this stays undefined for every
     // session that has never used Fleet.
-    fleetAttachment: snapshot.fleetAttachment,
+    agentSession: snapshot.agentSession,
   };
   if (d === "summary" || has("summary")) payload.summary = snapshot.summary;
   if (has("updates")) {

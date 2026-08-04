@@ -2,8 +2,8 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { JsonFileFleetAttachmentStore } from "./fleet-attachment-store.ts";
-import type { SessionFleetState } from "./types.ts";
+import { JsonFileAttachmentStore } from "./attachment-store.ts";
+import type { SessionAttachmentState } from "./types.ts";
 
 let dirs: string[] = [];
 afterEach(() => {
@@ -17,7 +17,7 @@ function tmpFilePath(name = "fleet.json"): string {
   return join(dir, name);
 }
 
-const sample: SessionFleetState = {
+const sample: SessionAttachmentState = {
   sessionKey: "agent:main:main:thread:s1",
   currentAttachmentId: "att-1",
   attachments: {
@@ -34,9 +34,9 @@ const sample: SessionFleetState = {
   },
 };
 
-describe("JsonFileFleetAttachmentStore", () => {
+describe("JsonFileAttachmentStore", () => {
   it("load() on a missing file returns an empty array, no error", () => {
-    const store = new JsonFileFleetAttachmentStore(tmpFilePath());
+    const store = new JsonFileAttachmentStore(tmpFilePath());
     expect(store.load()).toEqual([]);
   });
 
@@ -44,14 +44,14 @@ describe("JsonFileFleetAttachmentStore", () => {
     const dir = mkdtempSync(join(tmpdir(), "clawconnect-fleetstore-test-"));
     dirs.push(dir);
     const filePath = join(dir, "nested", "deeper", "fleet.json");
-    const store = new JsonFileFleetAttachmentStore(filePath);
+    const store = new JsonFileAttachmentStore(filePath);
     store.save([sample]);
     expect(store.load()).toEqual([sample]);
   });
 
   it("save() with an empty array overwrites a previously non-empty file", () => {
     const filePath = tmpFilePath();
-    const store = new JsonFileFleetAttachmentStore(filePath);
+    const store = new JsonFileAttachmentStore(filePath);
     store.save([sample]);
     expect(store.load()).toEqual([sample]);
     store.save([]);
@@ -61,14 +61,14 @@ describe("JsonFileFleetAttachmentStore", () => {
   it("load() on corrupt JSON returns an empty array instead of throwing", () => {
     const filePath = tmpFilePath();
     writeFileSync(filePath, "{ not valid json");
-    const store = new JsonFileFleetAttachmentStore(filePath);
+    const store = new JsonFileAttachmentStore(filePath);
     expect(store.load()).toEqual([]);
   });
 
   it("load() on a file containing a non-array JSON value returns an empty array", () => {
     const filePath = tmpFilePath();
     writeFileSync(filePath, JSON.stringify({ not: "an array" }));
-    const store = new JsonFileFleetAttachmentStore(filePath);
+    const store = new JsonFileAttachmentStore(filePath);
     expect(store.load()).toEqual([]);
   });
 
@@ -76,14 +76,14 @@ describe("JsonFileFleetAttachmentStore", () => {
     const dir = mkdtempSync(join(tmpdir(), "clawconnect-fleetstore-test-"));
     dirs.push(dir);
     const filePath = join(dir, "fleet.json");
-    new JsonFileFleetAttachmentStore(filePath).save([sample]);
+    new JsonFileAttachmentStore(filePath).save([sample]);
     expect(existsSync(`${filePath}.tmp`)).toBe(false);
     expect(existsSync(filePath)).toBe(true);
   });
 
   it("preserves superseded lineage across a round-trip — old records are never dropped", () => {
     const filePath = tmpFilePath();
-    const withLineage: SessionFleetState = {
+    const withLineage: SessionAttachmentState = {
       sessionKey: "agent:main:main:thread:s2",
       currentAttachmentId: "att-2",
       attachments: {
@@ -99,7 +99,7 @@ describe("JsonFileFleetAttachmentStore", () => {
         },
       },
     };
-    const store = new JsonFileFleetAttachmentStore(filePath);
+    const store = new JsonFileAttachmentStore(filePath);
     store.save([withLineage]);
     const reloaded = store.load();
     expect(reloaded).toEqual([withLineage]);

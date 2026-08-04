@@ -56,6 +56,44 @@ Register only the callbacks you can actually honor. Capabilities are derived
 from what you supply, so an absent callback becomes a precise
 `unsupported_operation` for anyone who asks, rather than a silent no-op.
 
+### …or from a shipped binary, without embedding
+
+The code above only works if you construct the server yourself. If you run the
+published `clawconnect-mcp` binary or the ChatGPT app as-is, name one or more ES
+modules instead — the same trust level as `~/.clawconnect/agents.json`, and
+operator configuration only, never anything a caller or an agent can influence:
+
+```bash
+CLAWCONNECT_AGENT_SESSION_RUNTIME_MODULES=/opt/acme/runtime-bridge/register.mjs
+```
+
+Each module exports `registerAgentSessionRuntimes(registry)` (or a default
+function of the same shape) and registers whatever it can answer for:
+
+```js
+export function registerAgentSessionRuntimes(registry) {
+  registry.register({
+    id: "example-runtime",
+    provider: "example-provider",
+    inspect: (ref, opts) => /* your own transport */,
+    continue: (ref, request, opts) => /* … */,
+  });
+}
+```
+
+Specifiers are comma- or newline-separated and may be bare package names,
+absolute paths, or paths relative to the process cwd. Loading **never throws**:
+a module that is missing, fails to import, exports no registrar, or throws while
+registering is logged and skipped, because every task that does not involve a
+delegation still has to work. Unset, nothing is registered at all.
+
+Attachment lineage survives a restart wherever the deployment puts it —
+`CLAWCONNECT_ATTACHMENT_STORE_DIR` for the stdio server (default
+`~/.clawconnect/attachments`); the ChatGPT app persists alongside its job store.
+
+See [runtime-registration.md](../architecture/runtime-registration.md) for the
+full wiring reference.
+
 ## 2. Tell a task which session it is attached to
 
 Include a marker in the `context` field of the `run_task` call. ClawConnect

@@ -255,6 +255,11 @@ createMcpServer({ registry, agentSessionRuntimes: registerHostRuntime(client) })
 createApp(registry, { agentSessionRuntimes: registerHostRuntime(client) });
 ```
 
+An operator running a *published binary* instead names ES modules to load, via
+`CLAWCONNECT_AGENT_SESSION_RUNTIME_MODULES` — same trust level as
+`agents.json`, and never influenced by a caller or an agent. Without it nothing
+is registered at all; see [runtime-registration.md](runtime-registration.md).
+
 Neither entry point registers a runtime on its own. See
 [the integration guide](../guides/runtime-integration.md) for the full
 inspect/continue/detach walkthrough.

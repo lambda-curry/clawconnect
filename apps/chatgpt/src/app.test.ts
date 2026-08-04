@@ -243,7 +243,7 @@ describe("check_task model-facing text carries the resume cursor", () => {
     for (const state of ["needs_input", "needs_permission"] as const) {
       const text = checkTaskText(
         runningSnapshot({
-          fleetAttachment: {
+          agentSession: {
             id: "att-1",
             runtime: "example-runtime",
             handle: "thr-abc123",
@@ -269,7 +269,7 @@ describe("check_task model-facing text carries the resume cursor", () => {
   it("a running response says nothing when the blocked attachment belongs to a different turn", () => {
     const text = checkTaskText(
       runningSnapshot({
-        fleetAttachment: {
+        agentSession: {
           id: "att-1",
           runtime: "example-runtime",
           handle: "thr-abc123",
@@ -298,7 +298,7 @@ describe("check_task model-facing text carries the resume cursor", () => {
     const snapshot = runningSnapshot({
       status: "completed_no_summary",
       summary: "Stream finished with no response collected.",
-      fleetAttachment: {
+      agentSession: {
         id: "att-1",
         runtime: "example-runtime",
         handle: "thr-abc123",
@@ -325,7 +325,7 @@ describe("check_task model-facing text carries the resume cursor", () => {
       status: "needs_input" as const,
       delegatedTurnId: "job-0",
     };
-    expect(checkTaskText(runningSnapshot({ status: "completed", summary: "the answer", fleetAttachment: attachment }), true)).toBe(
+    expect(checkTaskText(runningSnapshot({ status: "completed", summary: "the answer", agentSession: attachment }), true)).toBe(
       "the answer",
     );
     expect(
@@ -333,7 +333,7 @@ describe("check_task model-facing text carries the resume cursor", () => {
         runningSnapshot({
           status: "completed",
           summary: "the answer",
-          fleetAttachment: { ...attachment, status: "running", delegatedTurnId: "job-1" },
+          agentSession: { ...attachment, status: "running", delegatedTurnId: "job-1" },
         }),
         true,
       ),

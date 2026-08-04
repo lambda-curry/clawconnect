@@ -32,13 +32,13 @@ console.error(
 );
 
 // Managed-session wiring, both halves of it (see core's runtime-modules.ts and
-// fleet-attachment-store.ts). Absent CLAWCONNECT_AGENT_SESSION_RUNTIME_MODULES
+// attachment-store.ts). Absent CLAWCONNECT_AGENT_SESSION_RUNTIME_MODULES
 // this is exactly the previous behavior — claude-fleet only — and the store
 // directory is inert until something actually attaches.
 const agentSessionRuntimes = await loadAgentSessionRuntimes();
-const fleetStoreDir =
-  process.env.CLAWCONNECT_FLEET_STORE_DIR?.trim() || join(homedir(), ".clawconnect", "attachments");
+const attachmentStoreDir =
+  process.env.CLAWCONNECT_ATTACHMENT_STORE_DIR?.trim() || join(homedir(), ".clawconnect", "attachments");
 
-const { server } = createMcpServer({ registry, agentSessionRuntimes, fleetStoreDir });
+const { server } = createMcpServer({ registry, agentSessionRuntimes, attachmentStoreDir });
 const transport = new StdioServerTransport();
 await server.connect(transport);

@@ -93,19 +93,19 @@ export type ResultSource = "parent" | "fleet-transcript" | "agent-session";
  *
  * Deliberately excludes "superseded"/"detached" too: those are lineage states
  * only session.ts's own replace/detach transitions may set, never a directive
- * directly — see FleetDirective.
+ * directly — see AgentSessionDirective.
  *
  * Named for Fleet because that is the name production already publishes; it
  * has always been the managed-session state type, and widening it is what lets
  * one record serve claude-fleet (terminal success "idle") and a service
  * runtime (terminal success "completed") without a second model.
  */
-export type FleetLiveStatus = Exclude<AgentSessionState, "unavailable" | "unknown">;
+export type AttachmentLiveStatus = Exclude<AgentSessionState, "unavailable" | "unknown">;
 
 /**
  * One conversation may have at most one CURRENT managed-session
  * attachment at a time, but every attachment it has ever had is kept (see
- * SessionFleetState) — `id` is ClawConnect's own identifier for this record,
+ * SessionAttachmentState) — `id` is ClawConnect's own identifier for this record,
  * distinct from `handle` (the session's own id in its runtime's namespace), so
  * replacement lineage can chain through `replacesAttachmentId` even if a
  * handle were ever reused.
@@ -114,7 +114,7 @@ export type FleetLiveStatus = Exclude<AgentSessionState, "unavailable" | "unknow
  * agent-session.ts): everything a runtime told us about the session, in one
  * vocabulary, written only through the guarded write-back in session.ts.
  */
-export type FleetAttachmentRecord = {
+export type AgentSessionAttachment = {
   id: string;
   /**
    * Which system owns this session's lifecycle. "claude-fleet" is the
@@ -131,14 +131,14 @@ export type FleetAttachmentRecord = {
    * Host whose runtime state owns this session. Optional: a service runtime's
    * session lives on a server, not on a machine ClawConnect can name, and the
    * neutral marker may legitimately omit it. The explicit
-   * `[[clawconnect:fleet]]` directive still requires one.
+   * `[[clawconnect:agent-session]]` directive still requires one.
    */
   host?: string;
   worktree?: string;
   remoteUrl?: string;
   attachedAt: number;
   lastObservedAt?: number;
-  status: FleetLiveStatus | "superseded" | "detached";
+  status: AttachmentLiveStatus | "superseded" | "detached";
   /** Set only on a record created by an explicit `replace` transition. */
   replacesAttachmentId?: string;
   /**
@@ -158,7 +158,7 @@ export type FleetAttachmentRecord = {
    * only from a genuinely completed turn (see COMPLETED_TURN_STATES in
    * agent-session.ts), never from a partial answer a running or blocked
    * session happened to have written. `summary` is capped (see
-   * FLEET_RESULT_SUMMARY_MAX in session.ts) — `outputRef` is the durable
+   * ATTACHMENT_RESULT_SUMMARY_MAX in session.ts) — `outputRef` is the durable
    * pointer (transcript path / session key) so the full text is always
    * re-derivable rather than duplicated unbounded here.
    */
@@ -208,21 +208,21 @@ export type FleetAttachmentRecord = {
  * detachment both leave their prior record in place with an updated status,
  * so the full lineage is always readable.
  */
-export type SessionFleetState = {
+export type SessionAttachmentState = {
   sessionKey: string;
   /** undefined when nothing is currently attached (never attached, or detached). */
   currentAttachmentId?: string;
-  attachments: Record<string, FleetAttachmentRecord>;
+  attachments: Record<string, AgentSessionAttachment>;
 };
 
 /**
  * Structured directive the owning host embeds in TaskInput.context to drive an
- * explicit attachment transition — parsed and stripped by fleet-handoff.ts
+ * explicit attachment transition — parsed and stripped by session-handoff.ts
  * before the message reaches the agent. See docs/architecture/2026-08-02-
  * managed-fleet-attachment-plan.md §4; this is deliberately not a new public
  * MCP tool.
  */
-export type FleetDirective =
+export type AgentSessionDirective =
   | {
       op: "attach" | "replace";
       /** Defaults to "claude-fleet" when omitted — the runtime this directive shape originally described. */
@@ -236,11 +236,11 @@ export type FleetDirective =
       metadata?: Record<string, string>;
       /** Required for "replace"; ignored for "attach". */
       reason?: string;
-      status?: FleetLiveStatus;
+      status?: AttachmentLiveStatus;
     }
   | {
       op: "continue";
-      status?: FleetLiveStatus;
+      status?: AttachmentLiveStatus;
       /**
        * When present, the follow-up turn to deliver to the attached session
        * through its runtime's `continue` callback. Omit for the historical
@@ -261,7 +261,7 @@ export type FleetDirective =
        */
       stopRuntime?: boolean;
     }
-  | { op: "inspect"; status?: FleetLiveStatus };
+  | { op: "inspect"; status?: AttachmentLiveStatus };
 
 export type JobRecoveryState = {
   /**
@@ -414,8 +414,8 @@ export type JobSnapshot = {
   continuationState?: ContinuationState;
   resultSource?: ResultSource;
   terminalReason?: string;
-  /** The session's CURRENT Fleet attachment, if any — not the full lineage. See FleetAttachmentRecord. */
-  fleetAttachment?: FleetAttachmentRecord;
+  /** The session's CURRENT Fleet attachment, if any — not the full lineage. See AgentSessionAttachment. */
+  agentSession?: AgentSessionAttachment;
   /**
    * OPAQUE cursor. Pass it back verbatim as the next call's `knownLogCount`
    * to resume exactly where this snapshot left off — never a duplicate,
@@ -542,7 +542,7 @@ export type SessionInspectResult =
       /** mode="tasks": every job ever submitted under this session, newest first. Plain core surface — not UI-specific. */
       tasks?: TaskSummary[];
       /** The session's CURRENT Fleet attachment, if any — not the full lineage. */
-      fleetAttachment?: FleetAttachmentRecord;
+      agentSession?: AgentSessionAttachment;
     };
 
 export type CheckTaskOpts = {

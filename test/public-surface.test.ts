@@ -106,13 +106,24 @@ describe("public surface stays host-neutral", () => {
     expect(offenders(walk(REPO_ROOT, isMarkdown), BANNED_REFERENCES)).toEqual([]);
   });
 
-  it("keeps the runtime seam documented as optional", () => {
-    // The one claim in the boundary doc that the code can actually contradict:
-    // no entry point may register a runtime of its own.
+  it("keeps the runtime seam documented as optional", async () => {
     const boundary = readFileSync(join(REPO_ROOT, "docs/architecture/runtime-boundary.md"), "utf8");
     expect(boundary).toMatch(/registers no runtime/);
-    for (const entry of ["packages/mcp/src/bin.ts", "apps/chatgpt/src/index.ts"]) {
-      expect(readFileSync(join(REPO_ROOT, entry), "utf8")).not.toMatch(/AgentSessionRuntimeRegistry/);
-    }
+
+    // Behavioral, not textual. An earlier version of this test grepped the
+    // entrypoints for the registry class name; once loading moved behind
+    // loadAgentSessionRuntimes() that grep passed for the wrong reason. Assert
+    // the actual invariant instead: with no module named, nothing is
+    // registered, so a default install cannot reach any runtime.
+    const { loadAgentSessionRuntimes, RUNTIME_MODULES_ENV } = await import(
+      "../packages/core/src/runtime-modules.ts"
+    );
+    await expect(loadAgentSessionRuntimes(undefined)).resolves.toBeUndefined();
+    await expect(loadAgentSessionRuntimes("")).resolves.toBeUndefined();
+
+    // And the operator-facing way in is documented, or the seam is unreachable
+    // in practice from a shipped binary — the gap that motivated it.
+    const guide = readFileSync(join(REPO_ROOT, "docs/guides/runtime-integration.md"), "utf8");
+    expect(guide).toContain(RUNTIME_MODULES_ENV);
   });
 });

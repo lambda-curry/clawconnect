@@ -1,26 +1,26 @@
 import { describe, expect, it } from "vitest";
-import { parseAgentSessionMarker, parseFleetDirective, parseSessionHandoff } from "./fleet-handoff.ts";
+import { parseAgentSessionMarker, parseAgentSessionDirective, parseSessionHandoff } from "./session-handoff.ts";
 
 function block(obj: unknown): string {
-  return `[[clawconnect:fleet]]${JSON.stringify(obj)}[[/clawconnect:fleet]]`;
+  return `[[clawconnect:agent-session]]${JSON.stringify(obj)}[[/clawconnect:agent-session]]`;
 }
 
 function marker(obj: unknown): string {
   return `<agent-session>${JSON.stringify(obj)}</agent-session>`;
 }
 
-describe("parseFleetDirective", () => {
+describe("parseAgentSessionDirective", () => {
   it("returns undefined for text with no directive block", () => {
-    expect(parseFleetDirective(undefined)).toBeUndefined();
-    expect(parseFleetDirective("")).toBeUndefined();
-    expect(parseFleetDirective("plain context, nothing structured here")).toBeUndefined();
+    expect(parseAgentSessionDirective(undefined)).toBeUndefined();
+    expect(parseAgentSessionDirective("")).toBeUndefined();
+    expect(parseAgentSessionDirective("plain context, nothing structured here")).toBeUndefined();
   });
 
   it("parses an attach directive and strips it from the text", () => {
     const before = "Some preamble.\n\n";
     const after = "\n\nMore instructions.";
     const text = before + block({ op: "attach", handle: "cf-foo", host: "workstation-1", providerSessionId: "prov-1", worktree: "/w" }) + after;
-    const result = parseFleetDirective(text);
+    const result = parseAgentSessionDirective(text);
     expect(result).toBeDefined();
     expect(result?.directive).toEqual({
       op: "attach",
@@ -35,54 +35,54 @@ describe("parseFleetDirective", () => {
   });
 
   it("parses a replace directive requiring a reason", () => {
-    const withReason = parseFleetDirective(block({ op: "replace", handle: "cf-bar", host: "workstation-1", reason: "stale worktree" }));
+    const withReason = parseAgentSessionDirective(block({ op: "replace", handle: "cf-bar", host: "workstation-1", reason: "stale worktree" }));
     expect(withReason?.directive).toMatchObject({ op: "replace", handle: "cf-bar", reason: "stale worktree" });
 
-    const withoutReason = parseFleetDirective(block({ op: "replace", handle: "cf-bar", host: "workstation-1" }));
+    const withoutReason = parseAgentSessionDirective(block({ op: "replace", handle: "cf-bar", host: "workstation-1" }));
     expect(withoutReason).toBeUndefined();
   });
 
   it("parses continue, detach (with reason), and inspect", () => {
-    expect(parseFleetDirective(block({ op: "continue" }))?.directive).toEqual({ op: "continue" });
-    expect(parseFleetDirective(block({ op: "detach", reason: "task finished" }))?.directive).toEqual({
+    expect(parseAgentSessionDirective(block({ op: "continue" }))?.directive).toEqual({ op: "continue" });
+    expect(parseAgentSessionDirective(block({ op: "detach", reason: "task finished" }))?.directive).toEqual({
       op: "detach",
       reason: "task finished",
     });
-    expect(parseFleetDirective(block({ op: "detach" }))).toBeUndefined();
-    expect(parseFleetDirective(block({ op: "inspect" }))?.directive).toEqual({ op: "inspect" });
+    expect(parseAgentSessionDirective(block({ op: "detach" }))).toBeUndefined();
+    expect(parseAgentSessionDirective(block({ op: "inspect" }))?.directive).toEqual({ op: "inspect" });
   });
 
   it("rejects an unknown op", () => {
-    expect(parseFleetDirective(block({ op: "delete-everything", handle: "cf-foo", host: "workstation-1" }))).toBeUndefined();
+    expect(parseAgentSessionDirective(block({ op: "delete-everything", handle: "cf-foo", host: "workstation-1" }))).toBeUndefined();
   });
 
   it("rejects malformed JSON inside the block without throwing", () => {
-    const text = "[[clawconnect:fleet]]{ not valid json[[/clawconnect:fleet]]";
-    expect(() => parseFleetDirective(text)).not.toThrow();
-    expect(parseFleetDirective(text)).toBeUndefined();
+    const text = "[[clawconnect:agent-session]]{ not valid json[[/clawconnect:agent-session]]";
+    expect(() => parseAgentSessionDirective(text)).not.toThrow();
+    expect(parseAgentSessionDirective(text)).toBeUndefined();
   });
 
   it("rejects a handle that isn't a safe path segment (path traversal defense)", () => {
     for (const handle of ["../../etc/passwd", "/etc/passwd", "cf foo", "cf/foo", ""]) {
-      expect(parseFleetDirective(block({ op: "attach", handle, host: "workstation-1" }))).toBeUndefined();
+      expect(parseAgentSessionDirective(block({ op: "attach", handle, host: "workstation-1" }))).toBeUndefined();
     }
   });
 
   it("rejects attach/replace missing handle or host", () => {
-    expect(parseFleetDirective(block({ op: "attach", host: "workstation-1" }))).toBeUndefined();
-    expect(parseFleetDirective(block({ op: "attach", handle: "cf-foo" }))).toBeUndefined();
+    expect(parseAgentSessionDirective(block({ op: "attach", host: "workstation-1" }))).toBeUndefined();
+    expect(parseAgentSessionDirective(block({ op: "attach", handle: "cf-foo" }))).toBeUndefined();
   });
 
   it("parses an optional status the host reports directly, and drops an invalid one", () => {
-    expect(parseFleetDirective(block({ op: "continue", status: "needs_input" }))?.directive).toEqual({
+    expect(parseAgentSessionDirective(block({ op: "continue", status: "needs_input" }))?.directive).toEqual({
       op: "continue",
       status: "needs_input",
     });
-    expect(parseFleetDirective(block({ op: "continue", status: "superseded" }))?.directive).toEqual({
+    expect(parseAgentSessionDirective(block({ op: "continue", status: "superseded" }))?.directive).toEqual({
       op: "continue",
       status: undefined,
     });
-    expect(parseFleetDirective(block({ op: "inspect", status: "failed" }))?.directive).toEqual({
+    expect(parseAgentSessionDirective(block({ op: "inspect", status: "failed" }))?.directive).toEqual({
       op: "inspect",
       status: "failed",
     });
@@ -90,12 +90,12 @@ describe("parseFleetDirective", () => {
 
   it("only consumes the first directive block when two are present", () => {
     const text = block({ op: "attach", handle: "cf-first", host: "workstation-1" }) + " " + block({ op: "detach", reason: "second" });
-    const result = parseFleetDirective(text);
+    const result = parseAgentSessionDirective(text);
     expect(result?.directive).toMatchObject({ op: "attach", handle: "cf-first" });
   });
 
   it("carries a runtime, provider, and metadata through an explicit attach", () => {
-    const result = parseFleetDirective(
+    const result = parseAgentSessionDirective(
       block({
         op: "attach",
         runtime: "example-runtime",
@@ -116,27 +116,27 @@ describe("parseFleetDirective", () => {
   });
 
   it("rejects a malformed runtime id, and defaults an omitted one at the session layer", () => {
-    expect(parseFleetDirective(block({ op: "attach", runtime: "../evil", handle: "cf-foo", host: "workstation-1" }))).toBeUndefined();
+    expect(parseAgentSessionDirective(block({ op: "attach", runtime: "../evil", handle: "cf-foo", host: "workstation-1" }))).toBeUndefined();
     // Omitted here; session.ts fills in claude-fleet, the runtime this
     // directive shape originally described.
-    expect(parseFleetDirective(block({ op: "attach", handle: "cf-foo", host: "workstation-1" }))?.directive).not.toHaveProperty(
+    expect(parseAgentSessionDirective(block({ op: "attach", handle: "cf-foo", host: "workstation-1" }))?.directive).not.toHaveProperty(
       "runtime",
     );
   });
 
   it("parses a continue prompt and an explicit stopRuntime on detach", () => {
-    expect(parseFleetDirective(block({ op: "continue", prompt: "also update the docs" }))?.directive).toMatchObject({
+    expect(parseAgentSessionDirective(block({ op: "continue", prompt: "also update the docs" }))?.directive).toMatchObject({
       op: "continue",
       prompt: "also update the docs",
     });
-    expect(parseFleetDirective(block({ op: "detach", reason: "done", stopRuntime: true }))?.directive).toEqual({
+    expect(parseAgentSessionDirective(block({ op: "detach", reason: "done", stopRuntime: true }))?.directive).toEqual({
       op: "detach",
       reason: "done",
       stopRuntime: true,
     });
     // Ending someone else's agent session is not recoverable, so it is opt-in
     // only — anything short of a literal `true` leaves detach local.
-    expect(parseFleetDirective(block({ op: "detach", reason: "done", stopRuntime: "yes" }))?.directive).toEqual({
+    expect(parseAgentSessionDirective(block({ op: "detach", reason: "done", stopRuntime: "yes" }))?.directive).toEqual({
       op: "detach",
       reason: "done",
     });
@@ -144,12 +144,12 @@ describe("parseFleetDirective", () => {
 
   it("accepts the widened state vocabulary both runtimes need", () => {
     for (const status of ["needs_permission", "completed", "idle", "dead", "stale"]) {
-      expect(parseFleetDirective(block({ op: "inspect", status }))?.directive).toEqual({ op: "inspect", status });
+      expect(parseAgentSessionDirective(block({ op: "inspect", status }))?.directive).toEqual({ op: "inspect", status });
     }
     // "unavailable"/"unknown" describe a READ, not a session, and are never
     // stored as a status.
     for (const status of ["unavailable", "unknown"]) {
-      expect(parseFleetDirective(block({ op: "inspect", status }))?.directive).toEqual({ op: "inspect", status: undefined });
+      expect(parseAgentSessionDirective(block({ op: "inspect", status }))?.directive).toEqual({ op: "inspect", status: undefined });
     }
   });
 });

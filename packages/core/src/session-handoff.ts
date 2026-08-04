@@ -1,13 +1,13 @@
 import { coerceAgentSessionState, coerceMetadata, isValidRuntimeId } from "./agent-session.ts";
-import type { FleetDirective, FleetLiveStatus } from "./types.ts";
+import type { AgentSessionDirective, AttachmentLiveStatus } from "./types.ts";
 
 /**
  * A state a directive/marker may assert. The neutral vocabulary minus the two
  * values that describe a READ rather than a session — a producer telling us
  * "unavailable" is telling us about its own reachability, which is not
- * something ClawConnect stores as the session's status. See FleetLiveStatus.
+ * something ClawConnect stores as the session's status. See AttachmentLiveStatus.
  */
-function asLiveStatus(v: unknown): FleetLiveStatus | undefined {
+function asLiveStatus(v: unknown): AttachmentLiveStatus | undefined {
   const state = coerceAgentSessionState(v);
   return state && state !== "unavailable" && state !== "unknown" ? state : undefined;
 }
@@ -20,7 +20,7 @@ function asLiveStatus(v: unknown): FleetLiveStatus | undefined {
  * free-text context field and is stripped out before the message reaches the
  * agent, so the agent's prompt never sees raw directive JSON.
  */
-const DIRECTIVE_RE = /\[\[clawconnect:fleet\]\]([\s\S]*?)\[\[\/clawconnect:fleet\]\]/;
+const DIRECTIVE_RE = /\[\[clawconnect:agent-session\]\]([\s\S]*?)\[\[\/clawconnect:agent-session\]\]/;
 
 /**
  * The runtime-neutral marker every managed-session runtime already prints
@@ -46,8 +46,8 @@ const MARKER_RE = /<agent-session>\s*(\{[\s\S]*?\})\s*<\/agent-session>/;
  */
 const SAFE_HANDLE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
-export type ParsedFleetDirective = {
-  directive: FleetDirective;
+export type ParsedAgentSessionDirective = {
+  directive: AgentSessionDirective;
   /** `text` with the directive/marker block removed and surrounding whitespace trimmed. */
   strippedText: string;
 };
@@ -57,13 +57,13 @@ function asString(v: unknown): string | undefined {
 }
 
 /**
- * Validates and narrows a parsed JSON value into a FleetDirective. Returns
+ * Validates and narrows a parsed JSON value into a AgentSessionDirective. Returns
  * undefined for anything malformed — a bad directive is silently ignored
  * (the task still submits normally) rather than failing the whole run_task
  * call, matching this repo's existing "best-effort, never throws" posture
- * for auxiliary state (see job-store.ts/fleet-attachment-store.ts).
+ * for auxiliary state (see job-store.ts/attachment-store.ts).
  */
-function validateDirective(value: unknown): FleetDirective | undefined {
+function validateDirective(value: unknown): AgentSessionDirective | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const v = value as Record<string, unknown>;
 
@@ -119,7 +119,7 @@ function validateDirective(value: unknown): FleetDirective | undefined {
  * validation; in every undefined case the caller should treat `text` as
  * carrying no directive and use it unmodified.
  */
-export function parseFleetDirective(text: string | undefined): ParsedFleetDirective | undefined {
+export function parseAgentSessionDirective(text: string | undefined): ParsedAgentSessionDirective | undefined {
   if (!text) return undefined;
   const match = DIRECTIVE_RE.exec(text);
   if (!match) return undefined;
@@ -153,7 +153,7 @@ export function parseFleetDirective(text: string | undefined): ParsedFleetDirect
  * optional. `state` rides in as the initial status; anything outside the
  * neutral vocabulary is dropped rather than stored.
  */
-export function parseAgentSessionMarker(text: string | undefined): ParsedFleetDirective | undefined {
+export function parseAgentSessionMarker(text: string | undefined): ParsedAgentSessionDirective | undefined {
   if (!text) return undefined;
   const match = MARKER_RE.exec(text);
   if (!match) return undefined;
@@ -201,10 +201,10 @@ function stripMatch(text: string, match: RegExpExecArray): string {
 
 /**
  * The single parse boundary submitTask uses: an explicit
- * `[[clawconnect:fleet]]` directive wins when present (it can express every
+ * `[[clawconnect:agent-session]]` directive wins when present (it can express every
  * transition, not just attach), and a bare neutral marker is the fallback.
  * Both strip themselves out of the context before the agent ever sees it.
  */
-export function parseSessionHandoff(text: string | undefined): ParsedFleetDirective | undefined {
-  return parseFleetDirective(text) ?? parseAgentSessionMarker(text);
+export function parseSessionHandoff(text: string | undefined): ParsedAgentSessionDirective | undefined {
+  return parseAgentSessionDirective(text) ?? parseAgentSessionMarker(text);
 }

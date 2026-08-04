@@ -6,25 +6,25 @@ import {
   type AgentSessionObservation,
   type AgentSessionRef,
 } from "./agent-session.ts";
-import { FLEET_RESULT_SUMMARY_MAX, SessionManager } from "./session.ts";
+import { ATTACHMENT_RESULT_SUMMARY_MAX, SessionManager } from "./session.ts";
 import type { OpenClawGateway, RunObservation } from "./gateway.ts";
 import type { FleetAdapter, FleetHandoff } from "./fleet-adapter.ts";
-import type { FleetAttachmentStore } from "./fleet-attachment-store.ts";
+import type { AttachmentStore } from "./attachment-store.ts";
 import type { JobStore, PersistedJob } from "./job-store.ts";
-import { NO_SUMMARY_SENTINEL, type FleetAttachmentRecord, type GatewayEvent, type SessionFleetState } from "./types.ts";
+import { NO_SUMMARY_SENTINEL, type AgentSessionAttachment, type GatewayEvent, type SessionAttachmentState } from "./types.ts";
 
 /**
  * The managed, session-scoped Fleet attachment feature: attach/continue/
  * replace/detach/inspect transitions parsed from a structured directive in
- * TaskInput.context (see fleet-handoff.ts), persisted independently of job
- * lifecycle (see fleet-attachment-store.ts), and consulted as recovery order
+ * TaskInput.context (see session-handoff.ts), persisted independently of job
+ * lifecycle (see attachment-store.ts), and consulted as recovery order
  * tier 3 — ONLY after the parent's own live+transcript recovery has already
- * given up (see session.ts's tryFleetRecovery and its two call sites). See
+ * given up (see session.ts's tryAttachedSessionRecovery and its two call sites). See
  * docs/architecture/2026-08-02-managed-fleet-attachment-plan.md.
  */
 
-function fleetBlock(directive: Record<string, unknown>): string {
-  return `[[clawconnect:fleet]]${JSON.stringify(directive)}[[/clawconnect:fleet]]`;
+function directiveBlock(directive: Record<string, unknown>): string {
+  return `[[clawconnect:agent-session]]${JSON.stringify(directive)}[[/clawconnect:agent-session]]`;
 }
 
 /** Never settles chat() on its own — every fixture here drives completion explicitly via finishChat/failChat. */
@@ -73,17 +73,17 @@ function fakeGateway(
 
 function fakeFleetAdapter(
   opts: {
-    isLive?: boolean | ((a: FleetAttachmentRecord) => Promise<boolean>);
-    handoff?: FleetHandoff | null | ((a: FleetAttachmentRecord) => Promise<FleetHandoff | null>);
+    isLive?: boolean | ((a: AgentSessionAttachment) => Promise<boolean>);
+    handoff?: FleetHandoff | null | ((a: AgentSessionAttachment) => Promise<FleetHandoff | null>);
   } = {},
 ): FleetAdapter & {
-  isLiveCalls: FleetAttachmentRecord[];
-  handoffCalls: FleetAttachmentRecord[];
+  isLiveCalls: AgentSessionAttachment[];
+  handoffCalls: AgentSessionAttachment[];
   /** The signal each readTerminalHandoff call received — undefined means the caller forwarded none. */
   handoffSignals: (AbortSignal | undefined)[];
 } {
-  const isLiveCalls: FleetAttachmentRecord[] = [];
-  const handoffCalls: FleetAttachmentRecord[] = [];
+  const isLiveCalls: AgentSessionAttachment[] = [];
+  const handoffCalls: AgentSessionAttachment[] = [];
   const handoffSignals: (AbortSignal | undefined)[] = [];
   return {
     isLiveCalls,
@@ -119,21 +119,21 @@ function deferred<T>() {
  * restart) must see whatever the PREVIOUS instance most recently wrote, not
  * just whatever this fake was seeded with at construction.
  */
-class FakeFleetAttachmentStore implements FleetAttachmentStore {
-  saved: SessionFleetState[][] = [];
-  constructor(private preloaded: SessionFleetState[] = []) {}
-  load(): SessionFleetState[] {
+class FakeAttachmentStore implements AttachmentStore {
+  saved: SessionAttachmentState[][] = [];
+  constructor(private preloaded: SessionAttachmentState[] = []) {}
+  load(): SessionAttachmentState[] {
     return this.saved.at(-1) ?? this.preloaded;
   }
-  save(states: SessionFleetState[]): void {
+  save(states: SessionAttachmentState[]): void {
     this.saved.push(states);
   }
-  get latestSave(): SessionFleetState[] | undefined {
+  get latestSave(): SessionAttachmentState[] | undefined {
     return this.saved.at(-1);
   }
 }
 
-class FakeJobStoreForFleet implements JobStore {
+class FakeJobStoreForAttachments implements JobStore {
   saved: PersistedJob[][] = [];
   load(): PersistedJob[] {
     return [];
@@ -158,14 +158,14 @@ describe("Fleet attachment transitions", () => {
     const sessions = new SessionManager(ctrl.gateway);
     const job = sessions.submitTask({
       task: "do the thing",
-      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "workstation-1", providerSessionId: "prov-1", worktree: "/w" }),
+      context: directiveBlock({ op: "attach", handle: "cf-foo", host: "workstation-1", providerSessionId: "prov-1", worktree: "/w" }),
     });
 
-    const attachment = sessions.getFleetAttachment(job.sessionKey);
+    const attachment = sessions.getAgentSessionAttachment(job.sessionKey);
     expect(attachment).toMatchObject({ handle: "cf-foo", host: "workstation-1", providerSessionId: "prov-1", worktree: "/w", status: "starting" });
 
     const snapshot = sessions.buildSnapshot(job);
-    expect(snapshot.fleetAttachment).toEqual(attachment);
+    expect(snapshot.agentSession).toEqual(attachment);
   });
 
   it("the directive is stripped from the message sent to the agent", () => {
@@ -173,9 +173,9 @@ describe("Fleet attachment transitions", () => {
     const sessions = new SessionManager(ctrl.gateway);
     sessions.submitTask({
       task: "do the thing",
-      context: `before ${fleetBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" })} after`,
+      context: `before ${directiveBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" })} after`,
     });
-    expect(sessions.getFleetAttachment(sessions.listSessions()[0]?.sessionKey ?? "")).toBeDefined();
+    expect(sessions.getAgentSessionAttachment(sessions.listSessions()[0]?.sessionKey ?? "")).toBeDefined();
     // The prompt actually sent is reconstructed via job.prompt, which stores
     // the STRIPPED context — never the raw directive JSON.
     const job = sessions.getJob(sessions.listSessions()[0].lastJobId)!;
@@ -189,16 +189,16 @@ describe("Fleet attachment transitions", () => {
     const sessions = new SessionManager(ctrl.gateway);
     const first = sessions.submitTask({
       task: "first",
-      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
+      context: directiveBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
     });
     ctrl.finishChat("first done", 0);
     await wait();
 
-    const before = sessions.getFleetAttachment(first.sessionKey);
+    const before = sessions.getAgentSessionAttachment(first.sessionKey);
     // Second turn, same session, NO directive at all.
     const second = sessions.submitTask({ task: "second", sessionKey: first.sessionKey });
     expect(second.status).toBe("running"); // proves this is a REAL second turn, not a busy rejection
-    const after = sessions.getFleetAttachment(second.sessionKey);
+    const after = sessions.getAgentSessionAttachment(second.sessionKey);
     expect(after).toEqual(before);
   });
 
@@ -207,23 +207,23 @@ describe("Fleet attachment transitions", () => {
     const sessions = new SessionManager(ctrl.gateway);
     const job = sessions.submitTask({
       task: "first",
-      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
+      context: directiveBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
     });
-    const original = sessions.getFleetAttachment(job.sessionKey)!;
+    const original = sessions.getAgentSessionAttachment(job.sessionKey)!;
 
     ctrl.finishChat("done", 0);
     await wait();
     sessions.submitTask({
       task: "replace it",
       sessionKey: job.sessionKey,
-      context: fleetBlock({ op: "replace", handle: "cf-bar", host: "workstation-1", reason: "stale worktree" }),
+      context: directiveBlock({ op: "replace", handle: "cf-bar", host: "workstation-1", reason: "stale worktree" }),
     });
 
-    const current = sessions.getFleetAttachment(job.sessionKey)!;
+    const current = sessions.getAgentSessionAttachment(job.sessionKey)!;
     expect(current.handle).toBe("cf-bar");
     expect(current.replacesAttachmentId).toBe(original.id);
 
-    const lineage = sessions.getFleetLineage(job.sessionKey);
+    const lineage = sessions.getAgentSessionLineage(job.sessionKey);
     expect(lineage).toHaveLength(2);
     const superseded = lineage.find((a) => a.id === original.id)!;
     expect(superseded.status).toBe("superseded");
@@ -235,20 +235,20 @@ describe("Fleet attachment transitions", () => {
     const sessions = new SessionManager(ctrl.gateway);
     const job = sessions.submitTask({
       task: "first",
-      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
+      context: directiveBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
     });
-    const original = sessions.getFleetAttachment(job.sessionKey)!;
+    const original = sessions.getAgentSessionAttachment(job.sessionKey)!;
     ctrl.finishChat("done", 0);
     await wait();
 
     sessions.submitTask({
       task: "detach it",
       sessionKey: job.sessionKey,
-      context: fleetBlock({ op: "detach", reason: "task finished" }),
+      context: directiveBlock({ op: "detach", reason: "task finished" }),
     });
 
-    expect(sessions.getFleetAttachment(job.sessionKey)).toBeUndefined();
-    const lineage = sessions.getFleetLineage(job.sessionKey);
+    expect(sessions.getAgentSessionAttachment(job.sessionKey)).toBeUndefined();
+    const lineage = sessions.getAgentSessionLineage(job.sessionKey);
     const detached = lineage.find((a) => a.id === original.id)!;
     expect(detached.status).toBe("detached");
     expect(detached.reason).toBe("task finished");
@@ -259,7 +259,7 @@ describe("Fleet attachment transitions", () => {
     const sessions = new SessionManager(ctrl.gateway);
     const job = sessions.submitTask({
       task: "first",
-      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
+      context: directiveBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
     });
     ctrl.finishChat("done", 0);
     await wait();
@@ -267,10 +267,10 @@ describe("Fleet attachment transitions", () => {
     sessions.submitTask({
       task: "check in",
       sessionKey: job.sessionKey,
-      context: fleetBlock({ op: "continue", status: "needs_input" }),
+      context: directiveBlock({ op: "continue", status: "needs_input" }),
     });
 
-    const attachment = sessions.getFleetAttachment(job.sessionKey)!;
+    const attachment = sessions.getAgentSessionAttachment(job.sessionKey)!;
     expect(attachment.status).toBe("needs_input");
     // The job this ships alongside is unaffected — the attachment's status is
     // orthogonal to whether the parent job itself is terminal.
@@ -284,7 +284,7 @@ describe("Fleet attachment transitions", () => {
     const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
     const job = sessions.submitTask({
       task: "first",
-      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
+      context: directiveBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
     });
     ctrl.finishChat("done", 0);
     await wait();
@@ -292,10 +292,10 @@ describe("Fleet attachment transitions", () => {
     sessions.submitTask({
       task: "inspect with explicit status",
       sessionKey: job.sessionKey,
-      context: fleetBlock({ op: "inspect", status: "needs_input" }),
+      context: directiveBlock({ op: "inspect", status: "needs_input" }),
     });
 
-    expect(sessions.getFleetAttachment(job.sessionKey)?.status).toBe("needs_input");
+    expect(sessions.getAgentSessionAttachment(job.sessionKey)?.status).toBe("needs_input");
     expect(adapter.isLiveCalls).toHaveLength(0);
   });
 
@@ -306,14 +306,14 @@ describe("Fleet attachment transitions", () => {
     const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
     const job = sessions.submitTask({
       task: "first",
-      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
+      context: directiveBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
     });
     ctrl.finishChat("done", 0);
     await wait();
 
     // A plain inspect (no explicit status) — its isLive call is now in
     // flight, deliberately held open.
-    sessions.submitTask({ task: "inspect", sessionKey: job.sessionKey, context: fleetBlock({ op: "inspect" }) });
+    sessions.submitTask({ task: "inspect", sessionKey: job.sessionKey, context: directiveBlock({ op: "inspect" }) });
     expect(adapter.isLiveCalls).toHaveLength(1);
     ctrl.finishChat("inspect turn done", 1);
     await wait();
@@ -322,10 +322,10 @@ describe("Fleet attachment transitions", () => {
     sessions.submitTask({
       task: "check in",
       sessionKey: job.sessionKey,
-      context: fleetBlock({ op: "continue", status: "needs_input" }),
+      context: directiveBlock({ op: "continue", status: "needs_input" }),
     });
     ctrl.finishChat("continue turn done", 2);
-    expect(sessions.getFleetAttachment(job.sessionKey)?.status).toBe("needs_input");
+    expect(sessions.getAgentSessionAttachment(job.sessionKey)?.status).toBe("needs_input");
     // The explicit-status continue must not have ALSO started a new probe.
     expect(adapter.isLiveCalls).toHaveLength(1);
 
@@ -335,7 +335,7 @@ describe("Fleet attachment transitions", () => {
 
     // Must still read needs_input — the callback re-reads fresh state rather
     // than trusting the "starting"/whatever it closed over before the await.
-    expect(sessions.getFleetAttachment(job.sessionKey)?.status).toBe("needs_input");
+    expect(sessions.getAgentSessionAttachment(job.sessionKey)?.status).toBe("needs_input");
   });
 
   it("no attachment triggers no adapter call at all (no global Fleet scan)", () => {
@@ -351,22 +351,22 @@ describe("Fleet attachment transitions", () => {
 
 describe("Fleet attachment restart persistence", () => {
   it("attachment survives a connector restart via a fresh SessionManager over the same store", () => {
-    const store = new FakeFleetAttachmentStore();
+    const store = new FakeAttachmentStore();
     const ctrl = fakeGateway();
     const before = new SessionManager(ctrl.gateway, "main", undefined, store);
     const job = before.submitTask({
       task: "first",
-      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "workstation-1", providerSessionId: "prov-1" }),
+      context: directiveBlock({ op: "attach", handle: "cf-foo", host: "workstation-1", providerSessionId: "prov-1" }),
     });
-    const original = before.getFleetAttachment(job.sessionKey)!;
+    const original = before.getAgentSessionAttachment(job.sessionKey)!;
     expect(store.latestSave).toBeDefined();
 
     // Simulate a restart: a brand new SessionManager, same underlying store.
     const after = new SessionManager(fakeGateway().gateway, "main", undefined, store);
-    expect(after.getFleetAttachment(job.sessionKey)).toEqual(original);
+    expect(after.getAgentSessionAttachment(job.sessionKey)).toEqual(original);
   });
 
-  it("old PersistedJob/SessionFleetState records without the new fields are still readable", () => {
+  it("old PersistedJob/SessionAttachmentState records without the new fields are still readable", () => {
     // A job-store record from before parentRunId existed.
     const legacyJobStore: JobStore = {
       load: () => [
@@ -391,22 +391,22 @@ describe("Fleet attachment restart persistence", () => {
     // A session with no Fleet attachment at all (the common case for every
     // pre-existing record — this feature is greenfield) reads back as "no
     // attachment", not an error.
-    const emptyFleetStore: FleetAttachmentStore = { load: () => [], save: () => {} };
-    const withEmptyFleet = new SessionManager(fakeGateway().gateway, "main", undefined, emptyFleetStore);
-    expect(withEmptyFleet.getFleetAttachment("agent:main:main:thread:legacy")).toBeUndefined();
+    const emptyAttachmentStore: AttachmentStore = { load: () => [], save: () => {} };
+    const withEmptyAttachments = new SessionManager(fakeGateway().gateway, "main", undefined, emptyAttachmentStore);
+    expect(withEmptyAttachments.getAgentSessionAttachment("agent:main:main:thread:legacy")).toBeUndefined();
   });
 
   it("a currentAttachmentId with no matching attachments entry never throws — reads as no current attachment", () => {
-    const malformed: SessionFleetState = {
+    const malformed: SessionAttachmentState = {
       sessionKey: "agent:main:main:thread:malformed-1",
       currentAttachmentId: "ghost-id",
       attachments: {}, // no entry for ghost-id
     };
-    const store: FleetAttachmentStore = { load: () => [malformed], save: () => {} };
+    const store: AttachmentStore = { load: () => [malformed], save: () => {} };
     expect(() => new SessionManager(fakeGateway().gateway, "main", undefined, store)).not.toThrow();
     const sessions = new SessionManager(fakeGateway().gateway, "main", undefined, store);
-    expect(sessions.getFleetAttachment(malformed.sessionKey)).toBeUndefined();
-    expect(sessions.getFleetLineage(malformed.sessionKey)).toEqual([]);
+    expect(sessions.getAgentSessionAttachment(malformed.sessionKey)).toBeUndefined();
+    expect(sessions.getAgentSessionLineage(malformed.sessionKey)).toEqual([]);
   });
 
   it("a record missing the attachments field entirely never throws, and valid lineage in a DIFFERENT session in the same load() is preserved", () => {
@@ -414,8 +414,8 @@ describe("Fleet attachment restart persistence", () => {
       sessionKey: "agent:main:main:thread:malformed-2",
       currentAttachmentId: "some-id",
       // attachments field entirely absent — e.g. a truncated/hand-edited file.
-    } as unknown as SessionFleetState;
-    const validRecord: FleetAttachmentRecord = {
+    } as unknown as SessionAttachmentState;
+    const validRecord: AgentSessionAttachment = {
       id: "att-valid",
       runtime: "claude-fleet",
       handle: "cf-good",
@@ -423,25 +423,25 @@ describe("Fleet attachment restart persistence", () => {
       attachedAt: 1000,
       status: "running",
     };
-    const validState: SessionFleetState = {
+    const validState: SessionAttachmentState = {
       sessionKey: "agent:main:main:thread:valid",
       currentAttachmentId: "att-valid",
       attachments: { "att-valid": validRecord },
     };
-    const store: FleetAttachmentStore = { load: () => [missingAttachmentsField, validState], save: () => {} };
+    const store: AttachmentStore = { load: () => [missingAttachmentsField, validState], save: () => {} };
     const sessions = new SessionManager(fakeGateway().gateway, "main", undefined, store);
 
-    expect(() => sessions.getFleetAttachment(missingAttachmentsField.sessionKey)).not.toThrow();
-    expect(sessions.getFleetAttachment(missingAttachmentsField.sessionKey)).toBeUndefined();
-    expect(sessions.getFleetLineage(missingAttachmentsField.sessionKey)).toEqual([]);
+    expect(() => sessions.getAgentSessionAttachment(missingAttachmentsField.sessionKey)).not.toThrow();
+    expect(sessions.getAgentSessionAttachment(missingAttachmentsField.sessionKey)).toBeUndefined();
+    expect(sessions.getAgentSessionLineage(missingAttachmentsField.sessionKey)).toEqual([]);
 
     // The OTHER session's valid record in the same store load is untouched.
-    expect(sessions.getFleetAttachment(validState.sessionKey)).toEqual(validRecord);
-    expect(sessions.getFleetLineage(validState.sessionKey)).toEqual([validRecord]);
+    expect(sessions.getAgentSessionAttachment(validState.sessionKey)).toEqual(validRecord);
+    expect(sessions.getAgentSessionLineage(validState.sessionKey)).toEqual([validRecord]);
   });
 
   it("a currentAttachmentId that IS resolvable, alongside other malformed entries in the same session's attachments, preserves the valid lineage", () => {
-    const validRecord: FleetAttachmentRecord = {
+    const validRecord: AgentSessionAttachment = {
       id: "att-good",
       runtime: "claude-fleet",
       handle: "cf-good",
@@ -457,29 +457,29 @@ describe("Fleet attachment restart persistence", () => {
         "att-junk": "not even an object", // a corrupted entry alongside a valid one
         "att-null": null,
       },
-    } as unknown as SessionFleetState;
-    const store: FleetAttachmentStore = { load: () => [mixed], save: () => {} };
+    } as unknown as SessionAttachmentState;
+    const store: AttachmentStore = { load: () => [mixed], save: () => {} };
     const sessions = new SessionManager(fakeGateway().gateway, "main", undefined, store);
 
-    expect(sessions.getFleetAttachment(mixed.sessionKey)).toEqual(validRecord);
-    expect(sessions.getFleetLineage(mixed.sessionKey)).toEqual([validRecord]);
+    expect(sessions.getAgentSessionAttachment(mixed.sessionKey)).toEqual(validRecord);
+    expect(sessions.getAgentSessionLineage(mixed.sessionKey)).toEqual([validRecord]);
   });
 
-  it("buildSnapshot for a job on a session with malformed persisted fleet state never throws and simply omits fleetAttachment", () => {
+  it("buildSnapshot for a job on a session with malformed persisted fleet state never throws and simply omits agentSession", () => {
     const malformed = {
       sessionKey: "agent:main:main:thread:malformed-snapshot",
       currentAttachmentId: "ghost",
-    } as unknown as SessionFleetState;
-    const store: FleetAttachmentStore = { load: () => [malformed], save: () => {} };
+    } as unknown as SessionAttachmentState;
+    const store: AttachmentStore = { load: () => [malformed], save: () => {} };
     const sessions = new SessionManager(fakeGateway().gateway, "main", undefined, store);
     const job = sessions.submitTask({ task: "do the thing", sessionKey: malformed.sessionKey });
 
     expect(() => sessions.buildSnapshot(job)).not.toThrow();
-    expect(sessions.buildSnapshot(job).fleetAttachment).toBeUndefined();
+    expect(sessions.buildSnapshot(job).agentSession).toBeUndefined();
   });
 
   it("parent runId is persisted immediately when chat.send's onRunId fires, before chat() resolves", () => {
-    const jobStore = new FakeJobStoreForFleet();
+    const jobStore = new FakeJobStoreForAttachments();
     const ctrl = fakeGateway();
     const sessions = new SessionManager(ctrl.gateway, "main", jobStore);
     const job = sessions.submitTask({ task: "do the thing" });
@@ -498,7 +498,7 @@ describe("Fleet-adapter recovery order (tier 3, after parent live+transcript rec
     const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
     const job = sessions.submitTask({
       task: "do the thing",
-      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
+      context: directiveBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
     });
     await wait();
     expect(job.status).toBe("running");
@@ -514,7 +514,7 @@ describe("Fleet-adapter recovery order (tier 3, after parent live+transcript rec
     const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
     const job = sessions.submitTask({
       task: "do the thing",
-      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
+      context: directiveBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
     });
 
     ctrl.finishChat(NO_SUMMARY_SENTINEL, 0);
@@ -526,19 +526,19 @@ describe("Fleet-adapter recovery order (tier 3, after parent live+transcript rec
     expect(recovered.resultSource).toBe("fleet-transcript");
     expect(recovered.terminalReason).toBe("fleet-transcript-recovery");
 
-    const attachment = sessions.getFleetAttachment(job.sessionKey)!;
+    const attachment = sessions.getAgentSessionAttachment(job.sessionKey)!;
     expect(attachment.lastResult?.summary).toBe("the child's real answer");
     expect(attachment.lastResult?.outputRef).toBe("cf-foo");
   });
 
   it("output is capped, with the durable transcript reference preserved on the attachment", async () => {
-    const longText = "x".repeat(FLEET_RESULT_SUMMARY_MAX + 500);
+    const longText = "x".repeat(ATTACHMENT_RESULT_SUMMARY_MAX + 500);
     const adapter = fakeFleetAdapter({ handoff: async () => ({ text: longText, resultAt: Date.now() }) });
     const ctrl = fakeGateway({ pollTranscriptForFinalText: async () => undefined });
     const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
     const job = sessions.submitTask({
       task: "do the thing",
-      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "workstation-1", worktree: "/w" }),
+      context: directiveBlock({ op: "attach", handle: "cf-foo", host: "workstation-1", worktree: "/w" }),
     });
     ctrl.finishChat(NO_SUMMARY_SENTINEL, 0);
     await wait();
@@ -546,8 +546,8 @@ describe("Fleet-adapter recovery order (tier 3, after parent live+transcript rec
     // The job's own summary is never capped (matches every other terminal
     // path in this file) — only the attachment's lastResult preview is.
     expect(sessions.getJob(job.jobId)?.summary).toBe(longText);
-    const attachment = sessions.getFleetAttachment(job.sessionKey)!;
-    expect(attachment.lastResult?.summary?.length).toBe(FLEET_RESULT_SUMMARY_MAX);
+    const attachment = sessions.getAgentSessionAttachment(job.sessionKey)!;
+    expect(attachment.lastResult?.summary?.length).toBe(ATTACHMENT_RESULT_SUMMARY_MAX);
     expect(attachment.lastResult?.summary?.endsWith("…")).toBe(true);
     expect(attachment.lastResult?.outputRef).toBe("cf-foo:/w");
   });
@@ -558,7 +558,7 @@ describe("Fleet-adapter recovery order (tier 3, after parent live+transcript rec
     const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
     const job = sessions.submitTask({
       task: "do the thing",
-      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
+      context: directiveBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
     });
     ctrl.finishChat(NO_SUMMARY_SENTINEL, 0);
     await wait();
@@ -584,7 +584,7 @@ describe("Fleet-adapter recovery order (tier 3, after parent live+transcript rec
       const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
       const job = sessions.submitTask({
         task: "do the thing",
-        context: fleetBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
+        context: directiveBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
       });
       ctrl.finishChat(NO_SUMMARY_SENTINEL, 0);
       await vi.advanceTimersByTimeAsync(1);
@@ -608,7 +608,7 @@ describe("Fleet-adapter recovery order (tier 3, after parent live+transcript rec
     const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
     const job = sessions.submitTask({
       task: "do the thing",
-      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
+      context: directiveBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
     });
     ctrl.finishChat(NO_SUMMARY_SENTINEL, 0);
     await wait();
@@ -622,7 +622,7 @@ describe("Fleet-adapter recovery order (tier 3, after parent live+transcript rec
     const secondOutcome = sessions.getJob(job.jobId)!;
     expect(secondOutcome.summary).toBe(firstOutcome.summary);
     expect(secondOutcome.resultSource).toBe("fleet-transcript");
-    expect(sessions.getFleetLineage(job.sessionKey)).toHaveLength(1);
+    expect(sessions.getAgentSessionLineage(job.sessionKey)).toHaveLength(1);
   });
 
   it("late parent final safely replaces the provisional Fleet result", async () => {
@@ -631,7 +631,7 @@ describe("Fleet-adapter recovery order (tier 3, after parent live+transcript rec
     const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
     const job = sessions.submitTask({
       task: "do the thing",
-      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
+      context: directiveBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
     });
     ctrl.finishChat(NO_SUMMARY_SENTINEL, 0);
     await wait();
@@ -658,7 +658,7 @@ describe("Independent-review blocker fixes: delegated-turn boundary + stale-resu
     const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
     const job = sessions.submitTask({
       task: "do the thing",
-      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
+      context: directiveBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
     });
     ctrl.finishChat(NO_SUMMARY_SENTINEL, 0);
     await wait();
@@ -677,7 +677,7 @@ describe("Independent-review blocker fixes: delegated-turn boundary + stale-resu
     // Turn 1: attaches and delegates. Its own recovery correctly succeeds.
     const turn1 = sessions.submitTask({
       task: "delegate this to Fleet",
-      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
+      context: directiveBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
     });
     ctrl.finishChat(NO_SUMMARY_SENTINEL, 0);
     await wait();
@@ -705,7 +705,7 @@ describe("Independent-review blocker fixes: delegated-turn boundary + stale-resu
     const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
     const job = sessions.submitTask({
       task: "do the thing",
-      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "workstation-1", status: "needs_input" }),
+      context: directiveBlock({ op: "attach", handle: "cf-foo", host: "workstation-1", status: "needs_input" }),
     });
     ctrl.finishChat(NO_SUMMARY_SENTINEL, 0);
     await wait();
@@ -717,7 +717,7 @@ describe("Independent-review blocker fixes: delegated-turn boundary + stale-resu
 
     // The attachment itself stays needs_input — visible/actionable, not
     // silently overwritten by the fact that output text existed.
-    expect(sessions.getFleetAttachment(job.sessionKey)?.status).toBe("needs_input");
+    expect(sessions.getAgentSessionAttachment(job.sessionKey)?.status).toBe("needs_input");
   });
 
   it("a failed child's leftover transcript text is never treated as a trusted answer", async () => {
@@ -726,7 +726,7 @@ describe("Independent-review blocker fixes: delegated-turn boundary + stale-resu
     const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
     const job = sessions.submitTask({
       task: "do the thing",
-      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "workstation-1", status: "failed" }),
+      context: directiveBlock({ op: "attach", handle: "cf-foo", host: "workstation-1", status: "failed" }),
     });
     ctrl.finishChat(NO_SUMMARY_SENTINEL, 0);
     await wait();
@@ -745,9 +745,9 @@ describe("Independent-review blocker fixes: detach/replace races (identity compa
     const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
     const job = sessions.submitTask({
       task: "first",
-      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
+      context: directiveBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
     });
-    const original = sessions.getFleetAttachment(job.sessionKey)!;
+    const original = sessions.getAgentSessionAttachment(job.sessionKey)!;
     ctrl.finishChat("done", 0);
     await wait();
 
@@ -756,26 +756,26 @@ describe("Independent-review blocker fixes: detach/replace races (identity compa
     // immediately so the busy guard doesn't block the next submission below
     // (submitTask always dispatches a real turn — a directive alone doesn't
     // exempt it from the one-job-per-session guard).
-    sessions.submitTask({ task: "inspect", sessionKey: job.sessionKey, context: fleetBlock({ op: "inspect" }) });
+    sessions.submitTask({ task: "inspect", sessionKey: job.sessionKey, context: directiveBlock({ op: "inspect" }) });
     expect(adapter.isLiveCalls).toHaveLength(1);
     ctrl.finishChat("inspect turn done", 1);
     await wait();
 
     // Detach BEFORE the in-flight isLive resolves.
-    sessions.submitTask({ task: "detach", sessionKey: job.sessionKey, context: fleetBlock({ op: "detach", reason: "operator stopped it" }) });
+    sessions.submitTask({ task: "detach", sessionKey: job.sessionKey, context: directiveBlock({ op: "detach", reason: "operator stopped it" }) });
     ctrl.finishChat("detach turn done", 2);
-    expect(sessions.getFleetAttachment(job.sessionKey)).toBeUndefined();
+    expect(sessions.getAgentSessionAttachment(job.sessionKey)).toBeUndefined();
 
     // NOW the stale isLive resolves true ("it's running!") — after the fact.
     resolveIsLive(true);
     await wait();
 
     // The detached record must stay detached — not resurrected to "running".
-    const lineage = sessions.getFleetLineage(job.sessionKey);
+    const lineage = sessions.getAgentSessionLineage(job.sessionKey);
     const detachedRecord = lineage.find((a) => a.id === original.id)!;
     expect(detachedRecord.status).toBe("detached");
     expect(detachedRecord.reason).toBe("operator stopped it");
-    expect(sessions.getFleetAttachment(job.sessionKey)).toBeUndefined();
+    expect(sessions.getAgentSessionAttachment(job.sessionKey)).toBeUndefined();
   });
 
   it("a recovery handoff that resolves AFTER a replace does not complete the job with the stale attachment's output, and does not corrupt the superseded record", async () => {
@@ -798,16 +798,16 @@ describe("Independent-review blocker fixes: detach/replace races (identity compa
     const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
     const job = sessions.submitTask({
       task: "do the thing",
-      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
+      context: directiveBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
     });
-    const original = sessions.getFleetAttachment(job.sessionKey)!;
+    const original = sessions.getAgentSessionAttachment(job.sessionKey)!;
 
     ctrl.finishChat(NO_SUMMARY_SENTINEL, 0);
     await wait();
     expect(sessions.getJob(job.jobId)?.status).toBe("completed_no_summary");
     expect(handoffCallCount).toBe(1);
 
-    // Trigger a lazy recheck — its tryFleetRecovery call is the SECOND
+    // Trigger a lazy recheck — its tryAttachedSessionRecovery call is the SECOND
     // handoff call, now in flight and deliberately held open.
     const waitPromise = sessions.waitForJob(job.jobId, 0, undefined, "wait", 1);
     await wait();
@@ -818,7 +818,7 @@ describe("Independent-review blocker fixes: detach/replace races (identity compa
     sessions.submitTask({
       task: "replace mid-flight",
       sessionKey: job.sessionKey,
-      context: fleetBlock({ op: "replace", handle: "cf-bar", host: "workstation-1", reason: "operator swap" }),
+      context: directiveBlock({ op: "replace", handle: "cf-bar", host: "workstation-1", reason: "operator swap" }),
     });
     ctrl.finishChat("replace turn done", 1);
 
@@ -833,12 +833,12 @@ describe("Independent-review blocker fixes: detach/replace races (identity compa
     expect(finalJob.summary).not.toBe("stale answer for the superseded attachment");
 
     // The superseded record's lineage must not be corrupted by the stale write.
-    const supersededRecord = sessions.getFleetLineage(job.sessionKey).find((a) => a.id === original.id)!;
+    const supersededRecord = sessions.getAgentSessionLineage(job.sessionKey).find((a) => a.id === original.id)!;
     expect(supersededRecord.status).toBe("superseded");
     expect(supersededRecord.lastResult).toBeUndefined();
 
     // The new (replaced) attachment is untouched by the stale write too.
-    const current = sessions.getFleetAttachment(job.sessionKey)!;
+    const current = sessions.getAgentSessionAttachment(job.sessionKey)!;
     expect(current.handle).toBe("cf-bar");
     expect(current.lastResult).toBeUndefined();
   });
@@ -856,7 +856,7 @@ describe("Independent-review blocker fixes: detach/replace races (identity compa
     const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
     const job = sessions.submitTask({
       task: "do the thing",
-      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
+      context: directiveBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
     });
 
     ctrl.finishChat(NO_SUMMARY_SENTINEL, 0);
@@ -873,11 +873,11 @@ describe("Independent-review blocker fixes: detach/replace races (identity compa
     sessions.submitTask({
       task: "continue with a question",
       sessionKey: job.sessionKey,
-      context: fleetBlock({ op: "continue", status: "needs_input" }),
+      context: directiveBlock({ op: "continue", status: "needs_input" }),
     });
     ctrl.finishChat("continue turn done", 1);
 
-    const currentBeforeResolution = sessions.getFleetAttachment(job.sessionKey)!;
+    const currentBeforeResolution = sessions.getAgentSessionAttachment(job.sessionKey)!;
     expect(currentBeforeResolution.status).toBe("needs_input");
     expect(currentBeforeResolution.delegatedTurnId).not.toBe(job.jobId);
     expect(currentBeforeResolution.lastResult).toBeUndefined();
@@ -887,7 +887,7 @@ describe("Independent-review blocker fixes: detach/replace races (identity compa
     await waitPromise;
     await wait();
 
-    const current = sessions.getFleetAttachment(job.sessionKey)!;
+    const current = sessions.getAgentSessionAttachment(job.sessionKey)!;
     expect(current.status).toBe("needs_input");
     expect(current.lastResult).toBeUndefined();
     expect(sessions.getJob(job.jobId)?.summary).not.toBe("stale answer from the old generation");
@@ -969,7 +969,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
     const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, hostRuntime.registry);
     const job = sessions.submitTask({ task: "ship the thing", context: `Delegated.\n${RUNTIME_MARKER}` });
 
-    const attachment = sessions.getFleetAttachment(job.sessionKey)!;
+    const attachment = sessions.getAgentSessionAttachment(job.sessionKey)!;
     expect(attachment).toMatchObject({
       runtime: "example-runtime",
       provider: "anthropic-claude-code",
@@ -981,7 +981,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
     });
     // It rides on the existing snapshot key — one projection, not a second one
     // that could drift from it.
-    expect(sessions.buildSnapshot(job).fleetAttachment?.handle).toBe("thr-abc123");
+    expect(sessions.buildSnapshot(job).agentSession?.handle).toBe("thr-abc123");
   });
 
   it("never lets the raw marker reach the agent's prompt", () => {
@@ -997,7 +997,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
     const ctrl = fakeGateway();
     const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, hostRuntime.registry);
     const first = sessions.submitTask({ task: "start", context: RUNTIME_MARKER });
-    const attachedAt = sessions.getFleetAttachment(first.sessionKey)!.attachedAt;
+    const attachedAt = sessions.getAgentSessionAttachment(first.sessionKey)!.attachedAt;
     ctrl.finishChat("first turn done", 0);
     await wait();
 
@@ -1016,8 +1016,8 @@ describe("managed agent sessions on a host-registered runtime", () => {
       }),
     });
 
-    expect(sessions.getFleetLineage(first.sessionKey)).toHaveLength(1);
-    const attachment = sessions.getFleetAttachment(first.sessionKey)!;
+    expect(sessions.getAgentSessionLineage(first.sessionKey)).toHaveLength(1);
+    const attachment = sessions.getAgentSessionAttachment(first.sessionKey)!;
     expect(attachment.attachedAt).toBe(attachedAt);
     expect(attachment.status).toBe("needs_input");
     expect(attachment.remoteUrl).toBe("https://runtime.example/threads/abc123");
@@ -1037,21 +1037,21 @@ describe("managed agent sessions on a host-registered runtime", () => {
     sessions.submitTask({
       task: "start over",
       sessionKey: job.sessionKey,
-      context: fleetBlock({ op: "replace", runtime: "example-runtime", sessionId: "thr-second", host: "workstation-1", reason: "wrong project" }),
+      context: directiveBlock({ op: "replace", runtime: "example-runtime", sessionId: "thr-second", host: "workstation-1", reason: "wrong project" }),
     });
 
-    const lineage = sessions.getFleetLineage(job.sessionKey);
+    const lineage = sessions.getAgentSessionLineage(job.sessionKey);
     expect(lineage).toHaveLength(2);
     const superseded = lineage.find((r) => r.handle === "thr-abc123")!;
     expect(superseded.status).toBe("superseded");
     expect(superseded.reason).toBe("wrong project");
-    const current = sessions.getFleetAttachment(job.sessionKey)!;
+    const current = sessions.getAgentSessionAttachment(job.sessionKey)!;
     expect(current.handle).toBe("thr-second");
     expect(current.replacesAttachmentId).toBe(superseded.id);
   });
 
   it("survives a connector restart with runtime, provider, and metadata intact", () => {
-    const store = new FakeFleetAttachmentStore();
+    const store = new FakeAttachmentStore();
     const hostRuntime = fakeHostRuntime();
     const first = fakeGateway();
     const sessionsA = new SessionManager(first.gateway, "main", undefined, store, undefined, hostRuntime.registry);
@@ -1060,7 +1060,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
     // A brand-new manager over the same store, as after a process restart.
     const second = fakeGateway();
     const sessionsB = new SessionManager(second.gateway, "main", undefined, store, undefined, hostRuntime.registry);
-    expect(sessionsB.getFleetAttachment(job.sessionKey)).toMatchObject({
+    expect(sessionsB.getAgentSessionAttachment(job.sessionKey)).toMatchObject({
       runtime: "example-runtime",
       provider: "anthropic-claude-code",
       handle: "thr-abc123",
@@ -1109,7 +1109,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
     });
     expect(unattached.sessionKey).not.toBe(job.sessionKey);
 
-    const attachment = sessions.getFleetAttachment(job.sessionKey)!;
+    const attachment = sessions.getAgentSessionAttachment(job.sessionKey)!;
     expect(attachment.status).toBe("needs_permission");
     expect(attachment.alive).toBe(true);
     expect(attachment.latestResponse).toBe("may I run the migration?");
@@ -1131,14 +1131,14 @@ describe("managed agent sessions on a host-registered runtime", () => {
     sessions.submitTask({
       task: "nudge it",
       sessionKey: job.sessionKey,
-      context: fleetBlock({ op: "continue", prompt: "also update the docs" }),
+      context: directiveBlock({ op: "continue", prompt: "also update the docs" }),
     });
     await wait();
 
     expect(hostRuntime.continueCalls).toEqual([
       { ref: expect.objectContaining({ runtime: "example-runtime", sessionId: "thr-abc123" }), prompt: "also update the docs" },
     ]);
-    expect(sessions.getFleetAttachment(job.sessionKey)?.latestResponse).toBe("on it");
+    expect(sessions.getAgentSessionAttachment(job.sessionKey)?.latestResponse).toBe("on it");
   });
 
   it("reports a precise unsupported_operation instead of failing the task", async () => {
@@ -1152,14 +1152,14 @@ describe("managed agent sessions on a host-registered runtime", () => {
     const nudge = sessions.submitTask({
       task: "nudge it",
       sessionKey: job.sessionKey,
-      context: fleetBlock({ op: "continue", prompt: "also update the docs" }),
+      context: directiveBlock({ op: "continue", prompt: "also update the docs" }),
     });
     await wait();
 
     // The TASK is unaffected — a delegation that cannot be driven is not a
     // reason for the turn itself to fail.
     expect(nudge.status).toBe("running");
-    const attachment = sessions.getFleetAttachment(job.sessionKey)!;
+    const attachment = sessions.getAgentSessionAttachment(job.sessionKey)!;
     expect(attachment.error).toMatchObject({ code: "unsupported_operation" });
     // A failed ask teaches nothing about the session, so what we last knew survives.
     expect(attachment.status).toBe("running");
@@ -1171,14 +1171,14 @@ describe("managed agent sessions on a host-registered runtime", () => {
     // one must still round-trip, not be dropped.
     const sessions = new SessionManager(ctrl.gateway);
     const job = sessions.submitTask({ task: "ship it", context: RUNTIME_MARKER });
-    expect(sessions.getFleetAttachment(job.sessionKey)?.runtime).toBe("example-runtime");
+    expect(sessions.getAgentSessionAttachment(job.sessionKey)?.runtime).toBe("example-runtime");
 
     const status = await sessions.runAgentSessionOp(job.sessionKey, { op: "inspect" });
     expect(status?.state).toBe("unavailable");
     expect(status?.error?.code).toBe("unknown_runtime");
     expect(status?.detail).toContain("Last reported state: running.");
     // Still exactly what the marker said — an unanswerable read changed nothing.
-    expect(sessions.getFleetAttachment(job.sessionKey)?.status).toBe("running");
+    expect(sessions.getAgentSessionAttachment(job.sessionKey)?.status).toBe("running");
   });
 
   it("returns undefined rather than reaching for anything when nothing is attached", async () => {
@@ -1214,7 +1214,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
     // reply does not support. See ResultSource.
     expect(recovered.resultSource).toBe("agent-session");
     expect(recovered.terminalReason).toBe("agent-session-recovery");
-    const attachment = sessions.getFleetAttachment(job.sessionKey)!;
+    const attachment = sessions.getAgentSessionAttachment(job.sessionKey)!;
     expect(attachment.lastResult?.summary).toBe("the managed session's real answer");
     expect(attachment.lastResult?.outputRef).toBe("thr-abc123");
     expect(attachment.termination).toMatchObject({ reason: "completed" });
@@ -1253,8 +1253,8 @@ describe("managed agent sessions on a host-registered runtime", () => {
       expect(settled.status, blocked).toBe("completed_no_summary");
       expect(settled.resultSource, blocked).toBe("parent");
       // The attachment stays actionable, which is the whole point.
-      expect(sessions.getFleetAttachment(job.sessionKey)?.status, blocked).toBe(blocked);
-      expect(sessions.getFleetAttachment(job.sessionKey)?.lastResult, blocked).toBeUndefined();
+      expect(sessions.getAgentSessionAttachment(job.sessionKey)?.status, blocked).toBe(blocked);
+      expect(sessions.getAgentSessionAttachment(job.sessionKey)?.lastResult, blocked).toBeUndefined();
 
       // …and the JOB says so too, rather than reading as an ordinary turn that
       // simply had nothing to report: same status (no new JobStatus, so every
@@ -1344,7 +1344,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
     await wait();
 
     expect(sessions.getJob(job.jobId)?.status).toBe("completed_no_summary");
-    expect(sessions.getFleetAttachment(job.sessionKey)?.lastResult).toBeUndefined();
+    expect(sessions.getAgentSessionAttachment(job.sessionKey)?.lastResult).toBeUndefined();
   });
 
   it("refuses a result that predates the turn it would be answering", async () => {
@@ -1377,9 +1377,9 @@ describe("managed agent sessions on a host-registered runtime", () => {
     const newer = sessions.submitTask({
       task: "keep going",
       sessionKey: job.sessionKey,
-      context: fleetBlock({ op: "continue", status: "needs_input" }),
+      context: directiveBlock({ op: "continue", status: "needs_input" }),
     });
-    expect(sessions.getFleetAttachment(job.sessionKey)?.delegatedTurnId).toBe(newer.jobId);
+    expect(sessions.getAgentSessionAttachment(job.sessionKey)?.delegatedTurnId).toBe(newer.jobId);
 
     gate.resolve({ state: "completed", finalResponse: "answer for the OLD turn", lastEventAt: Date.now() });
     const status = await inFlight;
@@ -1388,7 +1388,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
     expect(status?.state).toBe("completed");
     // ...but it is not allowed to become durable state for a turn that never
     // asked for it.
-    const attachment = sessions.getFleetAttachment(job.sessionKey)!;
+    const attachment = sessions.getAgentSessionAttachment(job.sessionKey)!;
     expect(attachment.status).toBe("needs_input");
     expect(attachment.lastResult).toBeUndefined();
   });
@@ -1410,7 +1410,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
     gates[0].resolve({ state: "running", latestResponse: "state from a moment ago" });
     await older;
 
-    const attachment = sessions.getFleetAttachment(job.sessionKey)!;
+    const attachment = sessions.getAgentSessionAttachment(job.sessionKey)!;
     expect(attachment.status).toBe("needs_input");
     expect(attachment.latestResponse).toBe("current state");
   });
@@ -1435,14 +1435,14 @@ describe("managed agent sessions on a host-registered runtime", () => {
     sessions.submitTask({
       task: "just looking",
       sessionKey: job.sessionKey,
-      context: fleetBlock({ op: "inspect", status: "needs_input" }),
+      context: directiveBlock({ op: "inspect", status: "needs_input" }),
     });
-    expect(sessions.getFleetAttachment(job.sessionKey)?.delegatedTurnId).toBe(job.jobId);
+    expect(sessions.getAgentSessionAttachment(job.sessionKey)?.delegatedTurnId).toBe(job.jobId);
 
     gate.resolve({ state: "running", latestResponse: "still chugging" });
     await inFlight;
 
-    const attachment = sessions.getFleetAttachment(job.sessionKey)!;
+    const attachment = sessions.getAgentSessionAttachment(job.sessionKey)!;
     expect(attachment.status).toBe("needs_input");
     expect(attachment.latestResponse).toBeUndefined();
   });
@@ -1459,21 +1459,21 @@ describe("managed agent sessions on a host-registered runtime", () => {
     const ctrl = fakeGateway();
     const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, hostRuntime.registry);
     const job = sessions.submitTask({ task: "ship it", context: RUNTIME_MARKER });
-    expect(sessions.getFleetAttachment(job.sessionKey)?.status).toBe("running");
+    expect(sessions.getAgentSessionAttachment(job.sessionKey)?.status).toBe("running");
 
     const inFlight = sessions.runAgentSessionOp(job.sessionKey, { op: "inspect" });
     await wait();
     ctrl.finishChat("first turn done", 0);
     await wait();
-    const before = sessions.getFleetAttachment(job.sessionKey)!;
+    const before = sessions.getAgentSessionAttachment(job.sessionKey)!;
 
     // The host re-states exactly what the record already says.
     sessions.submitTask({
       task: "just looking",
       sessionKey: job.sessionKey,
-      context: fleetBlock({ op: "inspect", status: "running" }),
+      context: directiveBlock({ op: "inspect", status: "running" }),
     });
-    const restated = sessions.getFleetAttachment(job.sessionKey)!;
+    const restated = sessions.getAgentSessionAttachment(job.sessionKey)!;
     expect(restated.status).toBe("running");
     expect(restated.observationToken ?? 0).toBeGreaterThan(before.observationToken ?? 0);
     expect(restated.lastObservedAt).toBeGreaterThanOrEqual(restated.attachedAt);
@@ -1482,7 +1482,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
     gate.resolve({ state: "needs_input", latestResponse: "state from before the report" });
     await inFlight;
 
-    const attachment = sessions.getFleetAttachment(job.sessionKey)!;
+    const attachment = sessions.getAgentSessionAttachment(job.sessionKey)!;
     expect(attachment.status).toBe("running");
     expect(attachment.latestResponse).toBeUndefined();
   });
@@ -1498,12 +1498,12 @@ describe("managed agent sessions on a host-registered runtime", () => {
     sessions.submitTask({
       task: "stop tracking it",
       sessionKey: job.sessionKey,
-      context: fleetBlock({ op: "detach", reason: "handed back to me" }),
+      context: directiveBlock({ op: "detach", reason: "handed back to me" }),
     });
     await wait();
     expect(quiet.detachCalls).toHaveLength(0);
-    expect(sessions.getFleetAttachment(job.sessionKey)).toBeUndefined();
-    expect(sessions.getFleetLineage(job.sessionKey)[0]).toMatchObject({ status: "detached", reason: "handed back to me" });
+    expect(sessions.getAgentSessionAttachment(job.sessionKey)).toBeUndefined();
+    expect(sessions.getAgentSessionLineage(job.sessionKey)[0]).toMatchObject({ status: "detached", reason: "handed back to me" });
   });
 
   it("dispatches an opt-in runtime stop, and a runtime that throws cannot wedge the conversation", async () => {
@@ -1521,14 +1521,14 @@ describe("managed agent sessions on a host-registered runtime", () => {
     sessions.submitTask({
       task: "kill it",
       sessionKey: job.sessionKey,
-      context: fleetBlock({ op: "detach", reason: "abandoned", stopRuntime: true }),
+      context: directiveBlock({ op: "detach", reason: "abandoned", stopRuntime: true }),
     });
     await wait();
 
     expect(hostRuntime.detachCalls).toEqual([{ ref: expect.objectContaining({ sessionId: "thr-abc123" }), reason: "abandoned" }]);
     // The local detach is the durable decision; a runtime that is down must
     // not be able to hold the conversation hostage.
-    expect(sessions.getFleetAttachment(job.sessionKey)).toBeUndefined();
+    expect(sessions.getAgentSessionAttachment(job.sessionKey)).toBeUndefined();
   });
 
   it("keeps claude-fleet on the built-in adapter, and reports precisely what that adapter cannot do", async () => {
@@ -1539,7 +1539,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
     const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter, fakeHostRuntime().registry);
     const job = sessions.submitTask({
       task: "do the thing",
-      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
+      context: directiveBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
     });
 
     const inspected = await sessions.runAgentSessionOp(job.sessionKey, { op: "inspect" });
@@ -1547,7 +1547,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
     // Liveness only: the adapter deliberately claims no state, so a bare tmux
     // bit can only promote the uninformative initial "starting".
     expect(inspected?.state).toBe("unknown");
-    expect(sessions.getFleetAttachment(job.sessionKey)?.status).toBe("running");
+    expect(sessions.getAgentSessionAttachment(job.sessionKey)?.status).toBe("running");
 
     const nudged = await sessions.runAgentSessionOp(job.sessionKey, { op: "continue", prompt: "keep going" });
     expect(nudged?.error).toMatchObject({ code: "unsupported_operation" });
@@ -1569,13 +1569,13 @@ describe("managed agent sessions on a host-registered runtime", () => {
     const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter, registry);
     const job = sessions.submitTask({
       task: "do the thing",
-      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
+      context: directiveBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
     });
 
     await sessions.runAgentSessionOp(job.sessionKey, { op: "inspect" });
     expect(seen.map((r) => r.sessionId)).toEqual(["cf-foo"]);
     expect(adapter.isLiveCalls).toHaveLength(0);
-    expect(sessions.getFleetAttachment(job.sessionKey)?.status).toBe("idle");
+    expect(sessions.getAgentSessionAttachment(job.sessionKey)?.status).toBe("idle");
   });
 
   /**
@@ -1585,8 +1585,8 @@ describe("managed agent sessions on a host-registered runtime", () => {
    * recovery that depends on one landing — silently does nothing.
    */
   describe("after a restart, the observation token resumes above what was persisted", () => {
-    function persistedState(sessionKey: string, overrides: Partial<FleetAttachmentRecord> = {}): SessionFleetState {
-      const record: FleetAttachmentRecord = {
+    function persistedState(sessionKey: string, overrides: Partial<AgentSessionAttachment> = {}): SessionAttachmentState {
+      const record: AgentSessionAttachment = {
         id: "att-1",
         runtime: "example-runtime",
         provider: "anthropic-claude-code",
@@ -1602,12 +1602,12 @@ describe("managed agent sessions on a host-registered runtime", () => {
 
     it("lets the first post-restart observation land instead of refusing it", async () => {
       const hostRuntime = fakeHostRuntime({ inspect: async () => ({ state: "needs_input", latestResponse: "which branch?" }) });
-      const store = new FakeFleetAttachmentStore([persistedState("sess-restart")]);
+      const store = new FakeAttachmentStore([persistedState("sess-restart")]);
       const sessions = new SessionManager(fakeGateway().gateway, "main", undefined, store, undefined, hostRuntime.registry);
 
       await sessions.runAgentSessionOp("sess-restart", { op: "inspect" });
 
-      const attachment = sessions.getFleetAttachment("sess-restart")!;
+      const attachment = sessions.getAgentSessionAttachment("sess-restart")!;
       expect(attachment.status).toBe("needs_input");
       expect(attachment.latestResponse).toBe("which branch?");
       // Strictly above the persisted high-water mark, so the CAS still orders
@@ -1616,7 +1616,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
     });
 
     it("resumes above a SUPERSEDED record's token too — lineage carries the high-water mark", async () => {
-      const current: FleetAttachmentRecord = {
+      const current: AgentSessionAttachment = {
         id: "att-current",
         runtime: "example-runtime",
         handle: "thr-abc123",
@@ -1624,7 +1624,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
         status: "running",
         observationToken: 3,
       };
-      const superseded: FleetAttachmentRecord = {
+      const superseded: AgentSessionAttachment = {
         id: "att-old",
         runtime: "example-runtime",
         handle: "thr-older",
@@ -1632,7 +1632,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
         status: "superseded",
         observationToken: 99,
       };
-      const store = new FakeFleetAttachmentStore([
+      const store = new FakeAttachmentStore([
         {
           sessionKey: "sess-lineage",
           currentAttachmentId: current.id,
@@ -1643,7 +1643,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
       const sessions = new SessionManager(fakeGateway().gateway, "main", undefined, store, undefined, hostRuntime.registry);
 
       await sessions.runAgentSessionOp("sess-lineage", { op: "inspect" });
-      expect(sessions.getFleetAttachment("sess-lineage")?.observationToken).toBeGreaterThan(99);
+      expect(sessions.getAgentSessionAttachment("sess-lineage")?.observationToken).toBeGreaterThan(99);
     });
 
     it("recovers a delegated turn's result after a restart, which a stale token would silently block", async () => {
@@ -1654,7 +1654,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
           lastEventAt: Date.now(),
         }),
       });
-      const store = new FakeFleetAttachmentStore([persistedState("sess-restart")]);
+      const store = new FakeAttachmentStore([persistedState("sess-restart")]);
       const ctrl = fakeGateway({ pollTranscriptForFinalText: async () => undefined });
       const sessions = new SessionManager(ctrl.gateway, "main", undefined, store, undefined, hostRuntime.registry);
 
@@ -1696,8 +1696,8 @@ describe("managed agent sessions on a host-registered runtime", () => {
       expect(settled.status).toBe("completed_no_summary");
       expect(settled.terminalReason).toBe("late-recovery-exhausted");
       // The read failed; the SESSION's last known state is untouched by that.
-      expect(sessions.getFleetAttachment(job.sessionKey)?.status).toBe("running");
-      expect(sessions.getFleetAttachment(job.sessionKey)?.error).toMatchObject({ code: "inspect_timeout" });
+      expect(sessions.getAgentSessionAttachment(job.sessionKey)?.status).toBe("running");
+      expect(sessions.getAgentSessionAttachment(job.sessionKey)?.error).toMatchObject({ code: "inspect_timeout" });
     } finally {
       vi.useRealTimers();
     }
@@ -1719,7 +1719,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
     const turn1 = sessions.submitTask({ task: "ship it", context: RUNTIME_MARKER });
     await sessions.runAgentSessionOp(turn1.sessionKey, { op: "inspect" });
 
-    const afterTurn1 = sessions.getFleetAttachment(turn1.sessionKey)!;
+    const afterTurn1 = sessions.getAgentSessionAttachment(turn1.sessionKey)!;
     expect(afterTurn1.lastResult?.summary).toBe("turn one's answer");
     expect(afterTurn1.status).toBe("completed");
     ctrl.finishChat("turn one done", 0);
@@ -1733,7 +1733,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
       context: agentSessionMarker({ runtime: "example-runtime", sessionId: "thr-abc123", host: "workstation-1" }),
     });
 
-    const attachment = sessions.getFleetAttachment(turn1.sessionKey)!;
+    const attachment = sessions.getAgentSessionAttachment(turn1.sessionKey)!;
     expect(attachment.delegatedTurnId).toBe(turn2.jobId);
     // Everything that described turn one's OUTCOME is gone…
     expect(attachment.lastResult).toBeUndefined();
@@ -1747,7 +1747,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
     expect(attachment.runtime).toBe("example-runtime");
     expect(attachment.handle).toBe("thr-abc123");
     expect(attachment.metadata).toEqual({ runtimeProjectId: "proj-1", turnId: "turn-1" });
-    expect(sessions.getFleetLineage(turn1.sessionKey)).toHaveLength(1);
+    expect(sessions.getAgentSessionLineage(turn1.sessionKey)).toHaveLength(1);
   });
 
   it("clears a prior turn's outcome on a continue from a later turn, keeping a stated status", async () => {
@@ -1758,17 +1758,17 @@ describe("managed agent sessions on a host-registered runtime", () => {
     const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, hostRuntime.registry);
     const turn1 = sessions.submitTask({ task: "ship it", context: RUNTIME_MARKER });
     await sessions.runAgentSessionOp(turn1.sessionKey, { op: "inspect" });
-    expect(sessions.getFleetAttachment(turn1.sessionKey)?.lastResult).toBeDefined();
+    expect(sessions.getAgentSessionAttachment(turn1.sessionKey)?.lastResult).toBeDefined();
     ctrl.finishChat("turn one done", 0);
     await wait();
 
     const turn2 = sessions.submitTask({
       task: "keep going",
       sessionKey: turn1.sessionKey,
-      context: fleetBlock({ op: "continue", status: "running" }),
+      context: directiveBlock({ op: "continue", status: "running" }),
     });
 
-    const attachment = sessions.getFleetAttachment(turn1.sessionKey)!;
+    const attachment = sessions.getAgentSessionAttachment(turn1.sessionKey)!;
     expect(attachment.delegatedTurnId).toBe(turn2.jobId);
     expect(attachment.lastResult).toBeUndefined();
     // A status the directive states outranks the reset's "starting".
@@ -1793,7 +1793,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
     expect(hostRuntime.inspectCalls[0].provider).toBe("anthropic-claude-code");
     expect(status?.provider).toBe("anthropic-claude-code");
     // The record heals to what the runtime says, so every later snapshot is right too.
-    expect(sessions.getFleetAttachment(job.sessionKey)?.provider).toBe("anthropic-claude-code");
+    expect(sessions.getAgentSessionAttachment(job.sessionKey)?.provider).toBe("anthropic-claude-code");
   });
 
   it("exposes registered runtimes for wiring assertions without exposing any session", () => {

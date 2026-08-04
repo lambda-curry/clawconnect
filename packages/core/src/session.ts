@@ -23,8 +23,8 @@ import {
   type AgentSessionStatus,
 } from "./agent-session.ts";
 import { CLAUDE_FLEET_RUNTIME_ID, fleetAdapterRuntime, type FleetAdapter } from "./fleet-adapter.ts";
-import type { FleetAttachmentStore } from "./fleet-attachment-store.ts";
-import { parseSessionHandoff } from "./fleet-handoff.ts";
+import type { AttachmentStore } from "./attachment-store.ts";
+import { parseSessionHandoff } from "./session-handoff.ts";
 import { OpenClawGateway, type RunObservation } from "./gateway.ts";
 import type { JobStore, PersistedJob } from "./job-store.ts";
 import { projectLogWindow } from "./log-projection.ts";
@@ -33,8 +33,8 @@ import {
   isParentObservationTimeout,
   type CheckMode,
   type ContinuationState,
-  type FleetAttachmentRecord,
-  type FleetDirective,
+  type AgentSessionAttachment,
+  type AgentSessionDirective,
   type GatewayEvent,
   type Job,
   type JobRecoveryState,
@@ -43,7 +43,7 @@ import {
   type LogEntry,
   type NextAction,
   type ResultSource,
-  type SessionFleetState,
+  type SessionAttachmentState,
   type TaskInput,
 } from "./types.ts";
 
@@ -90,22 +90,22 @@ export const RECONCILE_QUIET_MS = readEnvMs("CLAWCONNECT_RECONCILE_QUIET_MS", 12
 // Gap between the two transcript reads a single reconciliation round takes.
 // Long enough that a run still writing will visibly move between them.
 const RECONCILE_SAMPLE_INTERVAL_MS = readEnvMs("CLAWCONNECT_RECONCILE_SAMPLE_INTERVAL_MS", 15_000);
-// Cap on FleetAttachmentRecord.lastResult.summary — the durable pointer
+// Cap on AgentSessionAttachment.lastResult.summary — the durable pointer
 // (outputRef) is what makes the full text re-derivable, so this only needs
 // to be a useful preview, not the whole answer. Job.summary itself is never
 // capped (matches the existing, unbounded convention for every other
 // terminal path in this file).
-export const FLEET_RESULT_SUMMARY_MAX = 2_000;
+export const ATTACHMENT_RESULT_SUMMARY_MAX = 2_000;
 
 function capResultText(text: string): string {
-  return text.length > FLEET_RESULT_SUMMARY_MAX ? `${text.slice(0, FLEET_RESULT_SUMMARY_MAX - 1)}…` : text;
+  return text.length > ATTACHMENT_RESULT_SUMMARY_MAX ? `${text.slice(0, ATTACHMENT_RESULT_SUMMARY_MAX - 1)}…` : text;
 }
 
 /**
  * The durable pointer stored alongside a capped result, so the full text stays
  * re-derivable from the runtime rather than duplicated unbounded here.
  */
-function attachmentOutputRef(record: FleetAttachmentRecord): string {
+function attachmentOutputRef(record: AgentSessionAttachment): string {
   return record.worktree ? `${record.handle}:${record.worktree}` : record.handle;
 }
 
@@ -194,8 +194,8 @@ function resolveSessionKey(
 }
 
 /**
- * Normalizes one loaded SessionFleetState so every downstream reader
- * (getFleetAttachment, buildSnapshot, attachOrReplaceFleet, …) can trust the
+ * Normalizes one loaded SessionAttachmentState so every downstream reader
+ * (getAgentSessionAttachment, buildSnapshot, attachOrReplace, …) can trust the
  * invariant "`attachments` is always a plain object, and `currentAttachmentId`
  * — if set — always has a matching entry" without re-checking it at every
  * call site. A hand-edited, legacy, truncated, or otherwise corrupted store
@@ -205,13 +205,13 @@ function resolveSessionKey(
  * plain object with a string `id` — a malformed `currentAttachmentId` does
  * not discard the rest of the session's valid lineage.
  */
-function sanitizeFleetState(raw: SessionFleetState): SessionFleetState {
+function sanitizeAttachmentState(raw: SessionAttachmentState): SessionAttachmentState {
   const rawAttachments = raw && typeof raw === "object" ? raw.attachments : undefined;
-  const attachments: Record<string, FleetAttachmentRecord> = {};
+  const attachments: Record<string, AgentSessionAttachment> = {};
   if (rawAttachments && typeof rawAttachments === "object") {
     for (const [id, record] of Object.entries(rawAttachments)) {
-      if (record && typeof record === "object" && typeof (record as FleetAttachmentRecord).id === "string") {
-        attachments[id] = record as FleetAttachmentRecord;
+      if (record && typeof record === "object" && typeof (record as AgentSessionAttachment).id === "string") {
+        attachments[id] = record as AgentSessionAttachment;
       }
     }
   }
@@ -295,16 +295,16 @@ export class SessionManager {
    * NOT part of ContinuationState (which is fully reconstructed, not merged,
    * at 8 call sites in this file) so attach/continue/replace/detach/inspect
    * transitions have zero blast radius on that existing, separately-tested
-   * machinery. Mutated only by attachOrReplaceFleet/detachFleet/
-   * applyFleetObservation — never by job-completion code paths. See
+   * machinery. Mutated only by attachOrReplace/detachAttachment/
+   * applyDirectiveObservation — never by job-completion code paths. See
    * docs/architecture/2026-08-02-managed-fleet-attachment-plan.md.
    */
-  private fleetAttachments = new Map<string, SessionFleetState>();
+  private attachments = new Map<string, SessionAttachmentState>();
   /**
    * Source of the monotonic write token stamped on every runtime observation.
    * A dispatch takes one BEFORE calling out; the write-back refuses anything
    * that isn't strictly newer than what the record already carries — see
-   * FleetAttachmentRecord.observationToken.
+   * AgentSessionAttachment.observationToken.
    */
   private observationSeq = 0;
 
@@ -312,12 +312,12 @@ export class SessionManager {
     private readonly gateway: OpenClawGateway,
     private readonly agentId: string = "main",
     private readonly store?: JobStore,
-    private readonly fleetStore?: FleetAttachmentStore,
+    private readonly attachmentStore?: AttachmentStore,
     private readonly fleetAdapter?: FleetAdapter,
     private readonly runtimes?: AgentSessionRuntimeRegistry,
   ) {
     if (store) this.rehydrateFromStore(store);
-    if (fleetStore) this.rehydrateFleetFromStore(fleetStore);
+    if (attachmentStore) this.rehydrateAttachmentsFromStore(attachmentStore);
   }
 
   /**
@@ -357,7 +357,7 @@ export class SessionManager {
 
   /**
    * Restart-recovery counterpart to rehydrateFromStore, for Fleet attachment
-   * lineage. See fleet-attachment-store.ts.
+   * lineage. See attachment-store.ts.
    *
    * `observationSeq` RESUMES above the highest token any reloaded record
    * carries. The counter is in-memory and the tokens are durable, so a fresh
@@ -368,12 +368,12 @@ export class SessionManager {
    * high-water mark keeps the token strictly monotonic ACROSS restarts, which
    * is the property the CAS actually needs.
    */
-  private rehydrateFleetFromStore(store: FleetAttachmentStore): void {
+  private rehydrateAttachmentsFromStore(store: AttachmentStore): void {
     let highWater = this.observationSeq;
     for (const state of store.load()) {
       if (typeof state?.sessionKey !== "string" || !state.sessionKey) continue;
-      const sanitized = sanitizeFleetState(state);
-      this.fleetAttachments.set(state.sessionKey, sanitized);
+      const sanitized = sanitizeAttachmentState(state);
+      this.attachments.set(state.sessionKey, sanitized);
       // Every record, not just the current one: a superseded record can carry
       // the highest token, and re-issuing it would let a stale write land.
       for (const record of Object.values(sanitized.attachments)) {
@@ -411,18 +411,18 @@ export class SessionManager {
    * Whole-map overwrite, same shape as persistActiveJobs but for Fleet
    * attachment state. Unlike persistActiveJobs this saves EVERY session that
    * has ever had an attachment (including detached/superseded lineage), not
-   * just an active subset — see fleet-attachment-store.ts for why that's
+   * just an active subset — see attachment-store.ts for why that's
    * still bounded. Called after every attach/replace/detach/observation
    * write, never on a hot path like buildSnapshot.
    */
-  private persistFleetState(): void {
-    if (!this.fleetStore) return;
-    this.fleetStore.save([...this.fleetAttachments.values()]);
+  private persistAttachments(): void {
+    if (!this.attachmentStore) return;
+    this.attachmentStore.save([...this.attachments.values()]);
   }
 
   // ── Managed Fleet attachment ──────────────────────────────────────────
   //
-  // Every read below touches ONLY `fleetAttachments.get(sessionKey)` — one
+  // Every read below touches ONLY `attachments.get(sessionKey)` — one
   // session, O(1) — or hands the resulting single record to the injected
   // FleetAdapter. There is no code path anywhere in this block that iterates
   // sessions/handles/hosts, which is what "no heuristic scanning" (mission
@@ -451,7 +451,7 @@ export class SessionManager {
    * dropped rather than reported as a session state a runtime should reason
    * about.
    */
-  private agentSessionRef(record: FleetAttachmentRecord): AgentSessionRef {
+  private agentSessionRef(record: AgentSessionAttachment): AgentSessionRef {
     const lastKnownState =
       record.status === "superseded" || record.status === "detached" ? undefined : record.status;
     return {
@@ -476,7 +476,7 @@ export class SessionManager {
    * A map lookup on ONE id. There is no path from here to a runtime's session
    * list, because the callback seam defines no such callback.
    */
-  private resolveRuntime(record: FleetAttachmentRecord): AgentSessionRuntime | undefined {
+  private resolveRuntime(record: AgentSessionAttachment): AgentSessionRuntime | undefined {
     const registered = this.runtimes?.get(record.runtime);
     if (registered) return registered;
     if (record.runtime === CLAUDE_FLEET_RUNTIME_ID && this.fleetAdapter) {
@@ -496,7 +496,7 @@ export class SessionManager {
    * attached — there is no branch here that looks at any other session.
    */
   async runAgentSessionOp(sessionKey: string, request: AgentSessionRequest): Promise<AgentSessionStatus | undefined> {
-    const record = this.getFleetAttachment(sessionKey);
+    const record = this.getAgentSessionAttachment(sessionKey);
     if (!record) return undefined;
     const token = ++this.observationSeq;
     const attachmentId = record.id;
@@ -532,14 +532,14 @@ export class SessionManager {
     token: number,
     status: AgentSessionStatus,
   ): boolean {
-    const fresh = this.getCurrentFleetAttachmentIfUnchanged(sessionKey, attachmentId);
+    const fresh = this.getCurrentAttachmentIfUnchanged(sessionKey, attachmentId);
     if (!fresh) return false;
     if (fresh.delegatedTurnId !== delegatedTurnId) return false;
     if (token <= (fresh.observationToken ?? 0)) return false;
 
     const now = Date.now();
     if (status.error) {
-      this.writeFleetAttachment(sessionKey, attachmentId, {
+      this.writeAttachment(sessionKey, attachmentId, {
         observationToken: token,
         error: status.error,
         lastObservedAt: now,
@@ -558,7 +558,7 @@ export class SessionManager {
     const nextStatus = reported ?? promoted;
     const observedAt = status.lastEventAt ?? status.termination?.at ?? now;
 
-    this.writeFleetAttachment(sessionKey, attachmentId, {
+    this.writeAttachment(sessionKey, attachmentId, {
       observationToken: token,
       lastObservedAt: now,
       error: undefined,
@@ -596,13 +596,13 @@ export class SessionManager {
    * The session's current attachment, or undefined if it has never attached,
    * is currently detached, or the persisted record is malformed (a
    * `currentAttachmentId` with no matching entry in `attachments`, or a
-   * missing/non-object `attachments` field — see sanitizeFleetState, applied
+   * missing/non-object `attachments` field — see sanitizeAttachmentState, applied
    * at rehydration; the optional chaining here is a second, independent
    * guard so this can never throw regardless of how a bad record got into
    * the map). Never throws — malformed reads as "no current attachment".
    */
-  getFleetAttachment(sessionKey: string): FleetAttachmentRecord | undefined {
-    const state = this.fleetAttachments.get(sessionKey);
+  getAgentSessionAttachment(sessionKey: string): AgentSessionAttachment | undefined {
+    const state = this.attachments.get(sessionKey);
     if (!state?.currentAttachmentId) return undefined;
     return state.attachments?.[state.currentAttachmentId];
   }
@@ -612,8 +612,8 @@ export class SessionManager {
    * superseded/detached alike. Never throws: a missing/non-object
    * `attachments` field reads as an empty lineage rather than propagating.
    */
-  getFleetLineage(sessionKey: string): FleetAttachmentRecord[] {
-    const attachments = this.fleetAttachments.get(sessionKey)?.attachments;
+  getAgentSessionLineage(sessionKey: string): AgentSessionAttachment[] {
+    const attachments = this.attachments.get(sessionKey)?.attachments;
     return attachments ? Object.values(attachments) : [];
   }
 
@@ -621,18 +621,18 @@ export class SessionManager {
    * attach and replace share this implementation: both create a fresh
    * record and make it current. The only real difference is lineage —
    * "replace" REQUIRES the caller to supply a reason (enforced by
-   * fleet-handoff.ts's parser before this is ever called), while "attach"
+   * session-handoff.ts's parser before this is ever called), while "attach"
    * only carries one when there happened to be something to supersede. An
    * "attach" that arrives while an attachment is already current is treated
    * as an implicit replace rather than a silent no-op or an overwrite — the
    * prior record is never orphaned without an updated status.
    */
-  private attachOrReplaceFleet(
+  private attachOrReplace(
     sessionKey: string,
     jobId: string,
-    directive: Extract<FleetDirective, { op: "attach" | "replace" }>,
-  ): FleetAttachmentRecord {
-    const state = this.fleetAttachments.get(sessionKey) ?? { sessionKey, attachments: {} };
+    directive: Extract<AgentSessionDirective, { op: "attach" | "replace" }>,
+  ): AgentSessionAttachment {
+    const state = this.attachments.get(sessionKey) ?? { sessionKey, attachments: {} };
     const previous = state.currentAttachmentId ? state.attachments?.[state.currentAttachmentId] : undefined;
     const runtime = directive.runtime ?? CLAUDE_FLEET_RUNTIME_ID;
 
@@ -645,10 +645,10 @@ export class SessionManager {
     // "replace" always mints, because it is a stated lineage decision and
     // carries its own reason.
     if (directive.op === "attach" && previous && previous.runtime === runtime && previous.handle === directive.handle) {
-      return this.refreshCurrentFleetAttachment(sessionKey, jobId, previous, directive);
+      return this.refreshCurrentAttachment(sessionKey, jobId, previous, directive);
     }
 
-    const record: FleetAttachmentRecord = {
+    const record: AgentSessionAttachment = {
       id: randomUUID(),
       runtime,
       provider: directive.provider,
@@ -661,7 +661,7 @@ export class SessionManager {
       attachedAt: Date.now(),
       status: directive.status ?? "starting",
       // The turn that is dispatching THIS attach/replace is, by construction,
-      // delegating its own work to it — see FleetAttachmentRecord.delegatedTurnId.
+      // delegating its own work to it — see AgentSessionAttachment.delegatedTurnId.
       delegatedTurnId: jobId,
       ...(previous ? { replacesAttachmentId: previous.id } : {}),
     };
@@ -675,8 +675,8 @@ export class SessionManager {
       };
     }
 
-    this.fleetAttachments.set(sessionKey, { sessionKey, currentAttachmentId: record.id, attachments: nextAttachments });
-    this.persistFleetState();
+    this.attachments.set(sessionKey, { sessionKey, currentAttachmentId: record.id, attachments: nextAttachments });
+    this.persistAttachments();
     logDebug(
       `[fleet] session ${sessionKey.slice(-12)} ${directive.op}ed ${record.handle} (${record.id.slice(0, 8)})` +
         (previous ? `, superseding ${previous.handle} (${previous.id.slice(0, 8)})` : ""),
@@ -694,13 +694,13 @@ export class SessionManager {
    * Only fills in fields the statement actually carries: a marker that omits
    * `remoteUrl` is not asserting the session has none.
    */
-  private refreshCurrentFleetAttachment(
+  private refreshCurrentAttachment(
     sessionKey: string,
     jobId: string,
-    current: FleetAttachmentRecord,
-    directive: Extract<FleetDirective, { op: "attach" | "replace" }>,
-  ): FleetAttachmentRecord {
-    this.writeFleetAttachment(sessionKey, current.id, {
+    current: AgentSessionAttachment,
+    directive: Extract<AgentSessionDirective, { op: "attach" | "replace" }>,
+  ): AgentSessionAttachment {
+    this.writeAttachment(sessionKey, current.id, {
       // A re-statement by a DIFFERENT turn is a new delegation to the same
       // session: the previous turn's result/termination/liveness stop being
       // this attachment's current state. See redelegationReset.
@@ -713,7 +713,7 @@ export class SessionManager {
       ...(directive.worktree ? { worktree: directive.worktree } : {}),
       ...(directive.remoteUrl ? { remoteUrl: directive.remoteUrl } : {}),
       ...(directive.metadata ? { metadata: { ...current.metadata, ...directive.metadata } } : {}),
-      // Same reasoning as applyFleetObservation's explicit-status write: a
+      // Same reasoning as applyDirectiveObservation's explicit-status write: a
       // re-stated marker is the newest thing anyone has told us about this
       // session, so an older read still in flight must not land on top of it.
       ...(directive.status ? { status: directive.status, observationToken: ++this.observationSeq } : {}),
@@ -721,7 +721,7 @@ export class SessionManager {
     logDebug(
       `[agent-session] session ${sessionKey.slice(-12)} re-stated ${current.runtime}/${current.handle} (${current.id.slice(0, 8)}), delegated to job ${jobId.slice(0, 8)}`,
     );
-    return this.getFleetAttachment(sessionKey) ?? current;
+    return this.getAgentSessionAttachment(sessionKey) ?? current;
   }
 
   /**
@@ -743,7 +743,7 @@ export class SessionManager {
    *                      alone: it may still be true, and a stated status in
    *                      the same directive overwrites it anyway.
    */
-  private redelegationReset(current: FleetAttachmentRecord): Partial<FleetAttachmentRecord> {
+  private redelegationReset(current: AgentSessionAttachment): Partial<AgentSessionAttachment> {
     const terminal =
       current.status === "completed" || current.status === "idle" || current.status === "dead" || current.status === "failed";
     return {
@@ -756,28 +756,28 @@ export class SessionManager {
     };
   }
 
-  private detachFleet(sessionKey: string, reason: string): FleetAttachmentRecord | undefined {
-    const state = this.fleetAttachments.get(sessionKey);
+  private detachAttachment(sessionKey: string, reason: string): AgentSessionAttachment | undefined {
+    const state = this.attachments.get(sessionKey);
     const current = state?.currentAttachmentId ? state.attachments?.[state.currentAttachmentId] : undefined;
     if (!state || !current) return undefined;
-    const detached: FleetAttachmentRecord = { ...current, status: "detached", reason };
-    this.fleetAttachments.set(sessionKey, {
+    const detached: AgentSessionAttachment = { ...current, status: "detached", reason };
+    this.attachments.set(sessionKey, {
       sessionKey,
       currentAttachmentId: undefined,
       attachments: { ...(state.attachments ?? {}), [detached.id]: detached },
     });
-    this.persistFleetState();
+    this.persistAttachments();
     logDebug(`[fleet] session ${sessionKey.slice(-12)} detached ${detached.handle}: ${reason}`);
     return detached;
   }
 
-  private writeFleetAttachment(sessionKey: string, attachmentId: string, patch: Partial<FleetAttachmentRecord>): void {
-    const state = this.fleetAttachments.get(sessionKey);
+  private writeAttachment(sessionKey: string, attachmentId: string, patch: Partial<AgentSessionAttachment>): void {
+    const state = this.attachments.get(sessionKey);
     const current = state?.attachments?.[attachmentId];
     if (!state || !current) return;
-    const updated: FleetAttachmentRecord = { ...current, ...patch };
-    this.fleetAttachments.set(sessionKey, { ...state, attachments: { ...(state.attachments ?? {}), [attachmentId]: updated } });
-    this.persistFleetState();
+    const updated: AgentSessionAttachment = { ...current, ...patch };
+    this.attachments.set(sessionKey, { ...state, attachments: { ...(state.attachments ?? {}), [attachmentId]: updated } });
+    this.persistAttachments();
   }
 
   /**
@@ -792,8 +792,8 @@ export class SessionManager {
    * result from resurrecting or corrupting a now-historical
    * (detached/superseded) lineage record.
    */
-  private getCurrentFleetAttachmentIfUnchanged(sessionKey: string, attachmentId: string): FleetAttachmentRecord | undefined {
-    const state = this.fleetAttachments.get(sessionKey);
+  private getCurrentAttachmentIfUnchanged(sessionKey: string, attachmentId: string): AgentSessionAttachment | undefined {
+    const state = this.attachments.get(sessionKey);
     if (state?.currentAttachmentId !== attachmentId) return undefined;
     return state.attachments?.[attachmentId];
   }
@@ -808,7 +808,7 @@ export class SessionManager {
    * "continue" with no directive at all is simply omitting a directive,
    * which already leaves the existing attachment exposed on every
    * subsequent snapshot untouched (just not eligible for recovery on a turn
-   * that never claimed it — see tryFleetRecovery).
+   * that never claimed it — see tryAttachedSessionRecovery).
    *
    * inspect: applies only an optional host-reported status (never
    * delegatedTurnId — a passive read-refresh is not a new delegation claim).
@@ -837,12 +837,12 @@ export class SessionManager {
    * something to happen, so "no runtime knows how" has to become a visible
    * `error` on the attachment rather than silence.
    */
-  private applyFleetObservation(
+  private applyDirectiveObservation(
     sessionKey: string,
     jobId: string | undefined,
-    directive: Extract<FleetDirective, { op: "continue" | "inspect" }>,
+    directive: Extract<AgentSessionDirective, { op: "continue" | "inspect" }>,
   ): void {
-    const current = this.getFleetAttachment(sessionKey);
+    const current = this.getAgentSessionAttachment(sessionKey);
     if (!current) return;
 
     // Built via object-literal keys rather than property assignment on
@@ -850,11 +850,11 @@ export class SessionManager {
     // completion-reconciliation.test.ts) regex-matches ANY `.status =`
     // assignment regardless of receiver, and `patch.status = …` here would
     // be a false positive against a Job-outcome write it was never meant to
-    // catch — `patch` is a FleetAttachmentRecord fragment, not a Job.
+    // catch — `patch` is a AgentSessionAttachment fragment, not a Job.
     const statusStated = directive.status !== undefined;
     const delegationChanged = directive.op === "continue" && jobId !== undefined && jobId !== current.delegatedTurnId;
     if (statusStated || delegationChanged) {
-      this.writeFleetAttachment(sessionKey, current.id, {
+      this.writeAttachment(sessionKey, current.id, {
         // Same rule as a re-stated marker: a `continue` from a LATER turn is a
         // new delegation, so the previous turn's outcome fields go. Listed
         // first so an explicitly stated status still wins over the reset.
@@ -896,18 +896,18 @@ export class SessionManager {
   /**
    * Applies an already-parsed Fleet directive. Takes `jobId` explicitly
    * (rather than minting one itself) because attach/replace/continue stamp
-   * `delegatedTurnId` to it — see attachOrReplaceFleet/applyFleetObservation
-   * and FleetAttachmentRecord.delegatedTurnId. Called from submitTask only
+   * `delegatedTurnId` to it — see attachOrReplace/applyDirectiveObservation
+   * and AgentSessionAttachment.delegatedTurnId. Called from submitTask only
    * on the REAL dispatch path (never for a "session busy" rejection): a
    * directive whose turn never actually dispatched must not claim/burn a
    * delegation slot, and must not silently invalidate whatever turn
    * currently legitimately owns it.
    */
-  private applyFleetDirective(sessionKey: string, jobId: string, directive: FleetDirective): void {
+  private applyAgentSessionDirective(sessionKey: string, jobId: string, directive: AgentSessionDirective): void {
     switch (directive.op) {
       case "attach":
       case "replace":
-        this.attachOrReplaceFleet(sessionKey, jobId, directive);
+        this.attachOrReplace(sessionKey, jobId, directive);
         break;
       case "detach": {
         // Ask the runtime to stop the session BEFORE the local pointer goes
@@ -917,28 +917,28 @@ export class SessionManager {
         // wedge a conversation into staying attached to something it has
         // abandoned. The result is logged, not written back — by the time it
         // lands the record is already terminal lineage.
-        const current = this.getFleetAttachment(sessionKey);
+        const current = this.getAgentSessionAttachment(sessionKey);
         if (current && directive.stopRuntime) this.stopRuntimeSession(current, directive.reason);
-        this.detachFleet(sessionKey, directive.reason);
+        this.detachAttachment(sessionKey, directive.reason);
         break;
       }
       case "continue":
-        this.applyFleetObservation(sessionKey, jobId, directive);
+        this.applyDirectiveObservation(sessionKey, jobId, directive);
         break;
       case "inspect":
         // Passive read-refresh — never stamps delegatedTurnId.
-        this.applyFleetObservation(sessionKey, undefined, directive);
+        this.applyDirectiveObservation(sessionKey, undefined, directive);
         break;
     }
   }
 
   /**
    * Best-effort "end this session in its runtime too", for a detach that
-   * explicitly asked for it (see FleetDirective's `stopRuntime`). Never
+   * explicitly asked for it (see AgentSessionDirective's `stopRuntime`). Never
    * throws — dispatchAgentSession turns every failure into a status — and
    * never writes: the local detach that follows is what is durable.
    */
-  private stopRuntimeSession(record: FleetAttachmentRecord, reason: string): void {
+  private stopRuntimeSession(record: AgentSessionAttachment, reason: string): void {
     void dispatchAgentSession(
       this.resolveRuntime(record),
       this.agentSessionRef(record),
@@ -973,7 +973,7 @@ export class SessionManager {
    * read out of a Claude Code transcript.
    */
   private async observeForRecovery(
-    record: FleetAttachmentRecord,
+    record: AgentSessionAttachment,
   ): Promise<{ status: AgentSessionStatus; source: ResultSource } | undefined> {
     const ref = this.agentSessionRef(record);
     const now = Date.now();
@@ -1033,11 +1033,11 @@ export class SessionManager {
    *     newer observation while the runtime call was in flight (see
    *     applyAgentSessionStatus's three-part compare-and-set).
    */
-  private async tryFleetRecovery(
+  private async tryAttachedSessionRecovery(
     job: Job,
   ): Promise<{ summary: string; attachmentId: string; resultSource: ResultSource } | undefined> {
     if (!this.fleetAdapter && !this.runtimes) return undefined;
-    const current = this.getFleetAttachment(job.sessionKey);
+    const current = this.getAgentSessionAttachment(job.sessionKey);
     if (!current) return undefined;
 
     if (!current.delegatedTurnId || current.delegatedTurnId !== job.jobId) return undefined;
@@ -1097,11 +1097,11 @@ export class SessionManager {
    * on a human is not an ordinary quiet finish, and the two must not read
    * alike on any surface — see delegateBlockedTerminalReason.
    *
-   * Delegation-scoped like tryFleetRecovery: an attachment left current from
+   * Delegation-scoped like tryAttachedSessionRecovery: an attachment left current from
    * some earlier turn says nothing about this one.
    */
-  private blockedDelegation(job: Job): FleetAttachmentRecord | undefined {
-    const current = this.getFleetAttachment(job.sessionKey);
+  private blockedDelegation(job: Job): AgentSessionAttachment | undefined {
+    const current = this.getAgentSessionAttachment(job.sessionKey);
     if (!current || current.delegatedTurnId !== job.jobId) return undefined;
     return isBlockedAgentSessionState(current.status) ? current : undefined;
   }
@@ -1113,7 +1113,7 @@ export class SessionManager {
     // must never see the raw directive block, so it's stripped here
     // regardless of what happens next. Application is DEFERRED until the
     // busy check below has passed, so a directive always correlates to the
-    // REAL job it rides in on (see applyFleetDirective's delegatedTurnId
+    // REAL job it rides in on (see applyAgentSessionDirective's delegatedTurnId
     // stamping) — a "session busy" rejection must not be able to claim or
     // burn a delegation slot that belongs to the job actually running.
     const parsedDirective = parseSessionHandoff(input.context);
@@ -1164,7 +1164,7 @@ export class SessionManager {
 
     const jobId = randomUUID();
     // Apply the directive now that we know it correlates to a REAL turn.
-    if (parsedDirective) this.applyFleetDirective(sessionKey, jobId, parsedDirective.directive);
+    if (parsedDirective) this.applyAgentSessionDirective(sessionKey, jobId, parsedDirective.directive);
     const artifacts = emptyArtifacts();
     const now = Date.now();
     const hasInitialLog = !input.sessionKey || migratedFromLegacy;
@@ -1744,8 +1744,8 @@ export class SessionManager {
           // a still-`running` job, and only after the checks above already
           // confirmed nothing upstream is left to wait for). Consults only
           // this session's known current Fleet attachment, never a scan —
-          // see tryFleetRecovery.
-          const fleet = await this.tryFleetRecovery(job);
+          // see tryAttachedSessionRecovery.
+          const fleet = await this.tryAttachedSessionRecovery(job);
           if (fleet && job.status === "running" && this.latestJobBySession.get(sessionKey) === jobId) {
             // Marked provisional so the existing lazy-recheck path
             // (maybeRecoverTerminalJob) keeps re-reading the PARENT
@@ -1944,9 +1944,9 @@ export class SessionManager {
       // job is `running` — that path is recoverLateFinalText's, not this
       // lazy re-check's.
       if (job.status === "completed_no_summary") {
-        const fleet = await this.tryFleetRecovery(job);
+        const fleet = await this.tryAttachedSessionRecovery(job);
         if (!fleet) {
-          // tryFleetRecovery refuses a blocked delegation outright, and this
+          // tryAttachedSessionRecovery refuses a blocked delegation outright, and this
           // poll may be the first read that DISCOVERED the block — the turn
           // was already terminal by then, still carrying the ordinary
           // "nothing to report" outcome. Relabel it so every surface that
@@ -2047,7 +2047,7 @@ export class SessionManager {
    */
   buildSnapshot(job: Job, cursor?: number): JobSnapshot {
     const continuation = this.sessions.get(job.sessionKey);
-    const fleetAttachment = this.getFleetAttachment(job.sessionKey);
+    const agentSession = this.getAgentSessionAttachment(job.sessionKey);
     const continuePolling = job.status === "running";
     const window = projectLogWindow(job.logs, cursor);
     return {
@@ -2080,7 +2080,7 @@ export class SessionManager {
       // Unconditional, like `recovery` above — the owning host needs to see the
       // session's current attachment on every turn to decide continue vs.
       // replace vs. detach, not just under a detail preset.
-      ...(fleetAttachment ? { fleetAttachment } : {}),
+      ...(agentSession ? { agentSession } : {}),
     };
   }
 

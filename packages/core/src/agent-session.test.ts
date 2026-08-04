@@ -364,7 +364,7 @@ describe("a blocked delegation is never an ordinary finished task", () => {
   const blockedSnapshot = {
     jobId: "job-1",
     status: "completed_no_summary",
-    fleetAttachment: {
+    agentSession: {
       runtime: "example-runtime",
       handle: "thr-abc123",
       status: "needs_input",
@@ -381,7 +381,7 @@ describe("a blocked delegation is never an ordinary finished task", () => {
     expect(notice).toContain("should I force-push?");
     expect(notice).toContain("https://runtime.example/threads/abc123");
 
-    expect(describeBlockedAgentSession({ ...blockedSnapshot.fleetAttachment, status: "needs_permission" })).toContain(
+    expect(describeBlockedAgentSession({ ...blockedSnapshot.agentSession, status: "needs_permission" })).toContain(
       "waiting for permission",
     );
   });
@@ -391,14 +391,14 @@ describe("a blocked delegation is never an ordinary finished task", () => {
     expect(
       blockedDelegationNotice({
         ...blockedSnapshot,
-        fleetAttachment: { ...blockedSnapshot.fleetAttachment, status: "running" },
+        agentSession: { ...blockedSnapshot.agentSession, status: "running" },
       }),
     ).toBeUndefined();
     // Delegated to an earlier turn: it says nothing about THIS one.
     expect(
       blockedDelegationNotice({
         ...blockedSnapshot,
-        fleetAttachment: { ...blockedSnapshot.fleetAttachment, delegatedTurnId: "job-0" },
+        agentSession: { ...blockedSnapshot.agentSession, delegatedTurnId: "job-0" },
       }),
     ).toBeUndefined();
     expect(blockedDelegationNotice({ jobId: "job-1", status: "completed" })).toBeUndefined();
@@ -422,7 +422,7 @@ describe("an ACTIVE blocked delegation on a still-running turn", () => {
   const activeSnapshot = {
     jobId: "job-1",
     status: "running",
-    fleetAttachment: {
+    agentSession: {
       runtime: "example-runtime",
       handle: "thr-abc123",
       status: "needs_input",
@@ -450,7 +450,7 @@ describe("an ACTIVE blocked delegation on a still-running turn", () => {
   it("distinguishes a permission prompt from a question", () => {
     const blocked = blockedDelegation({
       ...activeSnapshot,
-      fleetAttachment: { ...activeSnapshot.fleetAttachment, status: "needs_permission" },
+      agentSession: { ...activeSnapshot.agentSession, status: "needs_permission" },
     })!;
     expect(blocked.state).toBe("needs_permission");
     expect(blocked.notice).toContain("waiting for permission");
@@ -461,13 +461,13 @@ describe("an ACTIVE blocked delegation on a still-running turn", () => {
     expect(
       blockedDelegation({
         ...activeSnapshot,
-        fleetAttachment: { ...activeSnapshot.fleetAttachment, delegatedTurnId: "job-0" },
+        agentSession: { ...activeSnapshot.agentSession, delegatedTurnId: "job-0" },
       }),
     ).toBeUndefined();
     expect(
       blockedDelegation({
         ...activeSnapshot,
-        fleetAttachment: { ...activeSnapshot.fleetAttachment, status: "running" },
+        agentSession: { ...activeSnapshot.agentSession, status: "running" },
       }),
     ).toBeUndefined();
     expect(blockedDelegation({ jobId: "job-1", status: "running" })).toBeUndefined();
@@ -476,7 +476,7 @@ describe("an ACTIVE blocked delegation on a still-running turn", () => {
   it("reads as terminal, with the terminal wording, once the job has ended", () => {
     const blocked = blockedDelegation({ ...activeSnapshot, status: "completed_no_summary" })!;
     expect(blocked.active).toBe(false);
-    expect(blocked.notice).toBe(describeBlockedAgentSession(activeSnapshot.fleetAttachment));
+    expect(blocked.notice).toBe(describeBlockedAgentSession(activeSnapshot.agentSession));
     expect(blocked.notice).toContain("the task is not finished");
     // blockedDelegationNotice stays the TERMINAL-only accessor, so the
     // transports' terminal branches are untouched by any of this.

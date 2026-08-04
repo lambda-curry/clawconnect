@@ -42,7 +42,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LocalTmuxFleetAdapter } from "./fleet-adapter.ts";
-import type { FleetAttachmentRecord } from "./types.ts";
+import type { AgentSessionAttachment } from "./types.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -64,7 +64,7 @@ function tmpHome(): string {
   return dir;
 }
 
-function makeAttachment(overrides: Partial<FleetAttachmentRecord> = {}): FleetAttachmentRecord {
+function makeAttachment(overrides: Partial<AgentSessionAttachment> = {}): AgentSessionAttachment {
   return {
     id: "att-1",
     runtime: "claude-fleet",
@@ -264,7 +264,7 @@ describe("LocalTmuxFleetAdapter", () => {
    */
   describe("an abandoned recovery stops immediately", () => {
     /** A handle with a genuinely readable transcript, so a null return can only mean the abort. */
-    function readableSession(): { home: string; attachment: FleetAttachmentRecord } {
+    function readableSession(): { home: string; attachment: AgentSessionAttachment } {
       const home = tmpHome();
       const attachment = makeAttachment();
       const dir = join(home, attachment.handle);

@@ -5,7 +5,7 @@ import type {
   CheckTaskOpts,
   CheckTaskResult,
   ContinuationState,
-  FleetAttachmentRecord,
+  AgentSessionAttachment,
   Job,
   RunTaskResult,
   SessionInspectMode,
@@ -124,9 +124,9 @@ function previewBlockedDelegation(blocked: BlockedDelegation | undefined): Block
  * whether it has anything to say about THIS row is decided by
  * blockedDelegation's delegated-turn check, not by the caller.
  */
-function toTaskSummary(job: Job, agentId: string, attachment?: FleetAttachmentRecord): TaskSummary {
+function toTaskSummary(job: Job, agentId: string, attachment?: AgentSessionAttachment): TaskSummary {
   const blocked = previewBlockedDelegation(
-    blockedDelegation({ jobId: job.jobId, status: job.status, fleetAttachment: attachment }),
+    blockedDelegation({ jobId: job.jobId, status: job.status, agentSession: attachment }),
   );
   return {
     taskId: job.jobId,
@@ -151,7 +151,7 @@ export function listTasks(pool: GatewayPool): TaskSummary[] {
       if (!job) continue;
       // Reads the ONE attachment this session already has — the same
       // per-session lookup get_session does, never a scan across sessions.
-      items.push(toTaskSummary(job, entry.agent.id, entry.sessions.getFleetAttachment(session.sessionKey)));
+      items.push(toTaskSummary(job, entry.agent.id, entry.sessions.getAgentSessionAttachment(session.sessionKey)));
     }
   }
   recordTelemetry({ tool: "list_tasks", taskCount: items.length, durationMs: Date.now() - start });
@@ -345,13 +345,13 @@ export function getSession(
   const after = Math.max(0, opts.after ?? 0);
   const events = job.logs.slice(after, after + limit);
 
-  const fleetAttachment = entry.sessions.getFleetAttachment(opts.sessionId);
+  const agentSession = entry.sessions.getAgentSessionAttachment(opts.sessionId);
 
   const tasks: TaskSummary[] | undefined =
     mode === "tasks"
       ? entry.sessions
           .getJobHistory(opts.sessionId)
-          .map((historyJob) => toTaskSummary(historyJob, entry.agent.id, fleetAttachment))
+          .map((historyJob) => toTaskSummary(historyJob, entry.agent.id, agentSession))
       : undefined;
 
   return {
@@ -367,6 +367,6 @@ export function getSession(
     ...(mode === "snapshot" || mode === "tasks" ? {} : { events }),
     ...(mode === "tail" ? { nextAfter: after + events.length } : {}),
     ...(tasks ? { tasks } : {}),
-    ...(fleetAttachment ? { fleetAttachment } : {}),
+    ...(agentSession ? { agentSession } : {}),
   };
 }

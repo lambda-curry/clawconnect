@@ -1,7 +1,10 @@
 # Registering an agent-session runtime, and where attachment state lives
 
-Companion to `2026-08-02-managed-fleet-attachment-plan.md`. That document
-covers the attachment model (one current attachment per conversation, lineage,
+Normative companion to [runtime-boundary.md](runtime-boundary.md), which covers
+the ownership split and the attachment/observation contracts, and to
+[the integration guide](../guides/runtime-integration.md), which walks a host
+through implementing the callbacks. The historical
+`2026-08-02-managed-fleet-attachment-plan.md` covers the attachment model (one current attachment per conversation, lineage,
 delegated turns, recovery tier 3). This one covers the two wiring questions a
 deployment has to answer: **how does a host teach this build about a runtime**,
 and **where does attachment state survive a restart**.
@@ -35,7 +38,7 @@ intact — the operator names ES modules to load, the same way they already name
 `~/.clawconnect/agents.json`:
 
 ```
-CLAWCONNECT_AGENT_SESSION_RUNTIME_MODULES=/opt/saffron/t3-bridge/register.mjs
+CLAWCONNECT_AGENT_SESSION_RUNTIME_MODULES=/opt/acme/runtime-bridge/register.mjs
 ```
 
 Each module exports `registerAgentSessionRuntimes(registry)` (or a default
@@ -44,8 +47,8 @@ function of the same shape) and registers whatever it can answer for:
 ```js
 export function registerAgentSessionRuntimes(registry) {
   registry.register({
-    id: "t3-fleet",
-    provider: "anthropic-claude-code",
+    id: "example-runtime",
+    provider: "example-provider",
     inspect: (ref, opts) => /* the host's own transport */,
     continue: (ref, request, opts) => /* … */,
   });
@@ -61,9 +64,9 @@ delegation still works. Unset or registering nothing, `claude-fleet` stays the
 only reachable runtime and any other attachment reads back as a precise
 `unknown_runtime` result.
 
-**The outer adapter stays outside.** The Saffron T3 bridge is one such module:
-it owns the T3 CLI/API, pairing, project selection, and credentials, and hands
-ClawConnect three functions. Specifiers come from the deployment's own
+**The outer adapter stays outside.** A host's own runtime bridge is one such
+module: it owns that runtime's CLI/API, pairing, project selection, and
+credentials, and hands ClawConnect three functions. Specifiers come from the deployment's own
 environment — operator configuration, at the same trust level as the agent
 registry, never anything a caller or an agent can influence.
 
@@ -76,7 +79,7 @@ routinely outlives the ClawConnect process that attached to it.
 | Path | Runtime registry | Attachment store |
 |---|---|---|
 | `apps/chatgpt` (`createApp`) | `CLAWCONNECT_AGENT_SESSION_RUNTIME_MODULES` via `index.ts` | on by default — `<jobStoreDir>/<agentId>.fleet.json` |
-| `packages/mcp` bin (`createMcpServer`) | same env var via `bin.ts` | `CLAWCONNECT_FLEET_STORE_DIR`, default `~/.clawconnect/attachments` |
+| `packages/mcp` bin (`createMcpServer`) | same env var via `bin.ts` | `CLAWCONNECT_ATTACHMENT_STORE_DIR`, default `~/.clawconnect/attachments` |
 | `createApp` / `createMcpServer` as a library | caller passes `agentSessionRuntimes` | caller passes a directory; unset = in-memory |
 | `packages/cli` | none | none |
 

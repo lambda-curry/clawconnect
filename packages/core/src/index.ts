@@ -3,8 +3,8 @@ export { SessionManager } from "./session.ts";
 export { GatewayPool } from "./gateway-pool.ts";
 export { JsonFileJobStore } from "./job-store.ts";
 export type { JobStore, PersistedJob } from "./job-store.ts";
-export { JsonFileFleetAttachmentStore } from "./fleet-attachment-store.ts";
-export type { FleetAttachmentStore } from "./fleet-attachment-store.ts";
+export { JsonFileAttachmentStore } from "./attachment-store.ts";
+export type { AttachmentStore } from "./attachment-store.ts";
 export { LocalTmuxFleetAdapter, fleetAdapterRuntime, CLAUDE_FLEET_RUNTIME_ID } from "./fleet-adapter.ts";
 export type { FleetAdapter, FleetHandoff } from "./fleet-adapter.ts";
 export {
@@ -45,8 +45,8 @@ export type {
   BlockedDelegation,
   BlockedDelegationSnapshot,
 } from "./agent-session.ts";
-export { parseFleetDirective, parseAgentSessionMarker, parseSessionHandoff } from "./fleet-handoff.ts";
-export type { ParsedFleetDirective } from "./fleet-handoff.ts";
+export { parseAgentSessionDirective, parseAgentSessionMarker, parseSessionHandoff } from "./session-handoff.ts";
+export type { ParsedAgentSessionDirective } from "./session-handoff.ts";
 export { loadAgentRegistry, resolveAgent, REGISTRY_PATH, agentBlurb, agentDescriptor } from "./agent-registry.ts";
 export type { AgentEntry, AgentRegistry } from "./agent-registry.ts";
 export { searchMemory, getMemory, listCollections, DEFAULT_QMD_URL } from "./memory.ts";
@@ -82,9 +82,9 @@ export type {
   ContinuationState,
   ErrorCategory,
   ErrorInfo,
-  FleetAttachmentRecord,
-  FleetDirective,
-  FleetLiveStatus,
+  AgentSessionAttachment,
+  AgentSessionDirective,
+  AttachmentLiveStatus,
   GatewayConfig,
   GatewayEvent,
   Job,
@@ -95,7 +95,7 @@ export type {
   NextAction,
   ResultSource,
   RunTaskResult,
-  SessionFleetState,
+  SessionAttachmentState,
   SessionInspectMode,
   SessionInspectResult,
   TaskInput,

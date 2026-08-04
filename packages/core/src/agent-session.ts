@@ -5,7 +5,7 @@
  *
  * The durable side of the model — one current attachment per
  * conversation, replacement lineage, restart persistence, parent/turn
- * correlation — already exists in session.ts + fleet-attachment-store.ts and is
+ * correlation — already exists in session.ts + attachment-store.ts and is
  * NOT duplicated here. This module owns exactly two things:
  *
  *   1. `AgentSessionRuntimeRegistry` — a host registers one runtime id/provider
@@ -130,7 +130,7 @@ export function isDelegateBlockedTerminalReason(reason: string | undefined): boo
 
 /**
  * The neutral shape every blocked-delegation surface reads. Structurally typed
- * rather than importing FleetAttachmentRecord: types.ts already imports from
+ * rather than importing AgentSessionAttachment: types.ts already imports from
  * this module, and this is the only part of the record any of them needs.
  */
 export type BlockedAgentSessionView = {
@@ -296,7 +296,7 @@ export type AgentSessionStatus = {
 export type BlockedDelegationSnapshot = {
   jobId: string;
   status: string;
-  fleetAttachment?: BlockedAgentSessionView & { delegatedTurnId?: string };
+  agentSession?: BlockedAgentSessionView & { delegatedTurnId?: string };
 };
 
 /**
@@ -310,7 +310,7 @@ export type BlockedDelegationSnapshot = {
 function blockedAttachmentForTurn(
   snapshot: BlockedDelegationSnapshot,
 ): (BlockedAgentSessionView & { delegatedTurnId?: string }) | undefined {
-  const attachment = snapshot.fleetAttachment;
+  const attachment = snapshot.agentSession;
   if (!attachment || attachment.delegatedTurnId !== snapshot.jobId) return undefined;
   return isBlockedAgentSessionState(attachment.status) ? attachment : undefined;
 }

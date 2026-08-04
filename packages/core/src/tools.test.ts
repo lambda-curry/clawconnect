@@ -468,14 +468,14 @@ describe("a blocked delegation is listed as needing a human, not as done", () =>
  * actionable block goes unnoticed for as long as anyone keeps polling.
  */
 describe("a RUNNING task whose delegated session is waiting on a human", () => {
-  function fleetBlock(directive: Record<string, unknown>): string {
-    return `[[clawconnect:fleet]]${JSON.stringify(directive)}[[/clawconnect:fleet]]`;
+  function directiveBlock(directive: Record<string, unknown>): string {
+    return `[[clawconnect:agent-session]]${JSON.stringify(directive)}[[/clawconnect:agent-session]]`;
   }
 
   function delegatedRun(pool: GatewayPool, state: "needs_input" | "needs_permission") {
     return runTask(pool, {
       task: "delegate it",
-      context: fleetBlock({
+      context: directiveBlock({
         op: "attach",
         handle: "thr-abc123",
         host: "workstation-1",
@@ -514,7 +514,7 @@ describe("a RUNNING task whose delegated session is waiting on a human", () => {
     const pool = freshPool();
     const run = runTask(pool, {
       task: "delegate it",
-      context: fleetBlock({
+      context: directiveBlock({
         op: "attach",
         handle: "thr-abc123",
         host: "workstation-1",
@@ -522,7 +522,7 @@ describe("a RUNNING task whose delegated session is waiting on a human", () => {
         status: "needs_input",
       }),
     });
-    const attachment = pool.forJob(run.jobId)!.sessions.getFleetAttachment(run.sessionKey)!;
+    const attachment = pool.forJob(run.jobId)!.sessions.getAgentSessionAttachment(run.sessionKey)!;
     attachment.latestResponse = "x".repeat(5_000);
 
     const row = listTasks(pool).find((t) => t.taskId === run.jobId)!;
@@ -556,7 +556,7 @@ describe("a RUNNING task whose delegated session is waiting on a human", () => {
     // An attachment that exists but is NOT blocked says nothing either.
     const attached = runTask(pool, {
       task: "delegate it",
-      context: fleetBlock({ op: "attach", handle: "thr-live", host: "workstation-1", runtime: "example-runtime", status: "running" }),
+      context: directiveBlock({ op: "attach", handle: "thr-live", host: "workstation-1", runtime: "example-runtime", status: "running" }),
     });
     const attachedRow = listTasks(pool).find((t) => t.taskId === attached.jobId)!;
     expect(attachedRow.status).toBe("running");

@@ -365,6 +365,7 @@ ChatGPT
 |---|---|
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Current — package structure and data flow |
 | [docs/architecture/runtime-boundary.md](docs/architecture/runtime-boundary.md) | Normative — what ClawConnect owns vs. an embedding host, for optional managed-runtime attachment |
+| [docs/architecture/runtime-registration.md](docs/architecture/runtime-registration.md) | Normative — how a host or operator registers a runtime, and where attachment state survives a restart |
 | [docs/guides/runtime-integration.md](docs/guides/runtime-integration.md) | Guide — implementing `inspect`/`continue`/`detach` for one already-known session |
 | [docs/decisions/2026-07-27-task-contract.md](docs/decisions/2026-07-27-task-contract.md) | Accepted decision record |
 | [docs/architecture/2026-07-27-multi-client-compatibility.md](docs/architecture/2026-07-27-multi-client-compatibility.md) | Historical implementation record |

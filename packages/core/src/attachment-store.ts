@@ -1,14 +1,14 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import type { SessionFleetState } from "./types.ts";
+import type { SessionAttachmentState } from "./types.ts";
 
-export interface FleetAttachmentStore {
-  load(): SessionFleetState[];
-  save(states: SessionFleetState[]): void;
+export interface AttachmentStore {
+  load(): SessionAttachmentState[];
+  save(states: SessionAttachmentState[]): void;
 }
 
 /**
- * File-backed FleetAttachmentStore, same shape and atomicity as
+ * File-backed AttachmentStore, same shape and atomicity as
  * job-store.ts's JsonFileJobStore. Unlike the job store — which only ever
  * holds currently-running jobs and prunes on every terminal transition — this
  * store holds every session that has ever had an attachment, including
@@ -20,10 +20,10 @@ export interface FleetAttachmentStore {
  * load-bearing for the attach/continue/replace/detach transitions themselves,
  * which always succeed in memory first).
  */
-export class JsonFileFleetAttachmentStore implements FleetAttachmentStore {
+export class JsonFileAttachmentStore implements AttachmentStore {
   constructor(private readonly filePath: string) {}
 
-  load(): SessionFleetState[] {
+  load(): SessionAttachmentState[] {
     try {
       if (!existsSync(this.filePath)) return [];
       const parsed = JSON.parse(readFileSync(this.filePath, "utf8"));
@@ -34,7 +34,7 @@ export class JsonFileFleetAttachmentStore implements FleetAttachmentStore {
     }
   }
 
-  save(states: SessionFleetState[]): void {
+  save(states: SessionAttachmentState[]): void {
     try {
       mkdirSync(dirname(this.filePath), { recursive: true });
       const tmpPath = `${this.filePath}.tmp`;

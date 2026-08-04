@@ -35,6 +35,7 @@ Relevant exports:
 | Export | Purpose |
 |---|---|
 | `AgentSessionRuntimeRegistry` | Where a host registers one runtime's callbacks |
+| `loadAgentSessionRuntimes`, `RUNTIME_MODULES_ENV` | Operator-named ES modules, for deployments that run a shipped binary |
 | `AgentSessionRuntimeCallbacks` | The `inspect`/`continue`/`detach` shape a host implements |
 | `AgentSessionObservation` | The loose reply a runtime may return |
 | `AgentSessionStatus` / `AgentSessionState` | The normalized result and its closed state vocabulary |

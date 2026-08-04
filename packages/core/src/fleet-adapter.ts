@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import type { AgentSessionRuntime } from "./agent-session.ts";
-import type { FleetAttachmentRecord } from "./types.ts";
+import type { AgentSessionAttachment } from "./types.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -23,7 +23,7 @@ export type FleetHandoff = { text: string; resultAt: number };
 /**
  * Inspects exactly one already-known attachment — never enumerates or scans
  * Fleet sessions. session.ts only ever calls this with a record it already
- * has from SessionFleetState.currentAttachmentId, so there is no code path
+ * has from SessionAttachmentState.currentAttachmentId, so there is no code path
  * from here back to a global Fleet listing.
  */
 export interface FleetAdapter {
@@ -36,9 +36,9 @@ export interface FleetAdapter {
    * that DOES local work is expected to honor it, because everything on this
    * path runs while a job is held out of a terminal status.
    */
-  isLive(attachment: FleetAttachmentRecord, signal?: AbortSignal): Promise<boolean>;
+  isLive(attachment: AgentSessionAttachment, signal?: AbortSignal): Promise<boolean>;
   /** A durable terminal result for the attachment, or null when none is available/trustworthy yet. */
-  readTerminalHandoff(attachment: FleetAttachmentRecord, signal?: AbortSignal): Promise<FleetHandoff | null>;
+  readTerminalHandoff(attachment: AgentSessionAttachment, signal?: AbortSignal): Promise<FleetHandoff | null>;
 }
 
 /**
@@ -64,7 +64,7 @@ export interface FleetAdapter {
  */
 export function fleetAdapterRuntime(
   adapter: FleetAdapter,
-  record: FleetAttachmentRecord,
+  record: AgentSessionAttachment,
   provider = "anthropic-claude-code",
 ): AgentSessionRuntime {
   return {
@@ -76,7 +76,7 @@ export function fleetAdapterRuntime(
       provider,
       // Bound to the one record it was built for rather than reconstructing an
       // attachment from the neutral ref: FleetAdapter's contract is stated in
-      // terms of a real FleetAttachmentRecord, and every dispatch addresses
+      // terms of a real AgentSessionAttachment, and every dispatch addresses
       // exactly one already-known attachment anyway.
       inspect: async (_ref, opts) => ({ alive: await adapter.isLive(record, opts.signal) }),
     },
@@ -84,9 +84,9 @@ export function fleetAdapterRuntime(
 }
 
 /**
- * Same safe-path-segment check as fleet-handoff.ts's directive validation —
+ * Same safe-path-segment check as session-handoff.ts's directive validation —
  * re-applied here as defense in depth so this adapter is safe to call with
- * ANY FleetAttachmentRecord, not just ones that passed through the parser
+ * ANY AgentSessionAttachment, not just ones that passed through the parser
  * (e.g. one reloaded from the attachment store).
  */
 const SAFE_HANDLE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -113,7 +113,7 @@ interface FleetSessionMeta {
 export class LocalTmuxFleetAdapter implements FleetAdapter {
   constructor(private readonly fleetHomeDir: string = join(homedir(), ".claude-fleet")) {}
 
-  async isLive(attachment: FleetAttachmentRecord, signal?: AbortSignal): Promise<boolean> {
+  async isLive(attachment: AgentSessionAttachment, signal?: AbortSignal): Promise<boolean> {
     if (!SAFE_HANDLE_RE.test(attachment.handle)) return false;
     if (signal?.aborted) return false;
     try {
@@ -129,7 +129,7 @@ export class LocalTmuxFleetAdapter implements FleetAdapter {
     }
   }
 
-  async readTerminalHandoff(attachment: FleetAttachmentRecord, signal?: AbortSignal): Promise<FleetHandoff | null> {
+  async readTerminalHandoff(attachment: AgentSessionAttachment, signal?: AbortSignal): Promise<FleetHandoff | null> {
     if (!SAFE_HANDLE_RE.test(attachment.handle)) return null;
     if (signal?.aborted) return null;
     // Trusted only once the tmux session has actually ended — a live
