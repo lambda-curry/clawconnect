@@ -8,6 +8,28 @@
 > [runtime-boundary.md](runtime-boundary.md) — it supersedes this document
 > wherever the two disagree. This document is not part of the public
 > integration path; see [the integration guide](../guides/runtime-integration.md).
+>
+> **Names below are the ones this slice shipped with and have since changed.**
+> The body is left as written — annotating a record beats rewriting one — so
+> use this map rather than searching for files that no longer exist:
+>
+> | Then | Now |
+> |---|---|
+> | `fleet-handoff.ts` | `session-handoff.ts` |
+> | `fleet-attachment-store.ts` | `attachment-store.ts` |
+> | `fleet-attachment.test.ts` | `agent-session-attachment.test.ts` |
+> | `FleetAttachmentRecord` | `AgentSessionAttachment` |
+> | `SessionFleetState` | `SessionAttachmentState` |
+> | `FleetDirective` | `AgentSessionDirective` |
+> | `FleetLiveStatus` | `AttachmentLiveStatus` |
+> | `FleetAttachmentStore` / `JsonFileFleetAttachmentStore` | `AttachmentStore` / `JsonFileAttachmentStore` |
+> | `parseFleetDirective` | `parseAgentSessionDirective` |
+> | `fleetAttachment` (wire field) | `agentSession` |
+> | `[[clawconnect:fleet]]` | `[[clawconnect:agent-session]]` |
+> | `resultSource: "fleet-transcript"` | `resultSource: "attached-session"` |
+>
+> `FleetAdapter`, `LocalTmuxFleetAdapter`, and `fleet-adapter.ts` kept their
+> names: they genuinely describe the legacy claude-fleet adapter.
 
 ## Ownership boundary as recorded on 2026-08-03
 

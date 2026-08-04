@@ -265,7 +265,7 @@ transport.
 Register a fake runtime whose callbacks return canned observations, submit a
 task carrying a marker for it, and assert on the attachment in the snapshot.
 `packages/core/src/agent-session.test.ts` and
-`packages/core/src/fleet-attachment.test.ts` do exactly this and are a usable
+`packages/core/src/agent-session-attachment.test.ts` do exactly this and are a usable
 template; neither touches a live gateway or a real runtime.
 
 ## Related

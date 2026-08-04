@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 import { describe, expect, it } from "vitest";
 
@@ -104,6 +104,20 @@ describe("public surface stays host-neutral", () => {
 
   it("references no internal path or thread id in any document", () => {
     expect(offenders(walk(REPO_ROOT, isMarkdown), BANNED_REFERENCES)).toEqual([]);
+  });
+
+  it("cites no source file that does not exist, in public docs", () => {
+    // The rename that moved fleet-*.ts left a public guide pointing at a
+    // deleted test file. Historical records are exempt by the same rule as
+    // above — they cite the tree as it was, and carry their own rename map.
+    const dangling: string[] = [];
+    for (const doc of PUBLIC_DOCS) {
+      const text = readFileSync(doc, "utf8");
+      for (const m of text.matchAll(/`((?:packages|apps)\/[\w./-]+\.(?:ts|js|html))`/g)) {
+        if (!existsSync(join(REPO_ROOT, m[1]!))) dangling.push(`${relative(REPO_ROOT, doc)} → ${m[1]}`);
+      }
+    }
+    expect(dangling).toEqual([]);
   });
 
   it("keeps the runtime seam documented as optional", async () => {
