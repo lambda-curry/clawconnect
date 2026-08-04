@@ -26,7 +26,12 @@
 > | `parseFleetDirective` | `parseAgentSessionDirective` |
 > | `fleetAttachment` (wire field) | `agentSession` |
 > | `[[clawconnect:fleet]]` | `[[clawconnect:agent-session]]` |
-> | `resultSource: "fleet-transcript"` | `resultSource: "attached-session"` |
+> | `fleetStoreDir` / `CLAWCONNECT_FLEET_STORE_DIR` | `attachmentStoreDir` / `CLAWCONNECT_ATTACHMENT_STORE_DIR` |
+> | `<agentId>.fleet.json` | `<agentId>.attachments.json` |
+>
+> `resultSource: "fleet-transcript"` did **not** change. It now means the
+> legacy claude-fleet transcript path *only*; a result recovered from a
+> host-registered runtime is `resultSource: "agent-session"`.
 >
 > `FleetAdapter`, `LocalTmuxFleetAdapter`, and `fleet-adapter.ts` kept their
 > names: they genuinely describe the legacy claude-fleet adapter.

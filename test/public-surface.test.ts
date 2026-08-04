@@ -123,6 +123,7 @@ describe("public surface stays host-neutral", () => {
       "fleetStoreDir",
       "CLAWCONNECT_FLEET_STORE_DIR",
       "[[clawconnect:fleet]]",
+      ".fleet.json",
       "DEFAULT_AGENT_SESSION_TIMEOUT_MS",
     ];
     const pattern = new RegExp(RETIRED.map((n) => n.replace(/[[\]]/g, "\\$&")).join("|"));

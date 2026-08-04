@@ -78,7 +78,7 @@ routinely outlives the ClawConnect process that attached to it.
 
 | Path | Runtime registry | Attachment store |
 |---|---|---|
-| `apps/chatgpt` (`createApp`) | `CLAWCONNECT_AGENT_SESSION_RUNTIME_MODULES` via `index.ts` | on by default — `<jobStoreDir>/<agentId>.fleet.json` |
+| `apps/chatgpt` (`createApp`) | `CLAWCONNECT_AGENT_SESSION_RUNTIME_MODULES` via `index.ts` | on by default — `<jobStoreDir>/<agentId>.attachments.json` |
 | `packages/mcp` bin (`createMcpServer`) | same env var via `bin.ts` | `CLAWCONNECT_ATTACHMENT_STORE_DIR`, default `~/.clawconnect/attachments` |
 | `createApp` / `createMcpServer` as a library | caller passes `agentSessionRuntimes` | caller passes a directory; unset = in-memory |
 | `packages/cli` | none | none |
