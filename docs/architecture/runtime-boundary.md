@@ -81,7 +81,8 @@ and expected — a marker naming the session that is already current folds into
 a refresh rather than minting new lineage.
 
 Explicit transitions (`attach`, `continue`, `replace`, `detach`, `inspect`)
-use a delimited directive block in the same `context` field. `replace` and
+use a delimited `[[clawconnect:agent-session]]…[[/clawconnect:agent-session]]`
+block in the same `context` field. `replace` and
 `detach` require a `reason`; `detach` stops tracking the session locally and
 only stops it in its runtime when the caller explicitly says
 `"stopRuntime": true`. A malformed directive is ignored — the task still
@@ -91,8 +92,10 @@ There is deliberately **no new public MCP tool** for any of this. The tool
 surface (`run_task`, `check_task`, `get_task`, `list_tasks`, `get_session`,
 `list_sessions`) is unchanged.
 
-The current attachment is emitted on task snapshots so a host can read it back
-on every turn without a second call.
+The current attachment is emitted on task snapshots as `agentSession`, so a
+host can read it back on every turn without a second call. A result recovered
+from an attached session rather than from the OpenClaw agent itself is marked
+`resultSource: "attached-session"`.
 
 ## Observation contract
 
