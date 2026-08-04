@@ -315,22 +315,19 @@ attachments, which reads tmux liveness and a terminal transcript. It is
 
 New runtime wiring belongs in a host-supplied registry, not here.
 
-## Public-docs hygiene check
+## Keeping this boundary honest
 
-This repository has no CI or lint harness, so the boundary is checked by
-grep. From the repository root:
+`test/public-surface.test.ts` enforces the parts of this document that code
+can contradict, and runs with the ordinary suite (`vp test`). It asserts that:
 
-```bash
-# Public-facing docs must not require any specific host, vendor, or runtime.
-grep -rniE 'clawdy|saffron|\bt3\b|claude-fleet|arbor' \
-  README.md ARCHITECTURE.md docs/architecture/runtime-boundary.md \
-  docs/guides packages/*/README.md
+- public docs and shipped source name no private host, company, or agent;
+- no document references an internal absolute path or thread/artifact id;
+- neither entry point registers a runtime of its own.
 
-# No internal absolute paths or thread/artifact ids anywhere in docs.
-grep -rniE '/Users/|thr_[0-9a-f]|art_[0-9a-f]|con_[0-9a-f]' --include='*.md' .
-```
-
-Both should return only matches inside documents explicitly marked as
-historical records. `claude-fleet` is expected in this document and in the
-integration guide, where it is named as the legacy adapter it is — not as a
-runtime any deployment needs.
+Two deliberate exemptions. The legacy adapter's id `claude-fleet` is allowed
+everywhere, because it is a real exported identifier in this repository and
+banning the string would hide the code rather than clean it up. The dated
+documents under `docs/architecture/` and `docs/decisions/` are historical
+build records carrying their own non-normative banners; they are checked for
+internal references but not for host names, since rewriting a record to look
+tidier makes it a worse record.

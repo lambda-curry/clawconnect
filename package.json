@@ -19,7 +19,8 @@
   },
   "devDependencies": {
     "@typescript/native-preview": "catalog:",
-    "vite-plus": "catalog:"
+    "vite-plus": "catalog:",
+    "vitest": "catalog:"
   },
   "engines": {
     "node": ">=22.12.0"
