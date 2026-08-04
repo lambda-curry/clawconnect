@@ -551,7 +551,7 @@ export class SessionManager {
     // become a stored status. A liveness-only observation (the built-in
     // claude-fleet probe, which reports no state at all) may still promote the
     // uninformative initial "starting" — and only that, evaluated against the
-    // FRESH record, so a status Clawdy reported while the probe was in flight
+    // FRESH record, so a status the host reported while the probe was in flight
     // is never clobbered by a bare liveness bit.
     const reported = status.state === "unavailable" || status.state === "unknown" ? undefined : status.state;
     const promoted = !reported && status.alive === true && fresh.status === "starting" ? "running" : undefined;
@@ -638,7 +638,7 @@ export class SessionManager {
 
     // An "attach" naming the session that is ALREADY current is a
     // re-statement, not a new delegation target — which is exactly what
-    // happens when Clawdy passes the runtime's own <agent-session> marker
+    // happens when the host passes the runtime's own <agent-session> marker
     // through on every turn. Minting a fresh record for it would supersede a
     // live attachment with an identical copy of itself and grow the lineage
     // one entry per turn, so it folds into a refresh instead. An explicit
@@ -799,8 +799,8 @@ export class SessionManager {
   }
 
   /**
-   * continue: applies an optional Clawdy-reported status to the CURRENT
-   * attachment, and — since `continue` is Clawdy explicitly re-affirming
+   * continue: applies an optional host-reported status to the CURRENT
+   * attachment, and — since `continue` is the host explicitly re-affirming
    * "this turn is still delegated to this attachment" — re-stamps
    * `delegatedTurnId` to `jobId` even when status didn't change. No-op (and
    * no persistence) if there is no current attachment, or if the directive
@@ -810,19 +810,19 @@ export class SessionManager {
    * subsequent snapshot untouched (just not eligible for recovery on a turn
    * that never claimed it — see tryFleetRecovery).
    *
-   * inspect: applies only an optional Clawdy-reported status (never
+   * inspect: applies only an optional host-reported status (never
    * delegatedTurnId — a passive read-refresh is not a new delegation claim).
    *
-   * An explicit Clawdy-reported status (on either op) is authoritative and
+   * An explicit host-reported status (on either op) is authoritative and
    * is persisted synchronously, THEN this returns immediately — it never
    * also kicks off the background liveness probe below. Two independent
-   * reasons: (1) Clawdy's own report is a stronger signal than a bare tmux
+   * reasons: (1) the host's own report is a stronger signal than a bare tmux
    * liveness bit and shouldn't be second-guessed by it, and (2) starting the
    * probe anyway would race it — see the callback's re-read for why a probe
    * that outlives a later status write is unsafe even when CAS-guarded by
    * identity alone.
    *
-   * Only when Clawdy supplied NO status does `inspect` fall through to a
+   * Only when the host supplied NO status does `inspect` fall through to a
    * bounded, single-attachment read through the runtime seam (a host-
    * registered runtime, or the built-in tmux liveness probe for claude-fleet).
    * Deliberately NOT awaited by the caller (submitTask stays synchronous,
@@ -833,7 +833,7 @@ export class SessionManager {
    *
    * A `continue` carrying a `prompt` additionally DRIVES the runtime — it is
    * the one directive that delivers a follow-up turn. It dispatches even when
-   * no runtime can be resolved, unlike the passive probe: Clawdy asked for
+   * no runtime can be resolved, unlike the passive probe: the host asked for
    * something to happen, so "no runtime knows how" has to become a visible
    * `error` on the attachment rather than silence.
    */
@@ -859,7 +859,7 @@ export class SessionManager {
         // new delegation, so the previous turn's outcome fields go. Listed
         // first so an explicitly stated status still wins over the reset.
         ...(delegationChanged ? this.redelegationReset(current) : {}),
-        // A status Clawdy states directly IS an observation, and the newest
+        // A status the host states directly IS an observation, and the newest
         // one — so it takes a token like any other. Without that, an `inspect`
         // probe already in flight (which does not re-stamp delegatedTurnId,
         // being a passive read) could resolve afterwards and overwrite it.
@@ -868,7 +868,7 @@ export class SessionManager {
         // status is still a fresh observation of NOW, and an in-flight read
         // that started before it is still older. Treating it as a no-op left
         // the token behind the report, so that older read passed the CAS and
-        // replaced a status Clawdy had just re-affirmed with what it saw
+        // replaced a status the host had just re-affirmed with what it saw
         // beforehand. An identical value written again is invisible in the
         // record apart from the token and freshness mark — which is the whole
         // point of writing it.
@@ -2077,7 +2077,7 @@ export class SessionManager {
       resultSource: job.resultSource,
       terminalReason: job.terminalReason,
       ...(continuation ? { continuationState: continuation } : {}),
-      // Unconditional, like `recovery` above — Clawdy needs to see the
+      // Unconditional, like `recovery` above — the owning host needs to see the
       // session's current attachment on every turn to decide continue vs.
       // replace vs. detach, not just under a detail preset.
       ...(fleetAttachment ? { fleetAttachment } : {}),

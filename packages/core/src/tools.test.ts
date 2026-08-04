@@ -50,12 +50,12 @@ vi.mock("./gateway.ts", () => {
 
 function multiAgentRegistry(): AgentRegistry {
   return {
-    default: "clawdy",
+    default: "assistant",
     source: "env",
     groups: {},
     groupLabels: {},
     agents: [
-      { id: "clawdy", url: "ws://fake-clawdy", password: "x", openclawAgentId: "main" },
+      { id: "assistant", url: "ws://fake-assistant", password: "x", openclawAgentId: "main" },
       { id: "hank", url: "ws://fake-hank", password: "x", openclawAgentId: "main" },
     ],
   };
@@ -94,9 +94,9 @@ describe("concurrent taskId/sessionKey safety", () => {
     vi.useFakeTimers();
     try {
       const pool = freshPool();
-      const a = runTask(pool, { task: "task A", agent: "clawdy" });
+      const a = runTask(pool, { task: "task A", agent: "assistant" });
       const b = runTask(pool, { task: "task B", agent: "hank" });
-      expect(a.agent).toBe("clawdy");
+      expect(a.agent).toBe("assistant");
       expect(b.agent).toBe("hank");
 
       const checkAPromise = checkTask(pool, { jobId: a.jobId, mode: "wait", waitMs: 1_000 });
@@ -106,7 +106,7 @@ describe("concurrent taskId/sessionKey safety", () => {
 
       expect(checkA.found).toBe(true);
       expect(checkB.found).toBe(true);
-      if (checkA.found) expect(checkA.snapshot.agent).toBe("clawdy");
+      if (checkA.found) expect(checkA.snapshot.agent).toBe("assistant");
       if (checkB.found) expect(checkB.snapshot.agent).toBe("hank");
     } finally {
       vi.useRealTimers();
@@ -412,10 +412,10 @@ describe("list_sessions returns known sessions, not just active ones", () => {
 
   it("lists sessions across every configured agent, each tagged with its agent", () => {
     const pool = freshPool();
-    const a = runTask(pool, { task: "A", agent: "clawdy" });
+    const a = runTask(pool, { task: "A", agent: "assistant" });
     const b = runTask(pool, { task: "B", agent: "hank" });
     const byKey = new Map(listSessions(pool).map((s) => [s.sessionKey, s.agent]));
-    expect(byKey.get(a.sessionKey)).toBe("clawdy");
+    expect(byKey.get(a.sessionKey)).toBe("assistant");
     expect(byKey.get(b.sessionKey)).toBe("hank");
   });
 });
@@ -478,9 +478,9 @@ describe("a RUNNING task whose delegated session is waiting on a human", () => {
       context: fleetBlock({
         op: "attach",
         handle: "thr-abc123",
-        host: "minip3",
-        runtime: "t3-fleet",
-        remoteUrl: "https://t3.example/threads/abc123",
+        host: "workstation-1",
+        runtime: "example-runtime",
+        remoteUrl: "https://runtime.example/threads/abc123",
         status: state,
       }),
     });
@@ -497,10 +497,10 @@ describe("a RUNNING task whose delegated session is waiting on a human", () => {
       const row = listTasks(pool).find((t) => t.taskId === run.jobId)!;
       expect(row.status, state).toBe("needs-human");
       expect(row.blockedDelegation, state).toMatchObject({
-        runtime: "t3-fleet",
+        runtime: "example-runtime",
         handle: "thr-abc123",
         state,
-        remoteUrl: "https://t3.example/threads/abc123",
+        remoteUrl: "https://runtime.example/threads/abc123",
         active: true,
       });
 
@@ -517,8 +517,8 @@ describe("a RUNNING task whose delegated session is waiting on a human", () => {
       context: fleetBlock({
         op: "attach",
         handle: "thr-abc123",
-        host: "minip3",
-        runtime: "t3-fleet",
+        host: "workstation-1",
+        runtime: "example-runtime",
         status: "needs_input",
       }),
     });
@@ -556,7 +556,7 @@ describe("a RUNNING task whose delegated session is waiting on a human", () => {
     // An attachment that exists but is NOT blocked says nothing either.
     const attached = runTask(pool, {
       task: "delegate it",
-      context: fleetBlock({ op: "attach", handle: "thr-live", host: "minip3", runtime: "t3-fleet", status: "running" }),
+      context: fleetBlock({ op: "attach", handle: "thr-live", host: "workstation-1", runtime: "example-runtime", status: "running" }),
     });
     const attachedRow = listTasks(pool).find((t) => t.taskId === attached.jobId)!;
     expect(attachedRow.status).toBe("running");

@@ -260,7 +260,7 @@ const lastGetTaskArgs = (host: ReturnType<typeof createHost>) =>
 
 describe("session registration: the mount payload can land after boot", () => {
   it("registers the session and starts polling once openai:set_globals delivers the mount payload", async () => {
-    const world = { tasks: [{ taskId: TASK_ID, jobId: TASK_ID, sessionKey: SESSION_KEY, agent: "clawdy", status: "running", lastEventAt: 0 }] };
+    const world = { tasks: [{ taskId: TASK_ID, jobId: TASK_ID, sessionKey: SESSION_KEY, agent: "assistant", status: "running", lastEventAt: 0 }] };
     const host = createHost({ mountedOnBoot: false, world }); // toolOutput is null at boot — the race
     const { root, windowStub } = mount(host);
     await settle();
@@ -274,14 +274,14 @@ describe("session registration: the mount payload can land after boot", () => {
     windowStub.dispatch("openai:set_globals");
     await settle();
 
-    expect(rowTitles(root)).toEqual(["clawdy is working…"]);
+    expect(rowTitles(root)).toEqual(["assistant is working…"]);
     expect(host.calls.some((c) => c.name === "get_task" && c.args.taskId === TASK_ID)).toBe(true);
   });
 });
 
 describe("canonical store: retention and its bound", () => {
   it("keeps a known session's task visible after it drops out of the read", async () => {
-    const A1 = { taskId: "a1", jobId: "a1", sessionKey: "sess-a", agent: "clawdy", status: "running", lastEventAt: 1_000 };
+    const A1 = { taskId: "a1", jobId: "a1", sessionKey: "sess-a", agent: "assistant", status: "running", lastEventAt: 1_000 };
     const B1 = { taskId: "b1", jobId: "b1", sessionKey: "sess-b", agent: "scout", status: "running", lastEventAt: 2_000 };
     const world = { tasks: [A1, B1] };
     const host = createHost({ knownSessionKeys: ["sess-a", "sess-b"], world });
@@ -302,7 +302,7 @@ describe("canonical store: retention and its bound", () => {
   });
 
   it("does not retain a session the card does not know about", async () => {
-    const A1 = { taskId: "a1", jobId: "a1", sessionKey: "sess-a", agent: "clawdy", status: "running", lastEventAt: 1_000 };
+    const A1 = { taskId: "a1", jobId: "a1", sessionKey: "sess-a", agent: "assistant", status: "running", lastEventAt: 1_000 };
     const C1 = { taskId: "c1", jobId: "c1", sessionKey: "sess-c", agent: "archivist", status: "done", lastEventAt: 500, summary: "Old work" };
     const world = { tasks: [A1, C1] };
     // Only sess-a is known; sess-c is out of scope from the start.
@@ -311,14 +311,14 @@ describe("canonical store: retention and its bound", () => {
     try {
       const { root } = mount(host);
       await settle();
-      expect(rowTitles(root)).toEqual(["clawdy is working…"]);
+      expect(rowTitles(root)).toEqual(["assistant is working…"]);
 
       world.tasks = [A1];
       await vi.advanceTimersByTimeAsync(3_000);
       await settle();
 
       // sess-c was never retained — nothing to leak once it's gone from the read.
-      expect(rowTitles(root)).toEqual(["clawdy is working…"]);
+      expect(rowTitles(root)).toEqual(["assistant is working…"]);
     } finally {
       vi.useRealTimers();
     }
@@ -329,7 +329,7 @@ describe("ring buffer accumulates check_task/get_task's bounded per-poll delta",
   it("shows accumulated recent activity across polls, not just the latest poll's delta", async () => {
     vi.useFakeTimers();
     try {
-      const world = { tasks: [{ taskId: TASK_ID, jobId: TASK_ID, sessionKey: SESSION_KEY, agent: "clawdy", status: "running", lastEventAt: 0 }] };
+      const world = { tasks: [{ taskId: TASK_ID, jobId: TASK_ID, sessionKey: SESSION_KEY, agent: "assistant", status: "running", lastEventAt: 0 }] };
       const host = createHost({ mountedOnBoot: true, world });
       host.pushEvent("step one");
       const { root } = mount(host);
@@ -357,7 +357,7 @@ describe("ring buffer accumulates check_task/get_task's bounded per-poll delta",
   it("passes the prior logCursor back as knownLogCount on the next get_task call — no re-fetch of already-seen events", async () => {
     vi.useFakeTimers();
     try {
-      const world = { tasks: [{ taskId: TASK_ID, jobId: TASK_ID, sessionKey: SESSION_KEY, agent: "clawdy", status: "running", lastEventAt: 0 }] };
+      const world = { tasks: [{ taskId: TASK_ID, jobId: TASK_ID, sessionKey: SESSION_KEY, agent: "assistant", status: "running", lastEventAt: 0 }] };
       const host = createHost({ mountedOnBoot: true, world });
       host.pushEvent("step one");
       mount(host);
@@ -378,7 +378,7 @@ describe("render cadence: lifecycle/terminal changes are immediate, cosmetic-onl
   it("a cosmetic-only poll (same status group) does not repaint until the debounce window elapses", async () => {
     vi.useFakeTimers();
     try {
-      const world = { tasks: [{ taskId: TASK_ID, jobId: TASK_ID, sessionKey: SESSION_KEY, agent: "clawdy", status: "running", lastEventAt: 0 }] };
+      const world = { tasks: [{ taskId: TASK_ID, jobId: TASK_ID, sessionKey: SESSION_KEY, agent: "assistant", status: "running", lastEventAt: 0 }] };
       const host = createHost({ mountedOnBoot: true, world });
       host.pushEvent("step one");
       const { root } = mount(host);
@@ -402,7 +402,7 @@ describe("render cadence: lifecycle/terminal changes are immediate, cosmetic-onl
   it("a terminal transition is reflected right away, without waiting out the cosmetic debounce window", async () => {
     vi.useFakeTimers();
     try {
-      const world = { tasks: [{ taskId: TASK_ID, jobId: TASK_ID, sessionKey: SESSION_KEY, agent: "clawdy", status: "running", lastEventAt: 0 }] };
+      const world = { tasks: [{ taskId: TASK_ID, jobId: TASK_ID, sessionKey: SESSION_KEY, agent: "assistant", status: "running", lastEventAt: 0 }] };
       const host = createHost({ mountedOnBoot: true, world });
       host.pushEvent("working");
       const { root } = mount(host);
@@ -425,7 +425,7 @@ describe("original request stays out of recurring heartbeats — fetched lazily 
   it("the initial mount and subsequent poll cycles never call get_task(detail:\"prompt\")", async () => {
     vi.useFakeTimers();
     try {
-      const world = { tasks: [{ taskId: TASK_ID, jobId: TASK_ID, sessionKey: SESSION_KEY, agent: "clawdy", status: "running", lastEventAt: 0 }] };
+      const world = { tasks: [{ taskId: TASK_ID, jobId: TASK_ID, sessionKey: SESSION_KEY, agent: "assistant", status: "running", lastEventAt: 0 }] };
       const host = createHost({ mountedOnBoot: true, world });
       host.pushEvent("step one");
       mount(host);
@@ -443,7 +443,7 @@ describe("original request stays out of recurring heartbeats — fetched lazily 
   });
 
   it("selecting the Request tab fetches the prompt exactly once, even when re-selected before the first fetch resolves", async () => {
-    const world = { tasks: [{ taskId: TASK_ID, jobId: TASK_ID, sessionKey: SESSION_KEY, agent: "clawdy", status: "running", lastEventAt: 0 }] };
+    const world = { tasks: [{ taskId: TASK_ID, jobId: TASK_ID, sessionKey: SESSION_KEY, agent: "assistant", status: "running", lastEventAt: 0 }] };
     const host = createHost({ mountedOnBoot: true, world });
     const { root } = mount(host);
     await settle();
@@ -461,7 +461,7 @@ describe("original request stays out of recurring heartbeats — fetched lazily 
   });
 
   it("switching away and back to Request does not re-fetch an already-loaded prompt", async () => {
-    const world = { tasks: [{ taskId: TASK_ID, jobId: TASK_ID, sessionKey: SESSION_KEY, agent: "clawdy", status: "running", lastEventAt: 0 }] };
+    const world = { tasks: [{ taskId: TASK_ID, jobId: TASK_ID, sessionKey: SESSION_KEY, agent: "assistant", status: "running", lastEventAt: 0 }] };
     const host = createHost({ mountedOnBoot: true, world });
     const { root } = mount(host);
     await settle();
@@ -478,12 +478,12 @@ describe("original request stays out of recurring heartbeats — fetched lazily 
 
 describe("no fullscreen/Task Center affordance in the assembled widget", () => {
   it("never renders an 'Open Task Center' control, and the widget stays functional without one", async () => {
-    const world = { tasks: [{ taskId: TASK_ID, jobId: TASK_ID, sessionKey: SESSION_KEY, agent: "clawdy", status: "running", lastEventAt: 0 }] };
+    const world = { tasks: [{ taskId: TASK_ID, jobId: TASK_ID, sessionKey: SESSION_KEY, agent: "assistant", status: "running", lastEventAt: 0 }] };
     const host = createHost({ mountedOnBoot: true, world });
     const { root } = mount(host);
     await settle();
     const found = withClass(root, "cc-card-tab").some((n) => textOf(n).includes("⛶") || n.getAttribute("aria-label") === "Open Task Center");
     expect(found).toBe(false);
-    expect(rowTitles(root)).toEqual(["clawdy is working…"]);
+    expect(rowTitles(root)).toEqual(["assistant is working…"]);
   });
 });

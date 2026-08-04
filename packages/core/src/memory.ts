@@ -1,7 +1,7 @@
 /**
  * Memory search backed by QMD. Each agent in the registry can carry its own
  * `qmdUrl` + `qmdToken`. When the caller has access to multiple agents (e.g.
- * `?agents=clawdy,scout` on the HTTP MCP), we run one search per *unique*
+ * `?agents=assistant,researcher` on the HTTP MCP), we run one search per *unique*
  * qmdUrl+token pair in parallel and dedupe results by file path so the
  * caller sees the union of what those agents can reach.
  *

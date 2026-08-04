@@ -13,7 +13,7 @@ function asLiveStatus(v: unknown): FleetLiveStatus | undefined {
 }
 
 /**
- * Delimited block Clawdy embeds in TaskInput.context to drive an explicit
+ * Delimited block the owning host embeds in TaskInput.context to drive an explicit
  * attachment transition (attach/continue/replace/detach/inspect) — see
  * docs/architecture/2026-08-02-managed-fleet-attachment-plan.md §4. This is
  * deliberately not a new public MCP tool: the directive rides the existing
@@ -26,7 +26,7 @@ const DIRECTIVE_RE = /\[\[clawconnect:fleet\]\]([\s\S]*?)\[\[\/clawconnect:fleet
  * The runtime-neutral marker every managed-session runtime already prints
  * alongside its own human output (`<agent-session>{…}</agent-session>`). A
  * delegation announces itself in that one line, so attaching a new runtime
- * needs no new directive dialect and no ClawConnect change: Clawdy passes the
+ * needs no new directive dialect and no ClawConnect change: the host passes the
  * marker through in `context` and it becomes an `attach`.
  *
  * Non-greedy and anchored on the closing tag so a marker embedded in a larger
@@ -146,7 +146,7 @@ export function parseFleetDirective(text: string | undefined): ParsedFleetDirect
  * session exists and here is its current state", never a lifecycle command.
  * session.ts's attach path already folds a marker naming the session that is
  * ALREADY current into a refresh rather than a new lineage record, which is
- * what makes it safe for Clawdy to include the same marker on every turn.
+ * what makes it safe for a host to include the same marker on every turn.
  *
  * `host` is optional here, unlike the explicit directive: a service runtime's
  * session lives on a server, and the marker's own contract makes the field

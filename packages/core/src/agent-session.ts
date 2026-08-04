@@ -3,7 +3,7 @@
  * is, how a host teaches ClawConnect about one, and how whatever that runtime
  * answers becomes the single normalized shape the rest of the codebase reads.
  *
- * The durable side of the model — one current attachment per Clawdy
+ * The durable side of the model — one current attachment per
  * conversation, replacement lineage, restart persistence, parent/turn
  * correlation — already exists in session.ts + fleet-attachment-store.ts and is
  * NOT duplicated here. This module owns exactly two things:
@@ -19,7 +19,7 @@
  *      that genuinely completed.
  *
  * Nothing here knows a runtime's CLI, transport, pairing, project model, or
- * authentication. A host that drives T3 (or anything else) keeps all of that on
+ * authentication. A host that drives such a runtime keeps all of that on
  * its own side of the callback boundary; ClawConnect only ever learns "runtime
  * X can be asked about session Y, and here is how".
  *
@@ -30,10 +30,10 @@
  * holds for claude-fleet.
  */
 
-/** Which system owns a managed session's lifecycle: "claude-fleet", "t3-fleet", … */
+/** Which system owns a managed session's lifecycle: "claude-fleet", a host-registered id, … */
 export type AgentSessionRuntimeId = string;
 
-/** Which agent/model runs *inside* that session. Distinct from the runtime: T3 running Claude is not claude-fleet running Claude. */
+/** Which agent/model runs *inside* that session. Distinct from the runtime: two runtimes may run the same agent. */
 export type AgentSessionProviderId = string;
 
 /**
@@ -42,7 +42,7 @@ export type AgentSessionProviderId = string;
  *
  * Two runtimes disagree about which state means "the turn finished well":
  * claude-fleet's terminal success is `idle` (the tmux pane stopped working),
- * T3's is `completed`. Both are in the union and both are treated as a
+ * a service-style runtime's is `completed`. Both are in the union and both are treated as a
  * completed turn (see COMPLETED_TURN_STATES) rather than forcing either
  * published vocabulary to move.
  *
@@ -205,7 +205,7 @@ const TERMINATION_REASONS: readonly string[] = ["completed", "cancelled", "faile
 /**
  * A failure of the READ, not of the session: the runtime could not be asked,
  * or answered with an error. Kept separate from the session's own `failed`
- * state so "we could not reach T3" never reads as "the T3 session failed".
+ * state so "we could not reach the runtime" never reads as "the session failed".
  */
 export type AgentSessionError = {
   /** Stable and machine-branchable: "unknown_runtime", "unsupported_operation", "session_not_found", "<op>_failed". */

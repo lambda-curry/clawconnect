@@ -25,9 +25,9 @@ Run 'clawconnect <command> --help' for command-specific options.
 Config:
   Preferred: ~/.clawconnect/agents.json
     {
-      "default": "clawdy",
+      "default": "assistant",
       "agents": [
-        { "id": "clawdy", "url": "...", "password": "...", "openclawAgentId": "main" }
+        { "id": "assistant", "url": "...", "password": "...", "openclawAgentId": "main" }
       ]
     }
   Fallback: OPENCLAW_URL + OPENCLAW_PASSWORD (+ optional OPENCLAW_AGENT_ID, CLAWCONNECT_AGENT_ALIAS).

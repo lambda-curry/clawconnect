@@ -662,7 +662,7 @@ export function reconcileTaskList(previous, next, retainSessionKeys) {
 }
 
 /**
- * A status label like "clawdy is working…" is not evidence — it's a claim.
+ * A status label like "<agent> is working…" is not evidence — it's a claim.
  * Without a timestamp behind it, there's no way to tell "still going" from
  * "silently stuck." formatElapsed/deriveActivityLabel pair every liveness
  * claim with how long ago the last real event actually landed, straight

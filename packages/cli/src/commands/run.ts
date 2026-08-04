@@ -8,7 +8,7 @@ clawconnect run — Submit a task to an OpenClaw agent
 
 Usage:
   clawconnect run <task> [options]
-  clawconnect run "fix the auth bug" --agent clawdy --wait
+  clawconnect run "fix the auth bug" --agent assistant --wait
   echo "context" | clawconnect run "fix this" --wait --stdin
 
 Options:

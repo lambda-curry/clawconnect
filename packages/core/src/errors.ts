@@ -14,7 +14,7 @@ const ERROR_PATTERNS: Array<{ pattern: RegExp; category: ErrorCategory; recovery
   {
     pattern: /merge conflict|CONFLICT/i,
     category: "merge_conflict",
-    recovery: "Resolve the merge conflict, then ask Clawdy to continue.",
+    recovery: "Resolve the merge conflict, then continue the same session.",
   },
   {
     pattern: /test fail|tests? failed|assertion|expect.*received/i,

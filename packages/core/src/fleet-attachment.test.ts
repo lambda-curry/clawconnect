@@ -158,11 +158,11 @@ describe("Fleet attachment transitions", () => {
     const sessions = new SessionManager(ctrl.gateway);
     const job = sessions.submitTask({
       task: "do the thing",
-      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "minip3", providerSessionId: "prov-1", worktree: "/w" }),
+      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "workstation-1", providerSessionId: "prov-1", worktree: "/w" }),
     });
 
     const attachment = sessions.getFleetAttachment(job.sessionKey);
-    expect(attachment).toMatchObject({ handle: "cf-foo", host: "minip3", providerSessionId: "prov-1", worktree: "/w", status: "starting" });
+    expect(attachment).toMatchObject({ handle: "cf-foo", host: "workstation-1", providerSessionId: "prov-1", worktree: "/w", status: "starting" });
 
     const snapshot = sessions.buildSnapshot(job);
     expect(snapshot.fleetAttachment).toEqual(attachment);
@@ -173,7 +173,7 @@ describe("Fleet attachment transitions", () => {
     const sessions = new SessionManager(ctrl.gateway);
     sessions.submitTask({
       task: "do the thing",
-      context: `before ${fleetBlock({ op: "attach", handle: "cf-foo", host: "minip3" })} after`,
+      context: `before ${fleetBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" })} after`,
     });
     expect(sessions.getFleetAttachment(sessions.listSessions()[0]?.sessionKey ?? "")).toBeDefined();
     // The prompt actually sent is reconstructed via job.prompt, which stores
@@ -189,7 +189,7 @@ describe("Fleet attachment transitions", () => {
     const sessions = new SessionManager(ctrl.gateway);
     const first = sessions.submitTask({
       task: "first",
-      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "minip3" }),
+      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
     });
     ctrl.finishChat("first done", 0);
     await wait();
@@ -207,7 +207,7 @@ describe("Fleet attachment transitions", () => {
     const sessions = new SessionManager(ctrl.gateway);
     const job = sessions.submitTask({
       task: "first",
-      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "minip3" }),
+      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
     });
     const original = sessions.getFleetAttachment(job.sessionKey)!;
 
@@ -216,7 +216,7 @@ describe("Fleet attachment transitions", () => {
     sessions.submitTask({
       task: "replace it",
       sessionKey: job.sessionKey,
-      context: fleetBlock({ op: "replace", handle: "cf-bar", host: "minip3", reason: "stale worktree" }),
+      context: fleetBlock({ op: "replace", handle: "cf-bar", host: "workstation-1", reason: "stale worktree" }),
     });
 
     const current = sessions.getFleetAttachment(job.sessionKey)!;
@@ -235,7 +235,7 @@ describe("Fleet attachment transitions", () => {
     const sessions = new SessionManager(ctrl.gateway);
     const job = sessions.submitTask({
       task: "first",
-      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "minip3" }),
+      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
     });
     const original = sessions.getFleetAttachment(job.sessionKey)!;
     ctrl.finishChat("done", 0);
@@ -259,7 +259,7 @@ describe("Fleet attachment transitions", () => {
     const sessions = new SessionManager(ctrl.gateway);
     const job = sessions.submitTask({
       task: "first",
-      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "minip3" }),
+      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
     });
     ctrl.finishChat("done", 0);
     await wait();
@@ -284,7 +284,7 @@ describe("Fleet attachment transitions", () => {
     const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
     const job = sessions.submitTask({
       task: "first",
-      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "minip3" }),
+      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
     });
     ctrl.finishChat("done", 0);
     await wait();
@@ -306,7 +306,7 @@ describe("Fleet attachment transitions", () => {
     const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
     const job = sessions.submitTask({
       task: "first",
-      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "minip3" }),
+      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
     });
     ctrl.finishChat("done", 0);
     await wait();
@@ -318,7 +318,7 @@ describe("Fleet attachment transitions", () => {
     ctrl.finishChat("inspect turn done", 1);
     await wait();
 
-    // Clawdy explicitly reports needs_input BEFORE the stale probe resolves.
+    // The host explicitly reports needs_input BEFORE the stale probe resolves.
     sessions.submitTask({
       task: "check in",
       sessionKey: job.sessionKey,
@@ -356,7 +356,7 @@ describe("Fleet attachment restart persistence", () => {
     const before = new SessionManager(ctrl.gateway, "main", undefined, store);
     const job = before.submitTask({
       task: "first",
-      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "minip3", providerSessionId: "prov-1" }),
+      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "workstation-1", providerSessionId: "prov-1" }),
     });
     const original = before.getFleetAttachment(job.sessionKey)!;
     expect(store.latestSave).toBeDefined();
@@ -419,7 +419,7 @@ describe("Fleet attachment restart persistence", () => {
       id: "att-valid",
       runtime: "claude-fleet",
       handle: "cf-good",
-      host: "minip3",
+      host: "workstation-1",
       attachedAt: 1000,
       status: "running",
     };
@@ -445,7 +445,7 @@ describe("Fleet attachment restart persistence", () => {
       id: "att-good",
       runtime: "claude-fleet",
       handle: "cf-good",
-      host: "minip3",
+      host: "workstation-1",
       attachedAt: 1000,
       status: "running",
     };
@@ -498,7 +498,7 @@ describe("Fleet-adapter recovery order (tier 3, after parent live+transcript rec
     const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
     const job = sessions.submitTask({
       task: "do the thing",
-      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "minip3" }),
+      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
     });
     await wait();
     expect(job.status).toBe("running");
@@ -514,7 +514,7 @@ describe("Fleet-adapter recovery order (tier 3, after parent live+transcript rec
     const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
     const job = sessions.submitTask({
       task: "do the thing",
-      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "minip3" }),
+      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
     });
 
     ctrl.finishChat(NO_SUMMARY_SENTINEL, 0);
@@ -538,7 +538,7 @@ describe("Fleet-adapter recovery order (tier 3, after parent live+transcript rec
     const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
     const job = sessions.submitTask({
       task: "do the thing",
-      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "minip3", worktree: "/w" }),
+      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "workstation-1", worktree: "/w" }),
     });
     ctrl.finishChat(NO_SUMMARY_SENTINEL, 0);
     await wait();
@@ -558,7 +558,7 @@ describe("Fleet-adapter recovery order (tier 3, after parent live+transcript rec
     const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
     const job = sessions.submitTask({
       task: "do the thing",
-      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "minip3" }),
+      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
     });
     ctrl.finishChat(NO_SUMMARY_SENTINEL, 0);
     await wait();
@@ -584,7 +584,7 @@ describe("Fleet-adapter recovery order (tier 3, after parent live+transcript rec
       const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
       const job = sessions.submitTask({
         task: "do the thing",
-        context: fleetBlock({ op: "attach", handle: "cf-foo", host: "minip3" }),
+        context: fleetBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
       });
       ctrl.finishChat(NO_SUMMARY_SENTINEL, 0);
       await vi.advanceTimersByTimeAsync(1);
@@ -608,7 +608,7 @@ describe("Fleet-adapter recovery order (tier 3, after parent live+transcript rec
     const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
     const job = sessions.submitTask({
       task: "do the thing",
-      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "minip3" }),
+      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
     });
     ctrl.finishChat(NO_SUMMARY_SENTINEL, 0);
     await wait();
@@ -631,7 +631,7 @@ describe("Fleet-adapter recovery order (tier 3, after parent live+transcript rec
     const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
     const job = sessions.submitTask({
       task: "do the thing",
-      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "minip3" }),
+      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
     });
     ctrl.finishChat(NO_SUMMARY_SENTINEL, 0);
     await wait();
@@ -658,7 +658,7 @@ describe("Independent-review blocker fixes: delegated-turn boundary + stale-resu
     const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
     const job = sessions.submitTask({
       task: "do the thing",
-      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "minip3" }),
+      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
     });
     ctrl.finishChat(NO_SUMMARY_SENTINEL, 0);
     await wait();
@@ -677,14 +677,14 @@ describe("Independent-review blocker fixes: delegated-turn boundary + stale-resu
     // Turn 1: attaches and delegates. Its own recovery correctly succeeds.
     const turn1 = sessions.submitTask({
       task: "delegate this to Fleet",
-      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "minip3" }),
+      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
     });
     ctrl.finishChat(NO_SUMMARY_SENTINEL, 0);
     await wait();
     expect(sessions.getJob(turn1.jobId)?.resultSource).toBe("fleet-transcript");
 
     // Turn 2: a completely different, unrelated task on the SAME session.
-    // Clawdy sends NO directive — the attachment is still "current" for
+    // The host sends NO directive — the attachment is still "current" for
     // exposure purposes, but was never delegated to THIS turn.
     const turn2 = sessions.submitTask({ task: "unrelated: what's 2+2", sessionKey: turn1.sessionKey });
     ctrl.finishChat(NO_SUMMARY_SENTINEL, 1);
@@ -699,13 +699,13 @@ describe("Independent-review blocker fixes: delegated-turn boundary + stale-resu
   it("needs_input stays actionable — a fresh, valid handoff with real output text is still refused while status is needs_input", async () => {
     // The adapter genuinely has fresh, well-formed output — this is NOT a
     // "nothing trustworthy yet" case. The guard must be the attachment's own
-    // Clawdy-reported status, not merely the absence of output.
+    // the host-reported status, not merely the absence of output.
     const adapter = fakeFleetAdapter({ handoff: async () => ({ text: "here is some output, but I have a question", resultAt: Date.now() }) });
     const ctrl = fakeGateway({ pollTranscriptForFinalText: async () => undefined });
     const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
     const job = sessions.submitTask({
       task: "do the thing",
-      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "minip3", status: "needs_input" }),
+      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "workstation-1", status: "needs_input" }),
     });
     ctrl.finishChat(NO_SUMMARY_SENTINEL, 0);
     await wait();
@@ -726,7 +726,7 @@ describe("Independent-review blocker fixes: delegated-turn boundary + stale-resu
     const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
     const job = sessions.submitTask({
       task: "do the thing",
-      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "minip3", status: "failed" }),
+      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "workstation-1", status: "failed" }),
     });
     ctrl.finishChat(NO_SUMMARY_SENTINEL, 0);
     await wait();
@@ -745,7 +745,7 @@ describe("Independent-review blocker fixes: detach/replace races (identity compa
     const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
     const job = sessions.submitTask({
       task: "first",
-      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "minip3" }),
+      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
     });
     const original = sessions.getFleetAttachment(job.sessionKey)!;
     ctrl.finishChat("done", 0);
@@ -798,7 +798,7 @@ describe("Independent-review blocker fixes: detach/replace races (identity compa
     const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
     const job = sessions.submitTask({
       task: "do the thing",
-      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "minip3" }),
+      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
     });
     const original = sessions.getFleetAttachment(job.sessionKey)!;
 
@@ -818,7 +818,7 @@ describe("Independent-review blocker fixes: detach/replace races (identity compa
     sessions.submitTask({
       task: "replace mid-flight",
       sessionKey: job.sessionKey,
-      context: fleetBlock({ op: "replace", handle: "cf-bar", host: "minip3", reason: "operator swap" }),
+      context: fleetBlock({ op: "replace", handle: "cf-bar", host: "workstation-1", reason: "operator swap" }),
     });
     ctrl.finishChat("replace turn done", 1);
 
@@ -856,7 +856,7 @@ describe("Independent-review blocker fixes: detach/replace races (identity compa
     const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
     const job = sessions.submitTask({
       task: "do the thing",
-      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "minip3" }),
+      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
     });
 
     ctrl.finishChat(NO_SUMMARY_SENTINEL, 0);
@@ -897,8 +897,8 @@ describe("Independent-review blocker fixes: detach/replace races (identity compa
 /**
  * The generic runtime bridge: the SAME session-scoped attachment machinery
  * above, driven by a host-registered runtime instead of the built-in tmux
- * adapter. ClawConnect learns nothing about T3 here — the fake below is
- * standing in for a host that owns T3's CLI, pairing, and project model
+ * adapter. ClawConnect learns nothing about the runtime here — the fake below is
+ * standing in for a host that owns its CLI, pairing, and project model
  * entirely on its own side of the callback boundary.
  */
 
@@ -906,13 +906,13 @@ function agentSessionMarker(obj: Record<string, unknown>): string {
   return `<agent-session>${JSON.stringify(obj)}</agent-session>`;
 }
 
-const T3_MARKER = agentSessionMarker({
-  runtime: "t3-fleet",
+const RUNTIME_MARKER = agentSessionMarker({
+  runtime: "example-runtime",
   provider: "anthropic-claude-code",
   sessionId: "thr-abc123",
-  host: "minip3",
+  host: "workstation-1",
   state: "running",
-  metadata: { t3ProjectId: "proj-1", turnId: "turn-1" },
+  metadata: { runtimeProjectId: "proj-1", turnId: "turn-1" },
 });
 
 type FakeRuntime = {
@@ -922,7 +922,7 @@ type FakeRuntime = {
   detachCalls: { ref: AgentSessionRef; reason?: string }[];
 };
 
-function fakeT3Runtime(
+function fakeHostRuntime(
   opts: {
     inspect?: (ref: AgentSessionRef) => Promise<AgentSessionObservation | null>;
     onContinue?: (prompt?: string) => Promise<AgentSessionObservation | null>;
@@ -936,7 +936,7 @@ function fakeT3Runtime(
   const detachCalls: { ref: AgentSessionRef; reason?: string }[] = [];
   const registry = new AgentSessionRuntimeRegistry();
   registry.register({
-    id: "t3-fleet",
+    id: "example-runtime",
     provider: "anthropic-claude-code",
     async inspect(ref) {
       inspectCalls.push(ref);
@@ -964,19 +964,19 @@ function fakeT3Runtime(
 
 describe("managed agent sessions on a host-registered runtime", () => {
   it("attaches straight from the runtime's own neutral marker, with no directive dialect", () => {
-    const t3 = fakeT3Runtime();
+    const hostRuntime = fakeHostRuntime();
     const ctrl = fakeGateway();
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, t3.registry);
-    const job = sessions.submitTask({ task: "ship the thing", context: `Delegated.\n${T3_MARKER}` });
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, hostRuntime.registry);
+    const job = sessions.submitTask({ task: "ship the thing", context: `Delegated.\n${RUNTIME_MARKER}` });
 
     const attachment = sessions.getFleetAttachment(job.sessionKey)!;
     expect(attachment).toMatchObject({
-      runtime: "t3-fleet",
+      runtime: "example-runtime",
       provider: "anthropic-claude-code",
       handle: "thr-abc123",
-      host: "minip3",
+      host: "workstation-1",
       status: "running",
-      metadata: { t3ProjectId: "proj-1", turnId: "turn-1" },
+      metadata: { runtimeProjectId: "proj-1", turnId: "turn-1" },
       delegatedTurnId: job.jobId,
     });
     // It rides on the existing snapshot key — one projection, not a second one
@@ -985,33 +985,33 @@ describe("managed agent sessions on a host-registered runtime", () => {
   });
 
   it("never lets the raw marker reach the agent's prompt", () => {
-    const t3 = fakeT3Runtime();
+    const hostRuntime = fakeHostRuntime();
     const ctrl = fakeGateway();
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, t3.registry);
-    const job = sessions.submitTask({ task: "ship the thing", context: `Before.\n${T3_MARKER}\nAfter.` });
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, hostRuntime.registry);
+    const job = sessions.submitTask({ task: "ship the thing", context: `Before.\n${RUNTIME_MARKER}\nAfter.` });
     expect(sessions.getJob(job.jobId)?.prompt.context).toBe("Before.\n\nAfter.");
   });
 
   it("re-stating the same session on a later turn refreshes it instead of growing the lineage", async () => {
-    const t3 = fakeT3Runtime();
+    const hostRuntime = fakeHostRuntime();
     const ctrl = fakeGateway();
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, t3.registry);
-    const first = sessions.submitTask({ task: "start", context: T3_MARKER });
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, hostRuntime.registry);
+    const first = sessions.submitTask({ task: "start", context: RUNTIME_MARKER });
     const attachedAt = sessions.getFleetAttachment(first.sessionKey)!.attachedAt;
     ctrl.finishChat("first turn done", 0);
     await wait();
 
-    // Clawdy passes the runtime's marker through on EVERY turn; a second
+    // The host passes the runtime's marker through on EVERY turn; a second
     // lineage record per turn would be noise, and superseding a live
     // attachment with a copy of itself would be a lie about what happened.
     const second = sessions.submitTask({
       task: "keep going",
       sessionKey: first.sessionKey,
       context: agentSessionMarker({
-        runtime: "t3-fleet",
+        runtime: "example-runtime",
         sessionId: "thr-abc123",
         state: "needs_input",
-        remoteUrl: "https://t3.example/threads/abc123",
+        remoteUrl: "https://runtime.example/threads/abc123",
         metadata: { turnId: "turn-2" },
       }),
     });
@@ -1020,24 +1020,24 @@ describe("managed agent sessions on a host-registered runtime", () => {
     const attachment = sessions.getFleetAttachment(first.sessionKey)!;
     expect(attachment.attachedAt).toBe(attachedAt);
     expect(attachment.status).toBe("needs_input");
-    expect(attachment.remoteUrl).toBe("https://t3.example/threads/abc123");
+    expect(attachment.remoteUrl).toBe("https://runtime.example/threads/abc123");
     // Merged, not replaced: turn-1's project id is still known.
-    expect(attachment.metadata).toEqual({ t3ProjectId: "proj-1", turnId: "turn-2" });
+    expect(attachment.metadata).toEqual({ runtimeProjectId: "proj-1", turnId: "turn-2" });
     // Re-stating it IS the new turn delegating to it.
     expect(attachment.delegatedTurnId).toBe(second.jobId);
   });
 
   it("a different session on the same runtime still replaces, preserving lineage", async () => {
-    const t3 = fakeT3Runtime();
+    const hostRuntime = fakeHostRuntime();
     const ctrl = fakeGateway();
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, t3.registry);
-    const job = sessions.submitTask({ task: "start", context: T3_MARKER });
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, hostRuntime.registry);
+    const job = sessions.submitTask({ task: "start", context: RUNTIME_MARKER });
     ctrl.finishChat("first turn done", 0);
     await wait();
     sessions.submitTask({
       task: "start over",
       sessionKey: job.sessionKey,
-      context: fleetBlock({ op: "replace", runtime: "t3-fleet", sessionId: "thr-second", host: "minip3", reason: "wrong project" }),
+      context: fleetBlock({ op: "replace", runtime: "example-runtime", sessionId: "thr-second", host: "workstation-1", reason: "wrong project" }),
     });
 
     const lineage = sessions.getFleetLineage(job.sessionKey);
@@ -1052,25 +1052,25 @@ describe("managed agent sessions on a host-registered runtime", () => {
 
   it("survives a connector restart with runtime, provider, and metadata intact", () => {
     const store = new FakeFleetAttachmentStore();
-    const t3 = fakeT3Runtime();
+    const hostRuntime = fakeHostRuntime();
     const first = fakeGateway();
-    const sessionsA = new SessionManager(first.gateway, "main", undefined, store, undefined, t3.registry);
-    const job = sessionsA.submitTask({ task: "ship it", context: T3_MARKER });
+    const sessionsA = new SessionManager(first.gateway, "main", undefined, store, undefined, hostRuntime.registry);
+    const job = sessionsA.submitTask({ task: "ship it", context: RUNTIME_MARKER });
 
     // A brand-new manager over the same store, as after a process restart.
     const second = fakeGateway();
-    const sessionsB = new SessionManager(second.gateway, "main", undefined, store, undefined, t3.registry);
+    const sessionsB = new SessionManager(second.gateway, "main", undefined, store, undefined, hostRuntime.registry);
     expect(sessionsB.getFleetAttachment(job.sessionKey)).toMatchObject({
-      runtime: "t3-fleet",
+      runtime: "example-runtime",
       provider: "anthropic-claude-code",
       handle: "thr-abc123",
-      metadata: { t3ProjectId: "proj-1" },
+      metadata: { runtimeProjectId: "proj-1" },
       delegatedTurnId: job.jobId,
     });
   });
 
   it("dispatches inspect to exactly the one attachment — never a scan, and never for a session with none", async () => {
-    const t3 = fakeT3Runtime({
+    const hostRuntime = fakeHostRuntime({
       inspect: async () => ({
         state: "needs_permission",
         alive: true,
@@ -1081,30 +1081,30 @@ describe("managed agent sessions on a host-registered runtime", () => {
       }),
     });
     const ctrl = fakeGateway();
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, t3.registry);
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, hostRuntime.registry);
 
     // A session that never attached must not produce a single runtime call.
     const unattached = sessions.submitTask({ task: "unrelated work" });
     await wait();
-    expect(t3.inspectCalls).toHaveLength(0);
+    expect(hostRuntime.inspectCalls).toHaveLength(0);
     ctrl.finishChat("done", 0);
     await wait();
 
-    const job = sessions.submitTask({ task: "ship it", context: T3_MARKER });
+    const job = sessions.submitTask({ task: "ship it", context: RUNTIME_MARKER });
     ctrl.finishChat("done", 1);
     await wait();
     await sessions.runAgentSessionOp(job.sessionKey, { op: "inspect" });
 
-    expect(t3.inspectCalls).toHaveLength(1);
+    expect(hostRuntime.inspectCalls).toHaveLength(1);
     // The neutral ref, not ClawConnect's record: no lineage id, no turn token.
-    expect(t3.inspectCalls[0]).toEqual({
-      runtime: "t3-fleet",
+    expect(hostRuntime.inspectCalls[0]).toEqual({
+      runtime: "example-runtime",
       provider: "anthropic-claude-code",
       sessionId: "thr-abc123",
       providerSessionId: undefined,
-      host: "minip3",
+      host: "workstation-1",
       remoteUrl: undefined,
-      metadata: { t3ProjectId: "proj-1", turnId: "turn-1" },
+      metadata: { runtimeProjectId: "proj-1", turnId: "turn-1" },
       lastKnownState: "running",
     });
     expect(unattached.sessionKey).not.toBe(job.sessionKey);
@@ -1115,16 +1115,16 @@ describe("managed agent sessions on a host-registered runtime", () => {
     expect(attachment.latestResponse).toBe("may I run the migration?");
     expect(attachment.lastEventAt).toBe(Date.parse("2026-08-03T12:05:00.000Z"));
     expect(attachment.providerSessionId).toBe("prov-9");
-    expect(attachment.metadata).toEqual({ t3ProjectId: "proj-1", turnId: "turn-2" });
+    expect(attachment.metadata).toEqual({ runtimeProjectId: "proj-1", turnId: "turn-2" });
     // A blocked session's partial text is never promoted to a turn result.
     expect(attachment.lastResult).toBeUndefined();
   });
 
   it("delivers a follow-up turn through the runtime's continue callback", async () => {
-    const t3 = fakeT3Runtime({ onContinue: async () => ({ state: "running", latestResponse: "on it" }) });
+    const hostRuntime = fakeHostRuntime({ onContinue: async () => ({ state: "running", latestResponse: "on it" }) });
     const ctrl = fakeGateway();
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, t3.registry);
-    const job = sessions.submitTask({ task: "ship it", context: T3_MARKER });
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, hostRuntime.registry);
+    const job = sessions.submitTask({ task: "ship it", context: RUNTIME_MARKER });
     ctrl.finishChat("done", 0);
     await wait();
 
@@ -1135,17 +1135,17 @@ describe("managed agent sessions on a host-registered runtime", () => {
     });
     await wait();
 
-    expect(t3.continueCalls).toEqual([
-      { ref: expect.objectContaining({ runtime: "t3-fleet", sessionId: "thr-abc123" }), prompt: "also update the docs" },
+    expect(hostRuntime.continueCalls).toEqual([
+      { ref: expect.objectContaining({ runtime: "example-runtime", sessionId: "thr-abc123" }), prompt: "also update the docs" },
     ]);
     expect(sessions.getFleetAttachment(job.sessionKey)?.latestResponse).toBe("on it");
   });
 
   it("reports a precise unsupported_operation instead of failing the task", async () => {
-    const t3 = fakeT3Runtime(); // inspect only — no continue callback registered
+    const hostRuntime = fakeHostRuntime(); // inspect only — no continue callback registered
     const ctrl = fakeGateway();
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, t3.registry);
-    const job = sessions.submitTask({ task: "ship it", context: T3_MARKER });
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, hostRuntime.registry);
+    const job = sessions.submitTask({ task: "ship it", context: RUNTIME_MARKER });
     ctrl.finishChat("done", 0);
     await wait();
 
@@ -1167,11 +1167,11 @@ describe("managed agent sessions on a host-registered runtime", () => {
 
   it("reports unknown_runtime for a runtime this build was never taught, and keeps the attachment readable", async () => {
     const ctrl = fakeGateway();
-    // No registry at all: a t3-fleet attachment written by a build that had
+    // No registry at all: a example-runtime attachment written by a build that had
     // one must still round-trip, not be dropped.
     const sessions = new SessionManager(ctrl.gateway);
-    const job = sessions.submitTask({ task: "ship it", context: T3_MARKER });
-    expect(sessions.getFleetAttachment(job.sessionKey)?.runtime).toBe("t3-fleet");
+    const job = sessions.submitTask({ task: "ship it", context: RUNTIME_MARKER });
+    expect(sessions.getFleetAttachment(job.sessionKey)?.runtime).toBe("example-runtime");
 
     const status = await sessions.runAgentSessionOp(job.sessionKey, { op: "inspect" });
     expect(status?.state).toBe("unavailable");
@@ -1182,40 +1182,40 @@ describe("managed agent sessions on a host-registered runtime", () => {
   });
 
   it("returns undefined rather than reaching for anything when nothing is attached", async () => {
-    const t3 = fakeT3Runtime();
+    const hostRuntime = fakeHostRuntime();
     const ctrl = fakeGateway();
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, t3.registry);
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, hostRuntime.registry);
     const job = sessions.submitTask({ task: "no delegation here" });
     expect(await sessions.runAgentSessionOp(job.sessionKey, { op: "inspect" })).toBeUndefined();
-    expect(t3.inspectCalls).toHaveLength(0);
+    expect(hostRuntime.inspectCalls).toHaveLength(0);
   });
 
   it("recovers a completed turn's final response through the runtime, marked provisional", async () => {
-    const t3 = fakeT3Runtime({
+    const hostRuntime = fakeHostRuntime({
       inspect: async () => ({
         state: "completed",
-        finalResponse: "the T3 session's real answer",
+        finalResponse: "the managed session's real answer",
         lastEventAt: Date.now(),
         termination: { reason: "completed" },
       }),
     });
     const ctrl = fakeGateway({ pollTranscriptForFinalText: async () => undefined });
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, t3.registry);
-    const job = sessions.submitTask({ task: "ship it", context: T3_MARKER });
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, hostRuntime.registry);
+    const job = sessions.submitTask({ task: "ship it", context: RUNTIME_MARKER });
 
     ctrl.finishChat(NO_SUMMARY_SENTINEL, 0);
     await wait();
 
     const recovered = sessions.getJob(job.jobId)!;
     expect(recovered.status).toBe("completed");
-    expect(recovered.summary).toBe("the T3 session's real answer");
+    expect(recovered.summary).toBe("the managed session's real answer");
     // NOT "fleet-transcript": that value is a specific claim about provenance
     // (a Claude Code transcript read off disk) that an arbitrary runtime's
     // reply does not support. See ResultSource.
     expect(recovered.resultSource).toBe("agent-session");
     expect(recovered.terminalReason).toBe("agent-session-recovery");
     const attachment = sessions.getFleetAttachment(job.sessionKey)!;
-    expect(attachment.lastResult?.summary).toBe("the T3 session's real answer");
+    expect(attachment.lastResult?.summary).toBe("the managed session's real answer");
     expect(attachment.lastResult?.outputRef).toBe("thr-abc123");
     expect(attachment.termination).toMatchObject({ reason: "completed" });
 
@@ -1228,7 +1228,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
 
   it("never completes a parent from a session that is waiting on a human", async () => {
     for (const blocked of ["needs_input", "needs_permission"]) {
-      const t3 = fakeT3Runtime({
+      const hostRuntime = fakeHostRuntime({
         inspect: async () => ({
           state: blocked,
           // Text is present and readable — the point is that being blocked
@@ -1239,12 +1239,12 @@ describe("managed agent sessions on a host-registered runtime", () => {
         }),
       });
       const ctrl = fakeGateway({ pollTranscriptForFinalText: async () => undefined });
-      const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, t3.registry);
+      const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, hostRuntime.registry);
       const job = sessions.submitTask({
         task: "ship it",
         // The marker itself reports the blocked state, which is exactly how a
         // runtime announces "I'm waiting on a human" at delegation time.
-        context: agentSessionMarker({ runtime: "t3-fleet", sessionId: "thr-abc123", host: "minip3", state: blocked }),
+        context: agentSessionMarker({ runtime: "example-runtime", sessionId: "thr-abc123", host: "workstation-1", state: blocked }),
       });
       ctrl.finishChat(NO_SUMMARY_SENTINEL, 0);
       await wait();
@@ -1261,7 +1261,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
       // existing consumer keeps working), different terminalReason and summary.
       expect(settled.terminalReason, blocked).toBe(`delegate-blocked:${blocked}`);
       expect(settled.summary, blocked).not.toBe(NO_SUMMARY_SENTINEL);
-      expect(settled.summary, blocked).toContain("t3-fleet/thr-abc123");
+      expect(settled.summary, blocked).toContain("example-runtime/thr-abc123");
       expect(settled.summary, blocked).toContain(
         blocked === "needs_permission" ? "waiting for permission" : "waiting for input",
       );
@@ -1271,10 +1271,10 @@ describe("managed agent sessions on a host-registered runtime", () => {
   });
 
   it("leaves an ordinary empty turn exactly as it was — sentinel summary, unchanged reason", async () => {
-    const t3 = fakeT3Runtime({ inspect: async () => ({ state: "running" }) });
+    const hostRuntime = fakeHostRuntime({ inspect: async () => ({ state: "running" }) });
     const ctrl = fakeGateway({ pollTranscriptForFinalText: async () => undefined });
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, t3.registry);
-    const job = sessions.submitTask({ task: "ship it", context: T3_MARKER });
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, hostRuntime.registry);
+    const job = sessions.submitTask({ task: "ship it", context: RUNTIME_MARKER });
     ctrl.finishChat(NO_SUMMARY_SENTINEL, 0);
     await wait();
 
@@ -1287,10 +1287,10 @@ describe("managed agent sessions on a host-registered runtime", () => {
 
   it("relabels a terminal turn when a later poll is what discovers the block", async () => {
     let state = "running";
-    const t3 = fakeT3Runtime({ inspect: async () => ({ state }) });
+    const hostRuntime = fakeHostRuntime({ inspect: async () => ({ state }) });
     const ctrl = fakeGateway({ pollTranscriptForFinalText: async () => undefined });
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, t3.registry);
-    const job = sessions.submitTask({ task: "ship it", context: T3_MARKER });
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, hostRuntime.registry);
+    const job = sessions.submitTask({ task: "ship it", context: RUNTIME_MARKER });
     ctrl.finishChat(NO_SUMMARY_SENTINEL, 0);
     await wait();
 
@@ -1304,7 +1304,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
     const settled = sessions.getJob(job.jobId)!;
     expect(settled.status).toBe("completed_no_summary");
     expect(settled.terminalReason).toBe("delegate-blocked:needs_input");
-    expect(settled.summary).toContain("t3-fleet/thr-abc123");
+    expect(settled.summary).toContain("example-runtime/thr-abc123");
     // Idempotent: polling again neither re-labels nor re-logs.
     const version = settled.outcomeVersion;
     await sessions.waitForJob(job.jobId, 0, undefined, "wait", 1);
@@ -1313,11 +1313,11 @@ describe("managed agent sessions on a host-registered runtime", () => {
 
   it("does not blame this turn for a block on a delegation an EARLIER turn owned", async () => {
     const ctrl = fakeGateway({ pollTranscriptForFinalText: async () => undefined });
-    const t3 = fakeT3Runtime({ inspect: async () => ({ state: "needs_input" }) });
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, t3.registry);
+    const hostRuntime = fakeHostRuntime({ inspect: async () => ({ state: "needs_input" }) });
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, hostRuntime.registry);
     const turn1 = sessions.submitTask({
       task: "delegate it",
-      context: agentSessionMarker({ runtime: "t3-fleet", sessionId: "thr-abc123", host: "minip3", state: "needs_input" }),
+      context: agentSessionMarker({ runtime: "example-runtime", sessionId: "thr-abc123", host: "workstation-1", state: "needs_input" }),
     });
     ctrl.finishChat("handed off", 0);
     await wait();
@@ -1334,12 +1334,12 @@ describe("managed agent sessions on a host-registered runtime", () => {
   });
 
   it("refuses a result it cannot date — an undatable answer is not proof of this turn", async () => {
-    const t3 = fakeT3Runtime({
+    const hostRuntime = fakeHostRuntime({
       inspect: async () => ({ state: "completed", finalResponse: "an answer from who knows when" }),
     });
     const ctrl = fakeGateway({ pollTranscriptForFinalText: async () => undefined });
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, t3.registry);
-    const job = sessions.submitTask({ task: "ship it", context: T3_MARKER });
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, hostRuntime.registry);
+    const job = sessions.submitTask({ task: "ship it", context: RUNTIME_MARKER });
     ctrl.finishChat(NO_SUMMARY_SENTINEL, 0);
     await wait();
 
@@ -1348,12 +1348,12 @@ describe("managed agent sessions on a host-registered runtime", () => {
   });
 
   it("refuses a result that predates the turn it would be answering", async () => {
-    const t3 = fakeT3Runtime({
+    const hostRuntime = fakeHostRuntime({
       inspect: async () => ({ state: "completed", finalResponse: "an answer from a previous delegation", lastEventAt: 1_000 }),
     });
     const ctrl = fakeGateway({ pollTranscriptForFinalText: async () => undefined });
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, t3.registry);
-    const job = sessions.submitTask({ task: "ship it", context: T3_MARKER });
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, hostRuntime.registry);
+    const job = sessions.submitTask({ task: "ship it", context: RUNTIME_MARKER });
     ctrl.finishChat(NO_SUMMARY_SENTINEL, 0);
     await wait();
 
@@ -1362,10 +1362,10 @@ describe("managed agent sessions on a host-registered runtime", () => {
 
   it("drops a read that resolves after the attachment was re-delegated to a newer turn", async () => {
     const gate = deferred<AgentSessionObservation>();
-    const t3 = fakeT3Runtime({ inspect: () => gate.promise });
+    const hostRuntime = fakeHostRuntime({ inspect: () => gate.promise });
     const ctrl = fakeGateway();
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, t3.registry);
-    const job = sessions.submitTask({ task: "ship it", context: T3_MARKER });
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, hostRuntime.registry);
+    const job = sessions.submitTask({ task: "ship it", context: RUNTIME_MARKER });
 
     // A read for THIS turn goes out and hangs.
     const inFlight = sessions.runAgentSessionOp(job.sessionKey, { op: "inspect" });
@@ -1396,10 +1396,10 @@ describe("managed agent sessions on a host-registered runtime", () => {
   it("never lets an older read overtake a newer one on the same attachment and turn", async () => {
     const gates = [deferred<AgentSessionObservation>(), deferred<AgentSessionObservation>()];
     let call = 0;
-    const t3 = fakeT3Runtime({ inspect: () => gates[call++].promise });
+    const hostRuntime = fakeHostRuntime({ inspect: () => gates[call++].promise });
     const ctrl = fakeGateway();
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, t3.registry);
-    const job = sessions.submitTask({ task: "ship it", context: T3_MARKER });
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, hostRuntime.registry);
+    const job = sessions.submitTask({ task: "ship it", context: RUNTIME_MARKER });
 
     const older = sessions.runAgentSessionOp(job.sessionKey, { op: "inspect" });
     const newer = sessions.runAgentSessionOp(job.sessionKey, { op: "inspect" });
@@ -1421,17 +1421,17 @@ describe("managed agent sessions on a host-registered runtime", () => {
     // observation token is what makes an explicitly stated status durable
     // against a read that was already outstanding when it was stated.
     const gate = deferred<AgentSessionObservation>();
-    const t3 = fakeT3Runtime({ inspect: () => gate.promise });
+    const hostRuntime = fakeHostRuntime({ inspect: () => gate.promise });
     const ctrl = fakeGateway();
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, t3.registry);
-    const job = sessions.submitTask({ task: "ship it", context: T3_MARKER });
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, hostRuntime.registry);
+    const job = sessions.submitTask({ task: "ship it", context: RUNTIME_MARKER });
 
     const inFlight = sessions.runAgentSessionOp(job.sessionKey, { op: "inspect" });
     await wait();
     ctrl.finishChat("first turn done", 0);
     await wait();
 
-    // Clawdy sees the session block and says so, on the same delegation.
+    // The host sees the session block and says so, on the same delegation.
     sessions.submitTask({
       task: "just looking",
       sessionKey: job.sessionKey,
@@ -1453,12 +1453,12 @@ describe("managed agent sessions on a host-registered runtime", () => {
     // has said about the session, and the read that went out before it is
     // still older. Advancing the token only when the VALUE changed left the
     // record's freshness mark behind the report, so the older read passed the
-    // compare-and-set and replaced a state Clawdy had just re-affirmed.
+    // compare-and-set and replaced a state the host had just re-affirmed.
     const gate = deferred<AgentSessionObservation>();
-    const t3 = fakeT3Runtime({ inspect: () => gate.promise });
+    const hostRuntime = fakeHostRuntime({ inspect: () => gate.promise });
     const ctrl = fakeGateway();
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, t3.registry);
-    const job = sessions.submitTask({ task: "ship it", context: T3_MARKER });
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, hostRuntime.registry);
+    const job = sessions.submitTask({ task: "ship it", context: RUNTIME_MARKER });
     expect(sessions.getFleetAttachment(job.sessionKey)?.status).toBe("running");
 
     const inFlight = sessions.runAgentSessionOp(job.sessionKey, { op: "inspect" });
@@ -1467,7 +1467,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
     await wait();
     const before = sessions.getFleetAttachment(job.sessionKey)!;
 
-    // Clawdy re-states exactly what the record already says.
+    // The host re-states exactly what the record already says.
     sessions.submitTask({
       task: "just looking",
       sessionKey: job.sessionKey,
@@ -1488,10 +1488,10 @@ describe("managed agent sessions on a host-registered runtime", () => {
   });
 
   it("asks the runtime to stop the session only when the detach says so, and detaches locally either way", async () => {
-    const quiet = fakeT3Runtime({ withDetach: true });
+    const quiet = fakeHostRuntime({ withDetach: true });
     const ctrl = fakeGateway();
     const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, quiet.registry);
-    const job = sessions.submitTask({ task: "ship it", context: T3_MARKER });
+    const job = sessions.submitTask({ task: "ship it", context: RUNTIME_MARKER });
     ctrl.finishChat("done", 0);
     await wait();
 
@@ -1507,14 +1507,14 @@ describe("managed agent sessions on a host-registered runtime", () => {
   });
 
   it("dispatches an opt-in runtime stop, and a runtime that throws cannot wedge the conversation", async () => {
-    const t3 = fakeT3Runtime({
+    const hostRuntime = fakeHostRuntime({
       onDetach: async () => {
-        throw new Error("T3 endpoint unreachable");
+        throw new Error("runtime endpoint unreachable");
       },
     });
     const ctrl = fakeGateway();
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, t3.registry);
-    const job = sessions.submitTask({ task: "ship it", context: T3_MARKER });
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, hostRuntime.registry);
+    const job = sessions.submitTask({ task: "ship it", context: RUNTIME_MARKER });
     ctrl.finishChat("done", 0);
     await wait();
 
@@ -1525,7 +1525,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
     });
     await wait();
 
-    expect(t3.detachCalls).toEqual([{ ref: expect.objectContaining({ sessionId: "thr-abc123" }), reason: "abandoned" }]);
+    expect(hostRuntime.detachCalls).toEqual([{ ref: expect.objectContaining({ sessionId: "thr-abc123" }), reason: "abandoned" }]);
     // The local detach is the durable decision; a runtime that is down must
     // not be able to hold the conversation hostage.
     expect(sessions.getFleetAttachment(job.sessionKey)).toBeUndefined();
@@ -1536,10 +1536,10 @@ describe("managed agent sessions on a host-registered runtime", () => {
     const ctrl = fakeGateway();
     // A registry is present but knows nothing about claude-fleet — the
     // explicit tmux fallback still answers for it.
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter, fakeT3Runtime().registry);
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter, fakeHostRuntime().registry);
     const job = sessions.submitTask({
       task: "do the thing",
-      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "minip3" }),
+      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
     });
 
     const inspected = await sessions.runAgentSessionOp(job.sessionKey, { op: "inspect" });
@@ -1569,7 +1569,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
     const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter, registry);
     const job = sessions.submitTask({
       task: "do the thing",
-      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "minip3" }),
+      context: fleetBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
     });
 
     await sessions.runAgentSessionOp(job.sessionKey, { op: "inspect" });
@@ -1588,10 +1588,10 @@ describe("managed agent sessions on a host-registered runtime", () => {
     function persistedState(sessionKey: string, overrides: Partial<FleetAttachmentRecord> = {}): SessionFleetState {
       const record: FleetAttachmentRecord = {
         id: "att-1",
-        runtime: "t3-fleet",
+        runtime: "example-runtime",
         provider: "anthropic-claude-code",
         handle: "thr-abc123",
-        host: "minip3",
+        host: "workstation-1",
         attachedAt: 1_000,
         status: "running",
         observationToken: 42,
@@ -1601,9 +1601,9 @@ describe("managed agent sessions on a host-registered runtime", () => {
     }
 
     it("lets the first post-restart observation land instead of refusing it", async () => {
-      const t3 = fakeT3Runtime({ inspect: async () => ({ state: "needs_input", latestResponse: "which branch?" }) });
+      const hostRuntime = fakeHostRuntime({ inspect: async () => ({ state: "needs_input", latestResponse: "which branch?" }) });
       const store = new FakeFleetAttachmentStore([persistedState("sess-restart")]);
-      const sessions = new SessionManager(fakeGateway().gateway, "main", undefined, store, undefined, t3.registry);
+      const sessions = new SessionManager(fakeGateway().gateway, "main", undefined, store, undefined, hostRuntime.registry);
 
       await sessions.runAgentSessionOp("sess-restart", { op: "inspect" });
 
@@ -1618,7 +1618,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
     it("resumes above a SUPERSEDED record's token too — lineage carries the high-water mark", async () => {
       const current: FleetAttachmentRecord = {
         id: "att-current",
-        runtime: "t3-fleet",
+        runtime: "example-runtime",
         handle: "thr-abc123",
         attachedAt: 2_000,
         status: "running",
@@ -1626,7 +1626,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
       };
       const superseded: FleetAttachmentRecord = {
         id: "att-old",
-        runtime: "t3-fleet",
+        runtime: "example-runtime",
         handle: "thr-older",
         attachedAt: 1_000,
         status: "superseded",
@@ -1639,15 +1639,15 @@ describe("managed agent sessions on a host-registered runtime", () => {
           attachments: { [current.id]: current, [superseded.id]: superseded },
         },
       ]);
-      const t3 = fakeT3Runtime({ inspect: async () => ({ state: "idle" }) });
-      const sessions = new SessionManager(fakeGateway().gateway, "main", undefined, store, undefined, t3.registry);
+      const hostRuntime = fakeHostRuntime({ inspect: async () => ({ state: "idle" }) });
+      const sessions = new SessionManager(fakeGateway().gateway, "main", undefined, store, undefined, hostRuntime.registry);
 
       await sessions.runAgentSessionOp("sess-lineage", { op: "inspect" });
       expect(sessions.getFleetAttachment("sess-lineage")?.observationToken).toBeGreaterThan(99);
     });
 
     it("recovers a delegated turn's result after a restart, which a stale token would silently block", async () => {
-      const t3 = fakeT3Runtime({
+      const hostRuntime = fakeHostRuntime({
         inspect: async () => ({
           state: "completed",
           finalResponse: "the answer, produced after the connector restarted",
@@ -1656,15 +1656,15 @@ describe("managed agent sessions on a host-registered runtime", () => {
       });
       const store = new FakeFleetAttachmentStore([persistedState("sess-restart")]);
       const ctrl = fakeGateway({ pollTranscriptForFinalText: async () => undefined });
-      const sessions = new SessionManager(ctrl.gateway, "main", undefined, store, undefined, t3.registry);
+      const sessions = new SessionManager(ctrl.gateway, "main", undefined, store, undefined, hostRuntime.registry);
 
-      // The new turn re-states the attachment (Clawdy passes the marker every
+      // The new turn re-states the attachment (the host passes the marker every
       // turn), which is what delegates it to THIS job. No `state` in the
       // marker, so nothing re-stamps the token on the way in.
       const job = sessions.submitTask({
         task: "keep going",
         sessionKey: "sess-restart",
-        context: agentSessionMarker({ runtime: "t3-fleet", sessionId: "thr-abc123", host: "minip3" }),
+        context: agentSessionMarker({ runtime: "example-runtime", sessionId: "thr-abc123", host: "workstation-1" }),
       });
       ctrl.finishChat(NO_SUMMARY_SENTINEL, 0);
       await wait();
@@ -1680,10 +1680,10 @@ describe("managed agent sessions on a host-registered runtime", () => {
     vi.useFakeTimers();
     try {
       // Never resolves, and never rejects — the shape a hung HTTP call takes.
-      const t3 = fakeT3Runtime({ inspect: () => new Promise<never>(() => {}) });
+      const hostRuntime = fakeHostRuntime({ inspect: () => new Promise<never>(() => {}) });
       const ctrl = fakeGateway({ pollTranscriptForFinalText: async () => undefined });
-      const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, t3.registry);
-      const job = sessions.submitTask({ task: "ship it", context: T3_MARKER });
+      const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, hostRuntime.registry);
+      const job = sessions.submitTask({ task: "ship it", context: RUNTIME_MARKER });
 
       ctrl.finishChat(NO_SUMMARY_SENTINEL, 0);
       await vi.advanceTimersByTimeAsync(10);
@@ -1704,7 +1704,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
   });
 
   it("does not present a prior turn's finished result as the current turn's state", async () => {
-    const t3 = fakeT3Runtime({
+    const hostRuntime = fakeHostRuntime({
       inspect: async () => ({
         state: "completed",
         finalResponse: "turn one's answer",
@@ -1715,8 +1715,8 @@ describe("managed agent sessions on a host-registered runtime", () => {
       }),
     });
     const ctrl = fakeGateway();
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, t3.registry);
-    const turn1 = sessions.submitTask({ task: "ship it", context: T3_MARKER });
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, hostRuntime.registry);
+    const turn1 = sessions.submitTask({ task: "ship it", context: RUNTIME_MARKER });
     await sessions.runAgentSessionOp(turn1.sessionKey, { op: "inspect" });
 
     const afterTurn1 = sessions.getFleetAttachment(turn1.sessionKey)!;
@@ -1730,7 +1730,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
     const turn2 = sessions.submitTask({
       task: "now do the next thing",
       sessionKey: turn1.sessionKey,
-      context: agentSessionMarker({ runtime: "t3-fleet", sessionId: "thr-abc123", host: "minip3" }),
+      context: agentSessionMarker({ runtime: "example-runtime", sessionId: "thr-abc123", host: "workstation-1" }),
     });
 
     const attachment = sessions.getFleetAttachment(turn1.sessionKey)!;
@@ -1744,19 +1744,19 @@ describe("managed agent sessions on a host-registered runtime", () => {
     // …while the session's identity and lineage are exactly as they were.
     expect(attachment.id).toBe(afterTurn1.id);
     expect(attachment.attachedAt).toBe(afterTurn1.attachedAt);
-    expect(attachment.runtime).toBe("t3-fleet");
+    expect(attachment.runtime).toBe("example-runtime");
     expect(attachment.handle).toBe("thr-abc123");
-    expect(attachment.metadata).toEqual({ t3ProjectId: "proj-1", turnId: "turn-1" });
+    expect(attachment.metadata).toEqual({ runtimeProjectId: "proj-1", turnId: "turn-1" });
     expect(sessions.getFleetLineage(turn1.sessionKey)).toHaveLength(1);
   });
 
   it("clears a prior turn's outcome on a continue from a later turn, keeping a stated status", async () => {
-    const t3 = fakeT3Runtime({
+    const hostRuntime = fakeHostRuntime({
       inspect: async () => ({ state: "idle", finalResponse: "turn one's answer", lastEventAt: Date.now() }),
     });
     const ctrl = fakeGateway();
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, t3.registry);
-    const turn1 = sessions.submitTask({ task: "ship it", context: T3_MARKER });
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, hostRuntime.registry);
+    const turn1 = sessions.submitTask({ task: "ship it", context: RUNTIME_MARKER });
     await sessions.runAgentSessionOp(turn1.sessionKey, { op: "inspect" });
     expect(sessions.getFleetAttachment(turn1.sessionKey)?.lastResult).toBeDefined();
     ctrl.finishChat("turn one done", 0);
@@ -1776,32 +1776,32 @@ describe("managed agent sessions on a host-registered runtime", () => {
   });
 
   it("takes the provider from the registered runtime, not from what the marker claimed", async () => {
-    const t3 = fakeT3Runtime({ inspect: async () => ({ state: "running" }) });
+    const hostRuntime = fakeHostRuntime({ inspect: async () => ({ state: "running" }) });
     const ctrl = fakeGateway();
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, t3.registry);
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, hostRuntime.registry);
     const job = sessions.submitTask({
       task: "ship it",
       context: agentSessionMarker({
-        runtime: "t3-fleet",
+        runtime: "example-runtime",
         provider: "some-other-model",
         sessionId: "thr-abc123",
-        host: "minip3",
+        host: "workstation-1",
       }),
     });
 
     const status = await sessions.runAgentSessionOp(job.sessionKey, { op: "inspect" });
-    expect(t3.inspectCalls[0].provider).toBe("anthropic-claude-code");
+    expect(hostRuntime.inspectCalls[0].provider).toBe("anthropic-claude-code");
     expect(status?.provider).toBe("anthropic-claude-code");
     // The record heals to what the runtime says, so every later snapshot is right too.
     expect(sessions.getFleetAttachment(job.sessionKey)?.provider).toBe("anthropic-claude-code");
   });
 
   it("exposes registered runtimes for wiring assertions without exposing any session", () => {
-    const t3 = fakeT3Runtime();
+    const hostRuntime = fakeHostRuntime();
     const ctrl = fakeGateway();
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, t3.registry);
-    expect(sessions.hasAgentSessionRuntime("t3-fleet")).toBe(true);
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, hostRuntime.registry);
+    expect(sessions.hasAgentSessionRuntime("example-runtime")).toBe(true);
     expect(sessions.hasAgentSessionRuntime("some-other-runtime")).toBe(false);
-    expect(new SessionManager(fakeGateway().gateway).hasAgentSessionRuntime("t3-fleet")).toBe(false);
+    expect(new SessionManager(fakeGateway().gateway).hasAgentSessionRuntime("example-runtime")).toBe(false);
   });
 });

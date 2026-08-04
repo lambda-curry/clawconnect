@@ -25,11 +25,11 @@ import {
  */
 
 const REF: AgentSessionRef = {
-  runtime: "t3-fleet",
+  runtime: "example-runtime",
   provider: "anthropic-claude-code",
   sessionId: "thr-abc123",
-  host: "minip3",
-  metadata: { t3ProjectId: "proj-1" },
+  host: "workstation-1",
+  metadata: { runtimeProjectId: "proj-1" },
   lastKnownState: "running",
 };
 
@@ -47,7 +47,7 @@ describe("normalizing what a runtime reports", () => {
       // re-point the conversation's one attachment.
       ...({ runtime: "evil-runtime", sessionId: "thr-someone-elses" } as AgentSessionObservation),
     });
-    expect(status.runtime).toBe("t3-fleet");
+    expect(status.runtime).toBe("example-runtime");
     expect(status.sessionId).toBe("thr-abc123");
     expect(status.provider).toBe("anthropic-claude-code");
   });
@@ -59,7 +59,7 @@ describe("normalizing what a runtime reports", () => {
   });
 
   it("populates finalResponse ONLY for a genuinely completed turn", () => {
-    // T3's terminal success, and claude-fleet's — both mean "the turn landed".
+    // A service runtime's terminal success, and claude-fleet's — both mean "the turn landed".
     expect(normalize({ state: "completed", latestResponse: "the answer" }).finalResponse).toBe("the answer");
     expect(normalize({ state: "idle", latestResponse: "the answer" }).finalResponse).toBe("the answer");
 
@@ -103,12 +103,12 @@ describe("normalizing what a runtime reports", () => {
 
   it("merges strings-only metadata over the ref's, coercing finite scalars", () => {
     const status = normalize({ state: "running", metadata: { turnId: "t-9", attempt: 2, isolated: true, junk: { a: 1 } } });
-    expect(status.metadata).toEqual({ t3ProjectId: "proj-1", turnId: "t-9", attempt: "2", isolated: "true" });
+    expect(status.metadata).toEqual({ runtimeProjectId: "proj-1", turnId: "t-9", attempt: "2", isolated: "true" });
   });
 
   it("keeps a read failure separate from the session's own failure", () => {
-    const status = normalize({ state: "unavailable", error: "the T3 endpoint refused the connection" });
-    expect(status.error).toEqual({ code: "runtime_error", message: "the T3 endpoint refused the connection" });
+    const status = normalize({ state: "unavailable", error: "the runtime endpoint refused the connection" });
+    expect(status.error).toEqual({ code: "runtime_error", message: "the runtime endpoint refused the connection" });
     expect(status.state).toBe("unavailable");
   });
 });
@@ -116,11 +116,11 @@ describe("normalizing what a runtime reports", () => {
 describe("capabilities and dispatch", () => {
   it("derives capabilities from the callbacks actually supplied", () => {
     const registry = new AgentSessionRuntimeRegistry();
-    const readOnly = registry.register({ id: "t3-fleet", provider: "p", inspect: async () => ({ state: "running" }) });
+    const readOnly = registry.register({ id: "example-runtime", provider: "p", inspect: async () => ({ state: "running" }) });
     expect(readOnly.capabilities).toEqual({ inspect: true, continue: false, detach: false });
 
     const full = registry.register({
-      id: "t3-full",
+      id: "example-full",
       provider: "p",
       inspect: async () => ({ state: "running" }),
       continue: async () => ({ state: "running" }),
@@ -145,7 +145,7 @@ describe("capabilities and dispatch", () => {
 
   it("returns unsupported_operation for a capability the runtime never registered", async () => {
     const registry = new AgentSessionRuntimeRegistry();
-    const runtime = registry.register({ id: "t3-fleet", provider: "p", inspect: async () => ({ state: "running" }) });
+    const runtime = registry.register({ id: "example-runtime", provider: "p", inspect: async () => ({ state: "running" }) });
 
     const status = await dispatchAgentSession(runtime, REF, { op: "continue", prompt: "keep going" }, { now: NOW });
     expect(status.state).toBe("unavailable");
@@ -156,7 +156,7 @@ describe("capabilities and dispatch", () => {
   it("turns a thrown callback into a branchable status, never a rejection", async () => {
     const registry = new AgentSessionRuntimeRegistry();
     const runtime = registry.register({
-      id: "t3-fleet",
+      id: "example-runtime",
       provider: "p",
       inspect: async () => {
         throw new Error("socket hang up");
@@ -170,7 +170,7 @@ describe("capabilities and dispatch", () => {
 
   it("treats a null reply as session_not_found rather than as a failed session", async () => {
     const registry = new AgentSessionRuntimeRegistry();
-    const runtime = registry.register({ id: "t3-fleet", provider: "p", inspect: async () => null });
+    const runtime = registry.register({ id: "example-runtime", provider: "p", inspect: async () => null });
 
     const status = await dispatchAgentSession(runtime, REF, { op: "inspect" }, { now: NOW });
     expect(status.state).toBe("unavailable");
@@ -181,7 +181,7 @@ describe("capabilities and dispatch", () => {
     const seen: AgentSessionRef[] = [];
     const registry = new AgentSessionRuntimeRegistry();
     const runtime = registry.register({
-      id: "t3-fleet",
+      id: "example-runtime",
       provider: "p",
       inspect: async (ref, opts) => {
         seen.push(ref);
@@ -200,7 +200,7 @@ describe("capabilities and dispatch", () => {
     const calls: string[] = [];
     const registry = new AgentSessionRuntimeRegistry();
     const runtime = registry.register({
-      id: "t3-fleet",
+      id: "example-runtime",
       provider: "p",
       inspect: async () => ({ state: "running" }),
       continue: async (_ref, request) => {
@@ -222,13 +222,13 @@ describe("capabilities and dispatch", () => {
 
   it("exposes registered runtime IDS and nothing else — there is no session-enumerating callback", () => {
     const registry = new AgentSessionRuntimeRegistry();
-    registry.register({ id: "t3-fleet", provider: "p", inspect: async () => ({}) });
-    expect(registry.ids()).toEqual(["t3-fleet"]);
-    expect(registry.has("t3-fleet")).toBe(true);
+    registry.register({ id: "example-runtime", provider: "p", inspect: async () => ({}) });
+    expect(registry.ids()).toEqual(["example-runtime"]);
+    expect(registry.has("example-runtime")).toBe(true);
     expect(registry.has("nope")).toBe(false);
     // The shape of the seam is the guarantee: the only way to reach a runtime
     // is one call about one already-known session.
-    expect(Object.keys(registry.get("t3-fleet")!.callbacks).sort()).toEqual(["id", "inspect", "provider"]);
+    expect(Object.keys(registry.get("example-runtime")!.callbacks).sort()).toEqual(["id", "inspect", "provider"]);
   });
 });
 
@@ -237,7 +237,7 @@ describe("the registered runtime's provider is authoritative", () => {
     const seen: AgentSessionRef[] = [];
     const registry = new AgentSessionRuntimeRegistry();
     const runtime = registry.register({
-      id: "t3-fleet",
+      id: "example-runtime",
       provider: "anthropic-claude-code",
       inspect: async (ref) => {
         seen.push(ref);
@@ -280,7 +280,7 @@ describe("a callback that never answers", () => {
       let seenSignal: AbortSignal | undefined;
       const registry = new AgentSessionRuntimeRegistry();
       const runtime = registry.register({
-        id: "t3-fleet",
+        id: "example-runtime",
         provider: "p",
         inspect: (_ref, opts) => {
           seenSignal = opts.signal;
@@ -311,7 +311,7 @@ describe("a callback that never answers", () => {
     try {
       const registry = new AgentSessionRuntimeRegistry();
       const runtime = registry.register({
-        id: "t3-fleet",
+        id: "example-runtime",
         provider: "p",
         inspect: async () => ({ state: "running" }),
         continue: () => new Promise<never>(() => {}),
@@ -329,7 +329,7 @@ describe("a callback that never answers", () => {
     try {
       const registry = new AgentSessionRuntimeRegistry();
       const runtime = registry.register({
-        id: "t3-fleet",
+        id: "example-runtime",
         provider: "p",
         inspect: () => new Promise((resolve) => setTimeout(() => resolve({ state: "idle" }), 500)),
       });
@@ -365,21 +365,21 @@ describe("a blocked delegation is never an ordinary finished task", () => {
     jobId: "job-1",
     status: "completed_no_summary",
     fleetAttachment: {
-      runtime: "t3-fleet",
+      runtime: "example-runtime",
       handle: "thr-abc123",
       status: "needs_input",
       latestResponse: "should I force-push?",
-      remoteUrl: "https://t3.example/threads/abc123",
+      remoteUrl: "https://runtime.example/threads/abc123",
       delegatedTurnId: "job-1",
     },
   };
 
   it("describes what is blocked, what it asked, and where to answer it", () => {
     const notice = blockedDelegationNotice(blockedSnapshot)!;
-    expect(notice).toContain("t3-fleet/thr-abc123");
+    expect(notice).toContain("example-runtime/thr-abc123");
     expect(notice).toContain("waiting for input");
     expect(notice).toContain("should I force-push?");
-    expect(notice).toContain("https://t3.example/threads/abc123");
+    expect(notice).toContain("https://runtime.example/threads/abc123");
 
     expect(describeBlockedAgentSession({ ...blockedSnapshot.fleetAttachment, status: "needs_permission" })).toContain(
       "waiting for permission",
@@ -423,11 +423,11 @@ describe("an ACTIVE blocked delegation on a still-running turn", () => {
     jobId: "job-1",
     status: "running",
     fleetAttachment: {
-      runtime: "t3-fleet",
+      runtime: "example-runtime",
       handle: "thr-abc123",
       status: "needs_input",
       latestResponse: "should I force-push?",
-      remoteUrl: "https://t3.example/threads/abc123",
+      remoteUrl: "https://runtime.example/threads/abc123",
       delegatedTurnId: "job-1",
     },
   };
@@ -436,10 +436,10 @@ describe("an ACTIVE blocked delegation on a still-running turn", () => {
     const blocked = blockedDelegation(activeSnapshot)!;
     expect(blocked.active).toBe(true);
     expect(blocked.state).toBe("needs_input");
-    expect(blocked.runtime).toBe("t3-fleet");
+    expect(blocked.runtime).toBe("example-runtime");
     expect(blocked.handle).toBe("thr-abc123");
-    expect(blocked.remoteUrl).toBe("https://t3.example/threads/abc123");
-    expect(blocked.notice).toContain("t3-fleet/thr-abc123");
+    expect(blocked.remoteUrl).toBe("https://runtime.example/threads/abc123");
+    expect(blocked.notice).toContain("example-runtime/thr-abc123");
     expect(blocked.notice).toContain("waiting for input");
     expect(blocked.notice).toContain("should I force-push?");
     // The one thing the active wording must add over the terminal one: the
@@ -487,7 +487,7 @@ describe("an ACTIVE blocked delegation on a still-running turn", () => {
   it("describes an active block only for a genuinely blocked attachment", () => {
     expect(describeActiveBlockedAgentSession(undefined)).toBeUndefined();
     expect(
-      describeActiveBlockedAgentSession({ runtime: "t3-fleet", handle: "thr-1", status: "running" }),
+      describeActiveBlockedAgentSession({ runtime: "example-runtime", handle: "thr-1", status: "running" }),
     ).toBeUndefined();
   });
 });

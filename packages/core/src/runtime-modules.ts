@@ -16,7 +16,7 @@ import { AgentSessionRuntimeRegistry } from "./agent-session.ts";
  *
  * Everything runtime-specific — a CLI, pairing, a project model, credentials,
  * an HTTP client — lives inside that module, on the host's side of the
- * boundary. The Saffron T3 bridge is one such module; ClawConnect neither
+ * boundary. A host's own runtime bridge is one such module; ClawConnect neither
  * ships it nor knows it exists.
  *
  * A module exports either `registerAgentSessionRuntimes(registry)` or a
@@ -24,7 +24,7 @@ import { AgentSessionRuntimeRegistry } from "./agent-session.ts";
  * each runtime it can answer for:
  *
  *   export function registerAgentSessionRuntimes(registry) {
- *     registry.register({ id: "t3-fleet", provider: "…", inspect, continue, detach });
+ *     registry.register({ id: "example-runtime", provider: "…", inspect, continue, detach });
  *   }
  *
  * Trust: the specifiers come from the deployment's own environment, the same

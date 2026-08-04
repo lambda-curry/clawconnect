@@ -30,16 +30,16 @@ const silent = { log: () => {} };
 describe("loading host-registered runtimes", () => {
   it("registers what a module's registerAgentSessionRuntimes hook asks for", async () => {
     const path = moduleFile(
-      "t3-bridge.mjs",
+      "hostRuntime-bridge.mjs",
       `export function registerAgentSessionRuntimes(registry) {
-         registry.register({ id: "t3-fleet", provider: "anthropic-claude-code", inspect: async () => ({ state: "running" }) });
+         registry.register({ id: "example-runtime", provider: "anthropic-claude-code", inspect: async () => ({ state: "running" }) });
        }`,
     );
 
     const registry = await loadAgentSessionRuntimes(path, silent);
-    expect(registry?.ids()).toEqual(["t3-fleet"]);
+    expect(registry?.ids()).toEqual(["example-runtime"]);
     // Capabilities stay DERIVED from the callbacks the module actually gave.
-    expect(registry?.get("t3-fleet")?.capabilities).toEqual({ inspect: true, continue: false, detach: false });
+    expect(registry?.get("example-runtime")?.capabilities).toEqual({ inspect: true, continue: false, detach: false });
   });
 
   it("accepts a default export, several modules at once, and a relative specifier", async () => {

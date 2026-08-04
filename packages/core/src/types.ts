@@ -83,10 +83,10 @@ export type ResultSource = "parent" | "fleet-transcript" | "agent-session";
 // ── Managed agent-session attachment ──────────────────────────────────────
 
 /**
- * The substates a directive may report Clawdy observing directly, and the only
+ * The substates a directive may report the host observing directly, and the only
  * ones a record's `status` may hold: the neutral AgentSessionState vocabulary
  * minus the two values that describe a READ rather than a session
- * ("unavailable", "unknown"). Clawdy supervises the managed session and knows
+ * ("unavailable", "unknown"). The host supervises the managed session and knows
  * things — e.g. "it's asking me something" — that ClawConnect's own
  * tmux-liveness-only adapter cannot determine on its own; "we could not reach
  * the runtime" is never one of them, and lives on `error` instead.
@@ -103,7 +103,7 @@ export type ResultSource = "parent" | "fleet-transcript" | "agent-session";
 export type FleetLiveStatus = Exclude<AgentSessionState, "unavailable" | "unknown">;
 
 /**
- * One Clawdy conversation may have at most one CURRENT managed-session
+ * One conversation may have at most one CURRENT managed-session
  * attachment at a time, but every attachment it has ever had is kept (see
  * SessionFleetState) — `id` is ClawConnect's own identifier for this record,
  * distinct from `handle` (the session's own id in its runtime's namespace), so
@@ -216,7 +216,7 @@ export type SessionFleetState = {
 };
 
 /**
- * Structured directive Clawdy embeds in TaskInput.context to drive an
+ * Structured directive the owning host embeds in TaskInput.context to drive an
  * explicit attachment transition — parsed and stripped by fleet-handoff.ts
  * before the message reaches the agent. See docs/architecture/2026-08-02-
  * managed-fleet-attachment-plan.md §4; this is deliberately not a new public

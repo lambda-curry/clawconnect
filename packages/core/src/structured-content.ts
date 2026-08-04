@@ -53,7 +53,7 @@ export function buildGetTaskStructuredContent(result: FoundCheckTaskResult, deta
     isError,
     resultSource: snapshot.resultSource,
     terminalReason: snapshot.terminalReason,
-    // Unconditional, same treatment as `recovery` above — Clawdy needs the
+    // Unconditional, same treatment as `recovery` above — the owning host needs the
     // session's current Fleet attachment on every get_task call, not just
     // under a detail preset. Absent entirely when there is no attachment
     // (buildSnapshot never sets the key), so this stays undefined for every

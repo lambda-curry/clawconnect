@@ -68,7 +68,7 @@ export interface CreateAppOptions {
    * Fleet-transcript recovery adapter (see docs/architecture/2026-08-02-
    * managed-fleet-attachment-plan.md). Defaults to a real LocalTmuxFleetAdapter
    * so recovery tier 3 is actually reachable in production — without this,
-   * Clawdy could attach a Fleet session all day and ClawConnect would never
+   * A host could attach a managed session all day and ClawConnect would never
    * consult it. Override in tests to inject a fake and assert on wiring
    * without needing a real tmux/filesystem.
    */
@@ -171,8 +171,8 @@ export function createApp(registry: AgentRegistry, opts: CreateAppOptions = {}):
    * Per-request agent scope. A connection can narrow which agents it sees with:
    *   ?group=lc-labs            — a named group from agents.json (stable URL;
    *                               membership edited server-side, no re-paste)
-   *   ?agents=clawdy,hank       — an explicit list (ad-hoc scoping)
-   *   ?agent=clawdy             — single-agent shorthand
+   *   ?agents=assistant,helper  — an explicit list (ad-hoc scoping)
+   *   ?agent=assistant          — single-agent shorthand
    * `group` and `agents` can be combined and/or repeated — the result is the
    * union. Unknown agent ids and unknown group names are dropped with a
    * warning. If the filter resolves to zero agents, we fall back to all

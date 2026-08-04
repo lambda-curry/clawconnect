@@ -69,7 +69,7 @@ function makeAttachment(overrides: Partial<FleetAttachmentRecord> = {}): FleetAt
     id: "att-1",
     runtime: "claude-fleet",
     handle: "cf-nonexistent-handle-for-tests",
-    host: "minip3",
+    host: "workstation-1",
     attachedAt: Date.now(),
     status: "running",
     ...overrides,

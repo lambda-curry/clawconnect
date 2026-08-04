@@ -245,18 +245,18 @@ describe("check_task model-facing text carries the resume cursor", () => {
         runningSnapshot({
           fleetAttachment: {
             id: "att-1",
-            runtime: "t3-fleet",
+            runtime: "example-runtime",
             handle: "thr-abc123",
             attachedAt: 1,
             status: state,
             latestResponse: "should I force-push?",
-            remoteUrl: "https://t3.example/threads/abc123",
+            remoteUrl: "https://runtime.example/threads/abc123",
             delegatedTurnId: "job-1",
           },
         }),
         false,
       );
-      expect(text, state).toContain("t3-fleet/thr-abc123");
+      expect(text, state).toContain("example-runtime/thr-abc123");
       expect(text, state).toContain(state === "needs_permission" ? "waiting for permission" : "waiting for input");
       expect(text, state).toContain("Polling cannot advance it");
       expect(text, state).not.toContain("Still running.");
@@ -271,7 +271,7 @@ describe("check_task model-facing text carries the resume cursor", () => {
       runningSnapshot({
         fleetAttachment: {
           id: "att-1",
-          runtime: "t3-fleet",
+          runtime: "example-runtime",
           handle: "thr-abc123",
           attachedAt: 1,
           status: "needs_input",
@@ -300,7 +300,7 @@ describe("check_task model-facing text carries the resume cursor", () => {
       summary: "Stream finished with no response collected.",
       fleetAttachment: {
         id: "att-1",
-        runtime: "t3-fleet",
+        runtime: "example-runtime",
         handle: "thr-abc123",
         attachedAt: 1,
         status: "needs_input",
@@ -310,7 +310,7 @@ describe("check_task model-facing text carries the resume cursor", () => {
     });
     const text = checkTaskText(snapshot, true);
     expect(text.startsWith("This turn produced no result")).toBe(true);
-    expect(text).toContain("t3-fleet/thr-abc123");
+    expect(text).toContain("example-runtime/thr-abc123");
     expect(text).toContain("should I force-push?");
     // The job's own summary still follows, never replaced.
     expect(text).toContain("Stream finished with no response collected.");
@@ -319,7 +319,7 @@ describe("check_task model-facing text carries the resume cursor", () => {
   it("says nothing extra for an unblocked attachment or another turn's delegation", () => {
     const attachment = {
       id: "att-1",
-      runtime: "t3-fleet",
+      runtime: "example-runtime",
       handle: "thr-abc123",
       attachedAt: 1,
       status: "needs_input" as const,
@@ -375,16 +375,16 @@ describe("production entrypoint wiring — FleetAdapter", () => {
     const jobStoreDir = mkdtempSync(join(tmpdir(), "clawconnect-jobstore-"));
     tmpDirs.push(jobStoreDir);
     const runtimes = new AgentSessionRuntimeRegistry();
-    runtimes.register({ id: "t3-fleet", provider: "anthropic-claude-code", inspect: async () => ({ state: "running" }) });
+    runtimes.register({ id: "example-runtime", provider: "anthropic-claude-code", inspect: async () => ({ state: "running" }) });
 
     const { pool } = createApp(fakeRegistry(), { jobStoreDir, agentSessionRuntimes: runtimes });
-    expect(pool.forAgent("test-agent").sessions.hasAgentSessionRuntime("t3-fleet")).toBe(true);
+    expect(pool.forAgent("test-agent").sessions.hasAgentSessionRuntime("example-runtime")).toBe(true);
   });
 
   it("createApp leaves claude-fleet the only reachable runtime when no registry is supplied", () => {
     const jobStoreDir = mkdtempSync(join(tmpdir(), "clawconnect-jobstore-"));
     tmpDirs.push(jobStoreDir);
     const { pool } = createApp(fakeRegistry(), { jobStoreDir });
-    expect(pool.forAgent("test-agent").sessions.hasAgentSessionRuntime("t3-fleet")).toBe(false);
+    expect(pool.forAgent("test-agent").sessions.hasAgentSessionRuntime("example-runtime")).toBe(false);
   });
 });

@@ -48,7 +48,7 @@ export interface FleetAdapter {
  *
  * Only `inspect` is offered, and it deliberately reports NO state — a bare
  * tmux liveness bit cannot distinguish "working" from "waiting on a human",
- * and claiming one would let it clobber a status Clawdy reported explicitly.
+ * and claiming one would let it clobber a status the host reported explicitly.
  * It answers the one question it can (`alive`), and the write-back's
  * liveness-only rule decides what, if anything, that is allowed to promote.
  *

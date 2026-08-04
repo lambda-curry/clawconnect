@@ -19,13 +19,13 @@ describe("parseFleetDirective", () => {
   it("parses an attach directive and strips it from the text", () => {
     const before = "Some preamble.\n\n";
     const after = "\n\nMore instructions.";
-    const text = before + block({ op: "attach", handle: "cf-foo", host: "minip3", providerSessionId: "prov-1", worktree: "/w" }) + after;
+    const text = before + block({ op: "attach", handle: "cf-foo", host: "workstation-1", providerSessionId: "prov-1", worktree: "/w" }) + after;
     const result = parseFleetDirective(text);
     expect(result).toBeDefined();
     expect(result?.directive).toEqual({
       op: "attach",
       handle: "cf-foo",
-      host: "minip3",
+      host: "workstation-1",
       providerSessionId: "prov-1",
       worktree: "/w",
       remoteUrl: undefined,
@@ -35,10 +35,10 @@ describe("parseFleetDirective", () => {
   });
 
   it("parses a replace directive requiring a reason", () => {
-    const withReason = parseFleetDirective(block({ op: "replace", handle: "cf-bar", host: "minip3", reason: "stale worktree" }));
+    const withReason = parseFleetDirective(block({ op: "replace", handle: "cf-bar", host: "workstation-1", reason: "stale worktree" }));
     expect(withReason?.directive).toMatchObject({ op: "replace", handle: "cf-bar", reason: "stale worktree" });
 
-    const withoutReason = parseFleetDirective(block({ op: "replace", handle: "cf-bar", host: "minip3" }));
+    const withoutReason = parseFleetDirective(block({ op: "replace", handle: "cf-bar", host: "workstation-1" }));
     expect(withoutReason).toBeUndefined();
   });
 
@@ -53,7 +53,7 @@ describe("parseFleetDirective", () => {
   });
 
   it("rejects an unknown op", () => {
-    expect(parseFleetDirective(block({ op: "delete-everything", handle: "cf-foo", host: "minip3" }))).toBeUndefined();
+    expect(parseFleetDirective(block({ op: "delete-everything", handle: "cf-foo", host: "workstation-1" }))).toBeUndefined();
   });
 
   it("rejects malformed JSON inside the block without throwing", () => {
@@ -64,16 +64,16 @@ describe("parseFleetDirective", () => {
 
   it("rejects a handle that isn't a safe path segment (path traversal defense)", () => {
     for (const handle of ["../../etc/passwd", "/etc/passwd", "cf foo", "cf/foo", ""]) {
-      expect(parseFleetDirective(block({ op: "attach", handle, host: "minip3" }))).toBeUndefined();
+      expect(parseFleetDirective(block({ op: "attach", handle, host: "workstation-1" }))).toBeUndefined();
     }
   });
 
   it("rejects attach/replace missing handle or host", () => {
-    expect(parseFleetDirective(block({ op: "attach", host: "minip3" }))).toBeUndefined();
+    expect(parseFleetDirective(block({ op: "attach", host: "workstation-1" }))).toBeUndefined();
     expect(parseFleetDirective(block({ op: "attach", handle: "cf-foo" }))).toBeUndefined();
   });
 
-  it("parses an optional status Clawdy reports directly, and drops an invalid one", () => {
+  it("parses an optional status the host reports directly, and drops an invalid one", () => {
     expect(parseFleetDirective(block({ op: "continue", status: "needs_input" }))?.directive).toEqual({
       op: "continue",
       status: "needs_input",
@@ -89,7 +89,7 @@ describe("parseFleetDirective", () => {
   });
 
   it("only consumes the first directive block when two are present", () => {
-    const text = block({ op: "attach", handle: "cf-first", host: "minip3" }) + " " + block({ op: "detach", reason: "second" });
+    const text = block({ op: "attach", handle: "cf-first", host: "workstation-1" }) + " " + block({ op: "detach", reason: "second" });
     const result = parseFleetDirective(text);
     expect(result?.directive).toMatchObject({ op: "attach", handle: "cf-first" });
   });
@@ -98,28 +98,28 @@ describe("parseFleetDirective", () => {
     const result = parseFleetDirective(
       block({
         op: "attach",
-        runtime: "t3-fleet",
+        runtime: "example-runtime",
         provider: "anthropic-claude-code",
         sessionId: "thr-abc123",
-        host: "minip3",
-        metadata: { t3ProjectId: "proj-1", attempt: 2 },
+        host: "workstation-1",
+        metadata: { runtimeProjectId: "proj-1", attempt: 2 },
       }),
     );
     expect(result?.directive).toMatchObject({
       op: "attach",
-      runtime: "t3-fleet",
+      runtime: "example-runtime",
       provider: "anthropic-claude-code",
       // `sessionId` is the neutral name for the same value `handle` has always carried.
       handle: "thr-abc123",
-      metadata: { t3ProjectId: "proj-1", attempt: "2" },
+      metadata: { runtimeProjectId: "proj-1", attempt: "2" },
     });
   });
 
   it("rejects a malformed runtime id, and defaults an omitted one at the session layer", () => {
-    expect(parseFleetDirective(block({ op: "attach", runtime: "../evil", handle: "cf-foo", host: "minip3" }))).toBeUndefined();
+    expect(parseFleetDirective(block({ op: "attach", runtime: "../evil", handle: "cf-foo", host: "workstation-1" }))).toBeUndefined();
     // Omitted here; session.ts fills in claude-fleet, the runtime this
     // directive shape originally described.
-    expect(parseFleetDirective(block({ op: "attach", handle: "cf-foo", host: "minip3" }))?.directive).not.toHaveProperty(
+    expect(parseFleetDirective(block({ op: "attach", handle: "cf-foo", host: "workstation-1" }))?.directive).not.toHaveProperty(
       "runtime",
     );
   });
@@ -157,28 +157,28 @@ describe("parseFleetDirective", () => {
 describe("parseAgentSessionMarker", () => {
   it("turns the neutral marker a runtime already prints into an attach", () => {
     const result = parseAgentSessionMarker(
-      "Delegated to T3.\n" +
+      "Delegated to the runtime.\n" +
         marker({
-          runtime: "t3-fleet",
+          runtime: "example-runtime",
           provider: "anthropic-claude-code",
           sessionId: "thr-abc123",
-          host: "minip3",
+          host: "workstation-1",
           state: "running",
-          metadata: { t3ProjectId: "proj-1", worktreePath: "/w/feature", turnId: "turn-9" },
+          metadata: { runtimeProjectId: "proj-1", worktreePath: "/w/feature", turnId: "turn-9" },
         }) +
         "\nCarry on.",
     );
     expect(result?.directive).toMatchObject({
       op: "attach",
-      runtime: "t3-fleet",
+      runtime: "example-runtime",
       provider: "anthropic-claude-code",
       handle: "thr-abc123",
-      host: "minip3",
+      host: "workstation-1",
       status: "running",
       worktree: "/w/feature",
-      metadata: { t3ProjectId: "proj-1", worktreePath: "/w/feature", turnId: "turn-9" },
+      metadata: { runtimeProjectId: "proj-1", worktreePath: "/w/feature", turnId: "turn-9" },
     });
-    expect(result?.strippedText).toBe("Delegated to T3.\n\nCarry on.");
+    expect(result?.strippedText).toBe("Delegated to the runtime.\n\nCarry on.");
     expect(result?.strippedText).not.toContain("agent-session");
   });
 
@@ -190,7 +190,7 @@ describe("parseAgentSessionMarker", () => {
         sessionId: "cf-foo",
         providerSessionId: "prov-1",
         remoteUrl: "https://claude.ai/code/session_x",
-        host: "minip3",
+        host: "workstation-1",
         state: "idle",
         metadata: { project: "clawconnect", role: "impl" },
       }),
@@ -206,22 +206,22 @@ describe("parseAgentSessionMarker", () => {
   });
 
   it("allows an omitted host — a service runtime's session lives on a server, not a named machine", () => {
-    const result = parseAgentSessionMarker(marker({ runtime: "t3-fleet", sessionId: "thr-abc123", state: "starting" }));
-    expect(result?.directive).toMatchObject({ op: "attach", runtime: "t3-fleet", handle: "thr-abc123" });
+    const result = parseAgentSessionMarker(marker({ runtime: "example-runtime", sessionId: "thr-abc123", state: "starting" }));
+    expect(result?.directive).toMatchObject({ op: "attach", runtime: "example-runtime", handle: "thr-abc123" });
     expect((result!.directive as { host?: string }).host).toBeUndefined();
   });
 
   it("requires a runtime and a safe session id, and never throws on garbage", () => {
     expect(parseAgentSessionMarker(marker({ sessionId: "thr-abc123" }))).toBeUndefined();
-    expect(parseAgentSessionMarker(marker({ runtime: "t3-fleet" }))).toBeUndefined();
-    expect(parseAgentSessionMarker(marker({ runtime: "t3-fleet", sessionId: "../../etc/passwd" }))).toBeUndefined();
+    expect(parseAgentSessionMarker(marker({ runtime: "example-runtime" }))).toBeUndefined();
+    expect(parseAgentSessionMarker(marker({ runtime: "example-runtime", sessionId: "../../etc/passwd" }))).toBeUndefined();
     expect(parseAgentSessionMarker("<agent-session>{not json}</agent-session>")).toBeUndefined();
     expect(parseAgentSessionMarker("no marker here")).toBeUndefined();
     expect(parseAgentSessionMarker(undefined)).toBeUndefined();
   });
 
   it("extracts exactly the first marker out of a larger blob of agent output", () => {
-    const text = `chatter ${marker({ runtime: "t3-fleet", sessionId: "thr-one" })} more ${marker({ runtime: "t3-fleet", sessionId: "thr-two" })}`;
+    const text = `chatter ${marker({ runtime: "example-runtime", sessionId: "thr-one" })} more ${marker({ runtime: "example-runtime", sessionId: "thr-two" })}`;
     const result = parseAgentSessionMarker(text);
     expect(result?.directive).toMatchObject({ handle: "thr-one" });
     // Non-greedy: only the first marker is consumed, the rest of the text survives.
@@ -231,14 +231,14 @@ describe("parseAgentSessionMarker", () => {
 
 describe("parseSessionHandoff", () => {
   it("prefers an explicit directive over a bare marker — it can express every transition, not just attach", () => {
-    const text = `${marker({ runtime: "t3-fleet", sessionId: "thr-abc123" })} ${block({ op: "detach", reason: "finished" })}`;
+    const text = `${marker({ runtime: "example-runtime", sessionId: "thr-abc123" })} ${block({ op: "detach", reason: "finished" })}`;
     expect(parseSessionHandoff(text)?.directive).toEqual({ op: "detach", reason: "finished" });
   });
 
   it("falls back to the marker when no directive block is present", () => {
-    expect(parseSessionHandoff(marker({ runtime: "t3-fleet", sessionId: "thr-abc123" }))?.directive).toMatchObject({
+    expect(parseSessionHandoff(marker({ runtime: "example-runtime", sessionId: "thr-abc123" }))?.directive).toMatchObject({
       op: "attach",
-      runtime: "t3-fleet",
+      runtime: "example-runtime",
     });
   });
 });

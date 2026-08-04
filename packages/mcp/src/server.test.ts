@@ -49,7 +49,7 @@ function seededFleetStore(): string {
         attachments: {
           "att-1": {
             id: "att-1",
-            runtime: "t3-fleet",
+            runtime: "example-runtime",
             provider: "anthropic-claude-code",
             handle: "thr-abc123",
             attachedAt: 1,
@@ -319,19 +319,19 @@ describe("check_task model-facing text carries the resume cursor", () => {
         runningResult({
           fleetAttachment: {
             id: "att-1",
-            runtime: "t3-fleet",
+            runtime: "example-runtime",
             handle: "thr-abc123",
             attachedAt: 1,
             status: state,
             latestResponse: "should I force-push?",
-            remoteUrl: "https://t3.example/threads/abc123",
+            remoteUrl: "https://runtime.example/threads/abc123",
             delegatedTurnId: "job-1",
           },
         }),
       );
       const payload = JSON.parse(response.content[0].text) as Record<string, unknown>;
       const hint = String(payload.hint);
-      expect(hint, state).toContain("t3-fleet/thr-abc123");
+      expect(hint, state).toContain("example-runtime/thr-abc123");
       expect(hint, state).toContain(state === "needs_permission" ? "waiting for permission" : "waiting for input");
       expect(hint, state).toContain("Polling cannot advance it");
       expect(hint, state).not.toContain("Task is actively running");
@@ -351,7 +351,7 @@ describe("check_task model-facing text carries the resume cursor", () => {
       runningResult({
         fleetAttachment: {
           id: "att-1",
-          runtime: "t3-fleet",
+          runtime: "example-runtime",
           handle: "thr-abc123",
           attachedAt: 1,
           status: "needs_input",
@@ -377,13 +377,13 @@ describe("check_task model-facing text carries the resume cursor", () => {
 describe("a terminal turn whose delegated session is waiting on a human", () => {
   const blockedAttachment = {
     id: "att-1",
-    runtime: "t3-fleet",
+    runtime: "example-runtime",
     provider: "anthropic-claude-code",
     handle: "thr-abc123",
     attachedAt: 1,
     status: "needs_input" as const,
     latestResponse: "should I force-push?",
-    remoteUrl: "https://t3.example/threads/abc123",
+    remoteUrl: "https://runtime.example/threads/abc123",
     delegatedTurnId: "job-1",
   };
 
@@ -418,7 +418,7 @@ describe("a terminal turn whose delegated session is waiting on a human", () => 
       }),
     );
     const payload = JSON.parse(response.content[0].text) as Record<string, unknown>;
-    expect(String(payload.blockedDelegation)).toContain("t3-fleet/thr-abc123");
+    expect(String(payload.blockedDelegation)).toContain("example-runtime/thr-abc123");
     expect(String(payload.blockedDelegation)).toContain("waiting for input");
     expect(String(payload.blockedDelegation)).toContain("should I force-push?");
     // The attachment itself rides along, so the caller can act without a
@@ -473,14 +473,14 @@ describe("production entrypoint wiring — FleetAdapter", () => {
    */
   it("createMcpServer passes a host's agent-session runtime registry through to every agent", () => {
     const runtimes = new AgentSessionRuntimeRegistry();
-    runtimes.register({ id: "t3-fleet", provider: "anthropic-claude-code", inspect: async () => ({ state: "running" }) });
+    runtimes.register({ id: "example-runtime", provider: "anthropic-claude-code", inspect: async () => ({ state: "running" }) });
     const { pool } = createMcpServer({ registry: fakeRegistry(), agentSessionRuntimes: runtimes });
-    expect(pool.forAgent("test-agent").sessions.hasAgentSessionRuntime("t3-fleet")).toBe(true);
+    expect(pool.forAgent("test-agent").sessions.hasAgentSessionRuntime("example-runtime")).toBe(true);
   });
 
   it("createMcpServer leaves claude-fleet the only reachable runtime when no registry is supplied", () => {
     const { pool } = createMcpServer({ registry: fakeRegistry() });
-    expect(pool.forAgent("test-agent").sessions.hasAgentSessionRuntime("t3-fleet")).toBe(false);
+    expect(pool.forAgent("test-agent").sessions.hasAgentSessionRuntime("example-runtime")).toBe(false);
   });
 
   /**
@@ -498,7 +498,7 @@ describe("production entrypoint wiring — FleetAdapter", () => {
     // Reachable without a request having touched this agent first: an agent
     // nobody has queried since the restart would otherwise look unattached.
     expect(pool.forAgent("test-agent").sessions.getFleetAttachment("sess-1")).toMatchObject({
-      runtime: "t3-fleet",
+      runtime: "example-runtime",
       handle: "thr-abc123",
       status: "needs_input",
     });

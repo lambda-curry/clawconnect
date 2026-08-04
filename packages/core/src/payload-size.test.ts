@@ -36,11 +36,11 @@ vi.mock("./gateway.ts", () => {
 
 function singleAgentRegistry(): AgentRegistry {
   return {
-    default: "clawdy",
+    default: "assistant",
     source: "env",
     groups: {},
     groupLabels: {},
-    agents: [{ id: "clawdy", url: "ws://fake-clawdy", password: "x", openclawAgentId: "main" }],
+    agents: [{ id: "assistant", url: "ws://fake-assistant", password: "x", openclawAgentId: "main" }],
   };
 }
 

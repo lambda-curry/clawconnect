@@ -19,7 +19,7 @@ export interface AgentEntry {
   whenToUse?: string;
   /** QMD HTTP endpoint this agent's memory lives behind. Defaults to http://127.0.0.1:18790. */
   qmdUrl?: string;
-  /** QMD auth token scoped to this agent (e.g. "qmd-clawdy-..."). Required for memory tools to work. */
+  /** QMD auth token scoped to this agent (e.g. "qmd-<agent>-..."). Required for memory tools to work. */
   qmdToken?: string;
   /** User-visible list of QMD collections this agent can search. Hint only — QMD enforces access via qmdToken. */
   collections?: string[];
