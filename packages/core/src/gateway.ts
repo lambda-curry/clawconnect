@@ -11,6 +11,18 @@ import {
   type GatewayEvent,
 } from "./types.ts";
 
+/**
+ * How long a run whose socket dropped waits for a reconnect to deliver the
+ * terminal event it never saw, before handing off to the caller's durable
+ * recovery. Long enough to cover the gateway's own reconnect backoff; nowhere
+ * near the observation window, which is the whole point — see the socket-close
+ * door in chat().
+ */
+const STREAM_CLOSE_GRACE_MS = (() => {
+  const raw = Number(process.env.CLAWCONNECT_STREAM_CLOSE_GRACE_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : 15_000;
+})();
+
 function logDebug(message: string, ...args: unknown[]): void {
   console.error(message, ...args);
 }
@@ -276,6 +288,8 @@ export function classifyUpstreamRun(
 export class OpenClawGateway {
   private ws: WebSocket | null = null;
   private subscribers = new Map<string, (frame: Frame) => void>();
+  /** One entry per in-flight chat run — see notifyStreamClose. */
+  private streamCloseListeners = new Set<() => void>();
   private pendingRpcs = new Map<
     string,
     { resolve: (v: unknown) => void; reject: (e: Error) => void }
@@ -438,8 +452,32 @@ export class OpenClawGateway {
         rpc.reject(new Error("Gateway disconnected"));
         this.pendingRpcs.delete(id);
       }
+      // In-flight chat runs are NOT rpcs — they settle on an event, not on a
+      // response, so nothing above reaches them. Without this, a run whose
+      // terminal event was emitted into the now-dead socket waits out the whole
+      // observation window before anyone notices.
+      this.notifyStreamClose();
       this.scheduleReconnect();
     });
+  }
+
+  /**
+   * Tells every in-flight run that its transport went away. Listeners decide
+   * for themselves whether that is terminal — a reconnect may still deliver a
+   * merely-delayed event, which is why this starts a grace period rather than
+   * settling anything here.
+   */
+  private notifyStreamClose(): void {
+    // Copied first: a listener settling its run removes itself during iteration.
+    for (const listener of [...this.streamCloseListeners]) {
+      try {
+        listener();
+      } catch (err) {
+        // A single run's close handling must never break socket teardown for
+        // the others, or for the reconnect that follows.
+        logDebug("[openclaw-gateway] stream-close listener threw:", err);
+      }
+    }
   }
 
   private scheduleReconnect() {
@@ -817,11 +855,59 @@ export class OpenClawGateway {
         reject(new ParentObservationTimeoutError(timeoutMs));
       }, timeoutMs);
 
+      /**
+       * The settle barrier. Every terminal branch below already calls
+       * cleanup() before it resolves or rejects, so marking the run settled
+       * here covers all of them without rewiring a single existing exit — and
+       * the socket-close door checks it before doing anything.
+       */
+      let settled = false;
+      let closeGraceTimer: ReturnType<typeof setTimeout> | undefined;
+
       const cleanup = () => {
+        settled = true;
         clearTimeout(timer);
+        if (closeGraceTimer) clearTimeout(closeGraceTimer);
+        this.streamCloseListeners.delete(onStreamClosed);
         this.subscribers.delete(subId);
         this.subscribers.delete(agentSubId);
       };
+
+      /**
+       * The socket-close door. A dropped transport is not by itself a verdict
+       * on the run: openclaw may still be executing it, and a reconnect can
+       * deliver a merely-delayed terminal event. So this opens a grace window
+       * rather than settling, and only hands off if nothing arrives.
+       *
+       * The handoff resolves — it does not reject — with the SENTINEL, which
+       * puts the caller on its durable-transcript recovery path. Rejecting
+       * would invent a failure for a run that is very likely still going.
+       *
+       * Deliberately NOT resolved with the text this run happened to be
+       * holding. That text is a cumulative `delta` — what the agent had said
+       * so far, mid-sentence as often as not — and returning it here would
+       * settle the job `completed` with `terminalReason: "live-final"`, i.e.
+       * publish a partial as the run's final answer AND skip the recovery that
+       * would have produced the real one. Partial text never becomes a turn's
+       * result; the transcript is the authority. The held length is logged
+       * only so a truncated-looking recovery is explainable.
+       */
+      const onStreamClosed = () => {
+        if (settled || closeGraceTimer) return;
+        closeGraceTimer = setTimeout(() => {
+          if (settled) return;
+          const heldLength = (messageToolReply || accumulated || agentStreamText).length;
+          logDebug(
+            `[openclaw-gateway] socket closed with no terminal event; handing off to durable ` +
+              `recovery after ${STREAM_CLOSE_GRACE_MS}ms grace (${heldLength} chars were held)`,
+          );
+          cleanup();
+          resolve(NO_SUMMARY_SENTINEL);
+        }, STREAM_CLOSE_GRACE_MS);
+        // Never hold the process open for a run nobody is waiting on.
+        closeGraceTimer.unref?.();
+      };
+      this.streamCloseListeners.add(onStreamClosed);
 
       const handleAgentEvent = (p: {
         runId?: string;
