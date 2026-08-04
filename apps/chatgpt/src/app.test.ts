@@ -181,6 +181,26 @@ describe("widget enabled with a real resource", () => {
     // the assistant's own polling loop must never mint a duplicate card.
     expect(byName.check_task._meta).toBeUndefined();
   });
+
+  it("tells the model to hand off rather than chain waits until the reply dies", async () => {
+    // The contract is duplicated: packages/mcp/src/server.ts serves the stdio
+    // server, and this app serves ChatGPT. They drifted — the cap was added to
+    // one and not the other, and a deploy was the thing that noticed. This
+    // asserts it on the surface that actually broke.
+    //
+    // Chaining is what kills the parent stream: each wait is bounded at 45s,
+    // but seven of them is five and a half minutes in one reply with nothing
+    // visible happening, and the host gives up on it.
+    const { url } = await startTestApp({ widgetEnabled: true, widgetHtmlPath: writeFixtureWidget("<html></html>") });
+    const { result } = await rpc(url, "tools/list");
+    const checkTask = result.tools.find((t: any) => t.name === "check_task");
+
+    expect(checkTask.description).toContain("Do not wait indefinitely inside one reply");
+    expect(checkTask.description).toMatch(/end your reply/i);
+    // The instruction that produced the unbounded loop must be gone, not merely
+    // contradicted further down.
+    expect(checkTask.description).not.toContain("no cap on how many times");
+  });
 });
 
 describe("protocolVersion negotiation over real HTTP", () => {
