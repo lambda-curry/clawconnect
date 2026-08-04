@@ -306,6 +306,7 @@ const app = {
   knownSessionKeys: new Set(),
   pollInFlight: false,
   pollFailures: 0,
+  refreshSequence: 0, // monotonic refresh id — only the newest may write, see refresh()
   refreshTimer: null,
   elapsedTicker: null, // local render-only tick, no network — see syncElapsedTicker()
   reconcileRequested: false,
@@ -388,10 +389,11 @@ function persist() {
 // currently in focus, same session the timeline fetch already targets. A
 // transient failure leaves whatever was cached before rather than blanking
 // out a number that was already showing.
-async function refreshPinnedCounts(sessionKey) {
+async function refreshPinnedCounts(sessionKey, isCurrent = () => true) {
   if (!sessionKey) return;
   try {
     const result = await bridge.callTool("get_session", { sessionId: sessionKey, mode: "tasks" });
+    if (!isCurrent()) return; // a superseded refresh must not write — see refresh()
     app.expanded.set(sessionKey, result?.structuredContent?.tasks ?? result?.tasks ?? []);
   } catch {
     /* keep the previously cached counts */
@@ -404,6 +406,16 @@ async function refresh() {
   if (!app.reconcileRequested && !shouldPoll({ pollInFlight: app.pollInFlight, tasks: compactVisibleTasks() })) return;
   app.reconcileRequested = false;
   app.pollInFlight = true;
+  // A resume signal sets reconcileRequested and so deliberately bypasses the
+  // pollInFlight guard above — and refreshOnInteraction routes an ordinary
+  // click into that path, so two refreshes really can be in flight at once.
+  // Without a guard the one that resolves LAST wins, which lets an older read
+  // overwrite pinnedDetail with a staler snapshot or walk eventCursor
+  // backwards. Both self-heal on the next poll, but the card visibly flickers
+  // backwards in the meantime. Only the newest refresh may write; an older one
+  // discards its result at every await and leaves the bookkeeping alone.
+  const sequence = ++app.refreshSequence;
+  const isCurrent = () => sequence === app.refreshSequence;
   try {
     // Always read the complete list, never the server's "active" filter, and
     // never a breadth that depends on which surface is open. view:"active"
@@ -411,6 +423,7 @@ async function refresh() {
     // read and the card lost the very thing the user was waiting for. State
     // should be complete and the *view* should filter.
     const result = await bridge.callTool("list_tasks", { view: "all" });
+    if (!isCurrent()) return;
     const tasks = result?.structuredContent?.tasks ?? result?.tasks ?? [];
     // Stored as fetched — the canonical set. Compact scope is a render-time
     // view (compactVisibleTasks), not a narrowing of the store. Retention is
@@ -449,6 +462,7 @@ async function refresh() {
       // fetched lazily, once, only when the user explicitly opens the
       // Request tab (see selectCardTab below).
       const detail = await bridge.callTool("get_task", { taskId, detail: "full", knownLogCount: app.eventCursor.get(taskId) ?? 0 });
+      if (!isCurrent()) return;
       const snapshot = detail?.structuredContent ?? detail;
       // isTaskSnapshot, not a bare id check: a not-found reply carries the id
       // it was asked about, and merging it would overwrite a retained row with
@@ -462,7 +476,8 @@ async function refresh() {
       if (typeof snapshot?.logCursor === "number") app.eventCursor.set(taskId, snapshot.logCursor);
       app.timeline = deriveTimeline(app.recentEvents.get(taskId), 3);
       app.timelineFor = taskId;
-      await refreshPinnedCounts(snapshot?.sessionKey ?? pinnedSessionKey ?? app.mounted?.sessionKey);
+      await refreshPinnedCounts(snapshot?.sessionKey ?? pinnedSessionKey ?? app.mounted?.sessionKey, isCurrent);
+      if (!isCurrent()) return;
     } else {
       app.pinnedDetail = null;
       app.timeline = [];
@@ -470,12 +485,19 @@ async function refresh() {
     }
     app.pollFailures = 0;
   } catch {
+    if (!isCurrent()) return;
     app.pollFailures += 1;
   } finally {
-    app.pollInFlight = false;
-    dispatchRender();
-    scheduleNext();
-    syncElapsedTicker();
+    // Only the newest refresh clears the in-flight flag and re-arms the timer;
+    // a superseded one leaves both to whoever superseded it. That refresh is
+    // still running (or has already finished and done exactly this), so the
+    // flag cannot leak — every path through this function reaches here.
+    if (isCurrent()) {
+      app.pollInFlight = false;
+      dispatchRender();
+      scheduleNext();
+      syncElapsedTicker();
+    }
   }
 }
 
@@ -559,6 +581,11 @@ function reconcileOnResume() {
 document.addEventListener("visibilitychange", reconcileOnResume);
 window.addEventListener("focus", reconcileOnResume);
 window.addEventListener("pageshow", reconcileOnResume);
+// A network drop backgrounds nothing, so none of the signals above fire when
+// connectivity comes back — the card just sits on whatever the failed poll
+// left, backing off further with every pollFailures increment. Regaining the
+// network is the one resume signal that was missing.
+window.addEventListener("online", reconcileOnResume);
 
 // visibilitychange/focus only fire when the whole page backgrounds. Switching
 // between chats inside the ChatGPT app doesn't background anything, so a card

@@ -487,3 +487,148 @@ describe("no fullscreen/Task Center affordance in the assembled widget", () => {
     expect(rowTitles(root)).toEqual(["assistant is working…"]);
   });
 });
+
+describe("resume signals", () => {
+  it("reconciles when the network comes back, which backgrounds nothing and fires no other signal", async () => {
+    // A dropped connection raises no visibilitychange/focus/pageshow, so
+    // without an `online` listener the card sits on whatever the failed poll
+    // left — and pollIntervalMs backs off to 30s on repeated failures, so it
+    // can stay wrong for a long time after connectivity returns.
+    const world = { tasks: [{ taskId: TASK_ID, jobId: TASK_ID, sessionKey: SESSION_KEY, agent: "assistant", status: "completed", lastEventAt: 0, summary: "done" }] };
+    const host = createHost({ mountedOnBoot: true, world });
+    const { windowStub } = mount(host);
+    await settle();
+
+    // Terminal work — pollIntervalMs returns null, so nothing is scheduled and
+    // no further read happens on its own.
+    const readsAfterBoot = host.calls.filter((c) => c.name === "list_tasks").length;
+    await settle();
+    expect(host.calls.filter((c) => c.name === "list_tasks")).toHaveLength(readsAfterBoot);
+
+    windowStub.dispatch("online");
+    await settle();
+
+    expect(host.calls.filter((c) => c.name === "list_tasks").length).toBeGreaterThan(readsAfterBoot);
+  });
+});
+
+describe("concurrent refreshes: only the newest read may write", () => {
+  /**
+   * A resume signal sets reconcileRequested, which deliberately bypasses
+   * refresh()'s pollInFlight guard — and refreshOnInteraction routes an
+   * ordinary click into that same path — so two refreshes really can be in
+   * flight at once. Whichever resolves LAST would otherwise win, and that is
+   * the OLDER one precisely when the first read is the slow one, which is the
+   * case a resume signal exists to rescue. The visible symptom is a task that
+   * just finished flipping back to "Running".
+   */
+  it("keeps the newer snapshot when a superseded refresh's response lands last", async () => {
+    const generation: Record<number, Task> = {
+      1: { taskId: TASK_ID, jobId: TASK_ID, sessionKey: SESSION_KEY, agent: "assistant", status: "running", lastEventAt: 1_000, summary: "older read" },
+      2: { taskId: TASK_ID, jobId: TASK_ID, sessionKey: SESSION_KEY, agent: "assistant", status: "completed", lastEventAt: 2_000, summary: "newer read" },
+    };
+    const host = createHost({ mountedOnBoot: true, world: { tasks: [generation[1]] } });
+
+    // Hold each list_tasks open so the two refreshes can be interleaved by
+    // hand. get_task/get_session answer for `answering`: refresh() issues them
+    // immediately after its own list read resolves, and the releases below are
+    // sequenced with settle() between, so that is always the generation just
+    // released.
+    const release: (() => void)[] = [];
+    let answering = 1;
+    host.callTool = (name: string, args: Json): Promise<Json> => {
+      host.calls.push({ name, args });
+      if (name === "list_tasks") {
+        const nth = release.length + 1;
+        return new Promise<Json>((resolve) => {
+          release.push(() => resolve({ structuredContent: { tasks: [generation[nth]] } }));
+        });
+      }
+      if (name === "get_task") return Promise.resolve({ structuredContent: { ...generation[answering], updates: [], logCursor: 0 } });
+      if (name === "get_session") return Promise.resolve({ structuredContent: { tasks: [generation[answering]] } });
+      return Promise.resolve({});
+    };
+
+    const { root, windowStub } = mount(host);
+    await settle();
+    expect(release).toHaveLength(1); // the boot refresh is parked on its list read
+
+    windowStub.dispatch("focus"); // a resume signal, mid-flight — the second refresh
+    await settle();
+    expect(release).toHaveLength(2);
+
+    answering = 2;
+    release[1]!(); // the newer refresh resolves first...
+    await settle();
+    expect(rowTitles(root)).toEqual(["newer read"]);
+
+    answering = 1;
+    release[0]!(); // ...and the superseded one lands after it
+    await settle();
+
+    expect(rowTitles(root)).toEqual(["newer read"]);
+    expect(withClass(root, "cc-pill").map(textOf).join(" ")).toContain("Completed");
+  });
+
+  it("re-arms polling after a superseded refresh finishes last", async () => {
+    // The stale refresh must leave pollInFlight and the poll timer to the
+    // refresh that superseded it — if it cleared them itself the card would
+    // either wedge on a stuck in-flight flag or double-schedule.
+    const running = (summary: string, lastEventAt: number): Task => ({
+      taskId: TASK_ID,
+      jobId: TASK_ID,
+      sessionKey: SESSION_KEY,
+      agent: "assistant",
+      status: "running",
+      lastEventAt,
+      summary,
+    });
+    const generation: Record<number, Task> = { 1: running("older read", 1_000), 2: running("newer read", 2_000) };
+    const host = createHost({ mountedOnBoot: true, world: { tasks: [generation[1]] } });
+
+    const release: (() => void)[] = [];
+    let answering = 1;
+    host.callTool = (name: string, args: Json): Promise<Json> => {
+      host.calls.push({ name, args });
+      if (name === "list_tasks") {
+        const nth = release.length + 1;
+        return new Promise<Json>((resolve) => {
+          release.push(() => resolve({ structuredContent: { tasks: [generation[Math.min(nth, 2)]] } }));
+        });
+      }
+      if (name === "get_task") return Promise.resolve({ structuredContent: { ...generation[answering], updates: [], logCursor: 0 } });
+      if (name === "get_session") return Promise.resolve({ structuredContent: { tasks: [generation[answering]] } });
+      return Promise.resolve({});
+    };
+
+    vi.useFakeTimers();
+    try {
+      const { root, windowStub } = mount(host);
+      await settle();
+      windowStub.dispatch("focus");
+      await settle();
+      expect(release).toHaveLength(2);
+
+      answering = 2;
+      release[1]!();
+      await settle();
+      answering = 1;
+      release[0]!(); // superseded, lands last
+      await settle();
+
+      // The next scheduled poll must still fire — proof pollInFlight was
+      // released by the newer refresh and scheduleNext() actually re-armed.
+      await vi.advanceTimersByTimeAsync(3_000);
+      await settle();
+      expect(release.length).toBeGreaterThanOrEqual(3);
+
+      answering = 2;
+      release[2]!();
+      await vi.advanceTimersByTimeAsync(1_100); // flush the cosmetic render debounce
+      await settle();
+      expect(rowTitles(root)).toEqual(["newer read"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
