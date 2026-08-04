@@ -35,6 +35,7 @@ import {
   type ContinuationState,
   type AgentSessionAttachment,
   type AgentSessionDirective,
+  type ErrorInfo,
   type GatewayEvent,
   type Job,
   type JobRecoveryState,
@@ -1688,9 +1689,10 @@ export class SessionManager {
     // that produce activity forever without ever stabilizing.
     const idleTimeoutMs = 5 * 60_000;
     const hardCapMs = RECOVERY_TIMEOUT_MS;
+    const startedAt = Date.now();
     job.recovery = {
       reason,
-      startedAt: Date.now(),
+      startedAt,
       idleTimeoutMs,
       hardCapMs,
     };
@@ -1706,142 +1708,279 @@ export class SessionManager {
       `[job ${jobId}] ${reason} — starting transcript long-poll ` +
         `(idle-timeout=${idleTimeoutMs / 1000}s, hard-cap=${hardCapMs / 1000}s)`,
     );
-    void this.gateway
-      .pollTranscriptForFinalText(sessionKey, {
-        intervalMs,
-        idleTimeoutMs,
-        hardCapMs,
+    void this.watchTranscript(job, sessionKey, jobId, artifacts, {
+      intervalMs,
+      idleTimeoutMs,
+      hardCapMs,
+      startedAt,
+    }).catch((err: unknown) => {
+      // Belt-and-suspenders: the recovery path is fire-and-forget, so an
+      // uncaught error here would otherwise propagate as an unhandledRejection,
+      // crash the connector, and force launchd to kickstart — losing the
+      // entire in-memory jobs map. Mark the job terminal cleanly instead.
+      if (job.status !== "running") return;
+      job.lastEventAt = Date.now();
+      this.setOutcome(job, "completed_no_summary", NO_SUMMARY_SENTINEL, undefined, {
+        resultSource: "parent",
+        terminalReason: "late-recovery-threw",
+      });
+      job.recovery = undefined;
+      this.sessions.set(sessionKey, {
+        sessionKey,
+        lastJobId: jobId,
+        lastSummary: NO_SUMMARY_SENTINEL.slice(0, 500),
+        artifacts,
+        recommendedNextStep: deriveNextStep(artifacts, job.status),
+      });
+      this.persistActiveJobs();
+      logDebug(
+        `[job ${jobId}] late-recovery threw: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    });
+  }
+
+  /**
+   * The watch itself, and the one decision the transcript poll is not allowed
+   * to make on its own: whether a still transcript may end the turn.
+   *
+   * The poll exits after `idleTimeoutMs` of no transcript growth. That is a
+   * statement about the TRANSCRIPT, not about the run — and the two come apart
+   * exactly when it matters. Production shape: openclaw restarts mid-run,
+   * re-dispatches the session's interrupted run, and the resumed run works for
+   * many minutes through tool rounds and model calls without the persisted
+   * transcript advancing. The poll's idle exit fired on schedule, the turn was
+   * published `completed_no_summary`, and the busy guard was released out from
+   * under a run that was demonstrably still executing — which is precisely the
+   * collision submitTask's guard exists to prevent.
+   *
+   * So absence is never a verdict here either — the same rule reconcileQuietRun
+   * has always applied, now applied on this path too, from the same evidence
+   * (openclaw's own run registry, via the poll's per-read `onSample`). While
+   * upstream says the run is executing, the watch re-arms for the remaining
+   * hard-cap budget and the job stays `running`: pollable, non-error, and
+   * still holding its session.
+   *
+   * `hardCapMs` remains the absolute ceiling. Reaching it while upstream STILL
+   * reports the run executing is not a quiet finish and must not be published
+   * as one — that outcome ends the job in `error` with what was actually
+   * observed and the one retry that helps, rather than as a turn that
+   * "completed with nothing to say".
+   */
+  private async watchTranscript(
+    job: Job,
+    sessionKey: string,
+    jobId: string,
+    artifacts: Job["artifacts"],
+    window: { intervalMs: number; idleTimeoutMs: number; hardCapMs: number; startedAt: number },
+  ): Promise<void> {
+    // Seeded "unknown" — the absence of positive evidence, never its converse.
+    // A gateway that never reports a sample (an unreadable transcript, a
+    // legacy/mocked poll) therefore behaves exactly as it did before: the
+    // exhaustion path below runs untouched.
+    //
+    // Held on an object rather than in a plain `let` so the callback's writes
+    // are visible to the type checker: a `let` seeded with one member of the
+    // union narrows to it at declaration, and a write from inside a closure
+    // does not widen it back — every comparison below would then be flagged as
+    // impossible while being exactly the comparison that matters.
+    const observed: { upstream: RunObservation["upstream"] } = { upstream: "unknown" };
+    let extensions = 0;
+    let recovered: string | undefined;
+
+    for (;;) {
+      const remainingMs = window.hardCapMs - (Date.now() - window.startedAt);
+      if (remainingMs <= 0) break;
+      recovered = await this.gateway.pollTranscriptForFinalText(sessionKey, {
+        intervalMs: window.intervalMs,
+        idleTimeoutMs: window.idleTimeoutMs,
+        // The REMAINING budget, not a fresh one: re-arming must not be able to
+        // extend the absolute ceiling, only to use what is left of it.
+        hardCapMs: remainingMs,
         // Require 3 consecutive same-snapshot polls — 30s of no transcript
         // growth — before accepting the trailing-assistant text as final.
         // Without this the poll grabs whatever short status line happens to
         // be in the trailing slot at first observation, even when the run
         // keeps writing for minutes and never comes back to assistant-text.
         stableThreshold: 3,
+        runId: job.parentRunId,
         shouldAbort: () => job.status !== "running",
-      })
-      .then(
-        async (recovered) => {
+        onSample: (sample) => {
+          // A read that resolves after the job was settled by something else
+          // (a late live final, a newer owner) describes a world this job no
+          // longer lives in. Writing it would stamp fresh "still executing"
+          // evidence onto an already-published turn — the exact contradiction
+          // this whole path exists to remove.
           if (job.status !== "running") return;
-          // Same ownership check its two siblings make. Reachable: a job
-          // store carrying two entries for one sessionKey makes both jobs
-          // `running` with only the later one owning the session, and this
-          // poll then adopts the newer run's answer for the older job. The
-          // live writer cannot produce that (busy guard + whole-file
-          // overwrite), but a hand-edited, legacy or truncated store can.
-          if (this.latestJobBySession.get(sessionKey) !== jobId) return;
-          job.lastEventAt = Date.now();
-          if (recovered && recovered.length > 0) {
-            this.setOutcome(job, "completed", recovered, undefined, {
-              resultSource: "parent",
-              terminalReason: "late-recovery-transcript",
-            });
-            job.recovery = undefined;
-            extractPatternsFromSummary(artifacts, recovered);
-            this.sessions.set(sessionKey, {
-              sessionKey,
-              lastJobId: jobId,
-              lastSummary: recovered.slice(0, 500),
-              artifacts,
-              recommendedNextStep: deriveNextStep(artifacts, job.status),
-            });
-            this.persistActiveJobs();
-            logDebug(
-              `[job ${jobId}] late-recovery succeeded via transcript (${recovered.length} chars)`,
-            );
-            return;
-          }
-          // Recovery order tier 3: the parent's own live+transcript avenues
-          // are exhausted (this is the ONLY branch where this is called from
-          // a still-`running` job, and only after the checks above already
-          // confirmed nothing upstream is left to wait for). Consults only
-          // this session's known current attachment, never a scan —
-          // see tryAttachedSessionRecovery.
-          const attached = await this.tryAttachedSessionRecovery(job);
-          if (attached && job.status === "running" && this.latestJobBySession.get(sessionKey) === jobId) {
-            // Marked provisional so the existing lazy-recheck path
-            // (maybeRecoverTerminalJob) keeps re-reading the PARENT
-            // transcript on later polls and can still upgrade this to a real
-            // parent result — see the "late parent final replaces
-            // provisional attached-session result" requirement.
-            this.provisionalOutcomes.add(jobId);
-            job.lastEventAt = Date.now();
-            this.setOutcome(job, "completed", attached.summary, undefined, {
-              resultSource: attached.resultSource,
-              terminalReason: `${attached.resultSource}-recovery`,
-            });
-            job.recovery = undefined;
-            extractPatternsFromSummary(artifacts, attached.summary);
-            pushLog(job, {
-              ts: Date.now(),
-              type: "recovery",
-              text: `Recovered the final response from the attached agent session (${attached.attachmentId.slice(0, 8)}) after the parent transcript produced nothing`,
-            });
-            this.sessions.set(sessionKey, {
-              sessionKey,
-              lastJobId: jobId,
-              lastSummary: attached.summary.slice(0, 500),
-              artifacts,
-              recommendedNextStep: deriveNextStep(artifacts, job.status),
-            });
-            this.persistActiveJobs();
-            logDebug(`[job ${jobId}] recovered via the attached session (${attached.summary.length} chars)`);
-            return;
-          }
-          // There IS one thing left to say when the delegate is waiting on a
-          // human: this turn is not an ordinary quiet finish, and presenting
-          // it as one hides an action the caller has to take. The job status
-          // stays `completed_no_summary` (no new JobStatus, so every existing
-          // consumer keeps working) — what changes is that the summary and
-          // terminalReason say what is actually blocked. See blockedDelegation.
-          const blocked = this.blockedDelegation(job);
-          const blockedNotice = describeBlockedAgentSession(blocked);
-          this.setOutcome(job, "completed_no_summary", blockedNotice ?? NO_SUMMARY_SENTINEL, undefined, {
-            resultSource: "parent",
-            terminalReason: blocked
-              ? delegateBlockedTerminalReason(blocked.status as AgentSessionState)
-              : "late-recovery-exhausted",
-          });
-          job.recovery = undefined;
-          if (blockedNotice) {
-            pushLog(job, { ts: Date.now(), type: "recovery", text: blockedNotice });
-          }
-          this.sessions.set(sessionKey, {
-            sessionKey,
-            lastJobId: jobId,
-            lastSummary: (blockedNotice ?? NO_SUMMARY_SENTINEL).slice(0, 500),
-            artifacts,
-            recommendedNextStep: deriveNextStep(artifacts, job.status),
-          });
-          this.persistActiveJobs();
-          logDebug(
-            `[job ${jobId}] late-recovery exhausted (idle-timeout=${idleTimeoutMs / 1000}s, hard-cap=${hardCapMs / 1000}s) — completed_no_summary${blocked ? ` (delegate ${blocked.status})` : ""}`,
-          );
+          observed.upstream = sample.upstream;
+          // Recorded on EVERY read, exactly as reconcileQuietRun records its
+          // own rounds. Without it a job spends its whole recovery with
+          // liveness frozen at whatever the last quiet round saw — or with
+          // none at all — while a read that could answer the question runs
+          // every 10 seconds. A consumer that ages liveness out (the widget
+          // does, at 5 minutes) then reports a watched, demonstrably live run
+          // as one nothing has looked at.
+          job.liveness = { checkedAt: sample.checkedAt, upstream: sample.upstream, producing: sample.changed };
         },
-        (err) => {
-          // Belt-and-suspenders: the recovery path is fire-and-forget, so an
-          // uncaught error here would otherwise propagate as an unhandledRejection,
-          // crash the connector, and force launchd to kickstart — losing the
-          // entire in-memory jobs map. Mark the job terminal cleanly instead.
-          if (job.status !== "running") return;
-          job.lastEventAt = Date.now();
-          this.setOutcome(job, "completed_no_summary", NO_SUMMARY_SENTINEL, undefined, {
-            resultSource: "parent",
-            terminalReason: "late-recovery-threw",
-          });
-          job.recovery = undefined;
-          this.sessions.set(sessionKey, {
-            sessionKey,
-            lastJobId: jobId,
-            lastSummary: NO_SUMMARY_SENTINEL.slice(0, 500),
-            artifacts,
-            recommendedNextStep: deriveNextStep(artifacts, job.status),
-          });
-          this.persistActiveJobs();
-          logDebug(
-            `[job ${jobId}] late-recovery threw: ${err instanceof Error ? err.message : String(err)}`,
-          );
-        },
+      });
+      if (job.status !== "running") return;
+      // Same ownership check its two siblings make. Reachable: a job
+      // store carrying two entries for one sessionKey makes both jobs
+      // `running` with only the later one owning the session, and this
+      // poll then adopts the newer run's answer for the older job. The
+      // live writer cannot produce that (busy guard + whole-file
+      // overwrite), but a hand-edited, legacy or truncated store can.
+      if (this.latestJobBySession.get(sessionKey) !== jobId) return;
+      if (recovered && recovered.length > 0) break;
+      if (observed.upstream !== "active") break;
+
+      extensions += 1;
+      const watchedS = Math.round((Date.now() - window.startedAt) / 1000);
+      pushLog(job, {
+        ts: Date.now(),
+        type: "recovery",
+        text:
+          `Upstream confirms the run is still executing after ${watchedS}s with a still transcript — ` +
+          `still watching for its final response`,
+      });
+      logDebug(
+        `[job ${jobId}] transcript idle but upstream${job.parentRunId ? ` run ${job.parentRunId}` : ""} still ` +
+          `executing after ${watchedS}s — extending the watch (extension ${extensions})`,
       );
+    }
+
+    if (job.status !== "running") return;
+    if (this.latestJobBySession.get(sessionKey) !== jobId) return;
+    job.lastEventAt = Date.now();
+
+    if (recovered && recovered.length > 0) {
+      this.setOutcome(job, "completed", recovered, undefined, {
+        resultSource: "parent",
+        terminalReason: "late-recovery-transcript",
+      });
+      job.recovery = undefined;
+      extractPatternsFromSummary(artifacts, recovered);
+      this.sessions.set(sessionKey, {
+        sessionKey,
+        lastJobId: jobId,
+        lastSummary: recovered.slice(0, 500),
+        artifacts,
+        recommendedNextStep: deriveNextStep(artifacts, job.status),
+      });
+      this.persistActiveJobs();
+      logDebug(`[job ${jobId}] late-recovery succeeded via transcript (${recovered.length} chars)`);
+      return;
+    }
+
+    // The hard cap ran out while upstream was STILL reporting the run as
+    // executing. Every avenue below reads the silence as "the turn produced
+    // nothing", which is a claim about a FINISHED run — so none of them apply,
+    // and publishing `completed_no_summary` here would state as fact the one
+    // thing the evidence contradicts. End it honestly instead: what was
+    // observed, for how long, and the one retry that helps (the job stays
+    // eligible for the lazy transcript re-check on every later poll, so an
+    // answer that lands afterwards still reaches the caller — see
+    // maybeRecoverTerminalJob).
+    if (observed.upstream === "active") {
+      const watchedMin = Math.max(1, Math.round((Date.now() - window.startedAt) / 60_000));
+      const runLabel = job.parentRunId ? `upstream run ${job.parentRunId}` : "the upstream run";
+      const message =
+        `Stopped watching after ${watchedMin}m: ${runLabel} was still reported as executing, ` +
+        `but wrote no visible response to the transcript in that time.`;
+      this.setOutcome(job, "error", undefined, message, {
+        resultSource: "parent",
+        terminalReason: "late-recovery-upstream-still-active",
+        errorInfo: {
+          category: "timeout",
+          message,
+          suggestedRecovery:
+            `Do not re-submit on this session while the run is executing — a second send aborts it. ` +
+            `Call check_task again with jobId ${jobId} to pick up the response if it lands, or inspect ` +
+            (job.parentRunId ? `run ${job.parentRunId} ` : "the run ") +
+            `upstream to see what it is doing.`,
+        },
+      });
+      job.recovery = undefined;
+      pushLog(job, { ts: Date.now(), type: "recovery", text: message });
+      this.sessions.set(sessionKey, {
+        sessionKey,
+        lastJobId: jobId,
+        lastSummary: message.slice(0, 500),
+        artifacts,
+        recommendedNextStep: deriveNextStep(artifacts, job.status),
+      });
+      this.persistActiveJobs();
+      logDebug(`[job ${jobId}] late-recovery hit the hard cap with upstream still active — error, not a quiet finish`);
+      return;
+    }
+
+    // Recovery order tier 3: the parent's own live+transcript avenues
+    // are exhausted (this is the ONLY branch where this is called from
+    // a still-`running` job, and only after the checks above already
+    // confirmed nothing upstream is left to wait for). Consults only
+    // this session's known current attachment, never a scan —
+    // see tryAttachedSessionRecovery.
+    const attached = await this.tryAttachedSessionRecovery(job);
+    if (attached && job.status === "running" && this.latestJobBySession.get(sessionKey) === jobId) {
+      // Marked provisional so the existing lazy-recheck path
+      // (maybeRecoverTerminalJob) keeps re-reading the PARENT
+      // transcript on later polls and can still upgrade this to a real
+      // parent result — see the "late parent final replaces
+      // provisional attached-session result" requirement.
+      this.provisionalOutcomes.add(jobId);
+      job.lastEventAt = Date.now();
+      this.setOutcome(job, "completed", attached.summary, undefined, {
+        resultSource: attached.resultSource,
+        terminalReason: `${attached.resultSource}-recovery`,
+      });
+      job.recovery = undefined;
+      extractPatternsFromSummary(artifacts, attached.summary);
+      pushLog(job, {
+        ts: Date.now(),
+        type: "recovery",
+        text: `Recovered the final response from the attached agent session (${attached.attachmentId.slice(0, 8)}) after the parent transcript produced nothing`,
+      });
+      this.sessions.set(sessionKey, {
+        sessionKey,
+        lastJobId: jobId,
+        lastSummary: attached.summary.slice(0, 500),
+        artifacts,
+        recommendedNextStep: deriveNextStep(artifacts, job.status),
+      });
+      this.persistActiveJobs();
+      logDebug(`[job ${jobId}] recovered via the attached session (${attached.summary.length} chars)`);
+      return;
+    }
+    // There IS one thing left to say when the delegate is waiting on a
+    // human: this turn is not an ordinary quiet finish, and presenting
+    // it as one hides an action the caller has to take. The job status
+    // stays `completed_no_summary` (no new JobStatus, so every existing
+    // consumer keeps working) — what changes is that the summary and
+    // terminalReason say what is actually blocked. See blockedDelegation.
+    const blocked = this.blockedDelegation(job);
+    const blockedNotice = describeBlockedAgentSession(blocked);
+    this.setOutcome(job, "completed_no_summary", blockedNotice ?? NO_SUMMARY_SENTINEL, undefined, {
+      resultSource: "parent",
+      terminalReason: blocked
+        ? delegateBlockedTerminalReason(blocked.status as AgentSessionState)
+        : "late-recovery-exhausted",
+    });
+    job.recovery = undefined;
+    if (blockedNotice) {
+      pushLog(job, { ts: Date.now(), type: "recovery", text: blockedNotice });
+    }
+    this.sessions.set(sessionKey, {
+      sessionKey,
+      lastJobId: jobId,
+      lastSummary: (blockedNotice ?? NO_SUMMARY_SENTINEL).slice(0, 500),
+      artifacts,
+      recommendedNextStep: deriveNextStep(artifacts, job.status),
+    });
+    this.persistActiveJobs();
+    logDebug(
+      `[job ${jobId}] late-recovery exhausted (idle-timeout=${window.idleTimeoutMs / 1000}s, ` +
+        `hard-cap=${window.hardCapMs / 1000}s, extensions=${extensions}) — completed_no_summary` +
+        `${blocked ? ` (delegate ${blocked.status})` : ""}`,
+    );
   }
 
   /**
@@ -1865,12 +2004,17 @@ export class SessionManager {
     status: JobStatus,
     summary: string | undefined,
     error?: string,
-    meta?: { resultSource?: ResultSource; terminalReason?: string },
+    meta?: { resultSource?: ResultSource; terminalReason?: string; errorInfo?: ErrorInfo },
   ): void {
     job.status = status;
     job.summary = summary;
     job.error = error;
-    job.errorInfo = error === undefined ? undefined : classifyError(error);
+    // classifyError pattern-matches the message, which is the right default for
+    // an error whose text came from somewhere else (a provider, an RPC). A
+    // caller that KNOWS the failure mode — and therefore knows the one action
+    // that actually helps — passes the classification instead of hoping the
+    // regexes infer it. Still written here, so the one-writer invariant holds.
+    job.errorInfo = error === undefined ? undefined : (meta?.errorInfo ?? classifyError(error));
     job.outcomeVersion = (job.outcomeVersion ?? 0) + 1;
     job.resultSource = meta?.resultSource;
     job.terminalReason = meta?.terminalReason;
@@ -2088,6 +2232,12 @@ export class SessionManager {
       nextAction: buildNextAction(job),
       resultSource: job.resultSource,
       terminalReason: job.terminalReason,
+      // The upstream run this turn dispatched. Absent until chat.send answers,
+      // and on a job reloaded from a store written before it existed. Exposed
+      // because a diagnostic that names no run cannot be checked against
+      // anything: this is the id that correlates a ClawConnect job to what
+      // openclaw is actually executing. See Job.parentRunId.
+      ...(job.parentRunId ? { parentRunId: job.parentRunId } : {}),
       ...(continuation ? { continuationState: continuation } : {}),
       // Unconditional, like `recovery` above — the owning host needs to see the
       // session's current attachment on every turn to decide continue vs.

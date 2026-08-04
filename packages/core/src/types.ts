@@ -448,6 +448,14 @@ export type JobSnapshot = {
   continuationState?: ContinuationState;
   resultSource?: ResultSource;
   terminalReason?: string;
+  /**
+   * OpenClaw's id for the run this turn dispatched (see Job.parentRunId).
+   * Absent until chat.send has answered. Present so a caller — or a human
+   * reading a failure — can correlate this job with what upstream is actually
+   * executing, rather than being told a run misbehaved without being told
+   * which one.
+   */
+  parentRunId?: string;
   /** The session's CURRENT managed-session attachment, if any — not the full lineage. See AgentSessionAttachment. */
   agentSession?: AgentSessionAttachment;
   /**

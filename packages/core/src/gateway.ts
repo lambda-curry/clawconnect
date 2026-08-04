@@ -697,6 +697,32 @@ export class OpenClawGateway {
        * unset (keep going while the run is actively writing).
        */
       hardCapMs?: number;
+      /**
+       * Correlation key for the liveness classification reported through
+       * `onSample`. Optional and only ever sharpens the answer: with it, our
+       * own run appearing in `activeRunIds` is positive evidence; without it,
+       * only the session-wide `hasActiveRun` flag is. See classifyUpstreamRun.
+       */
+      runId?: string;
+      /**
+       * Called once per SUCCESSFUL transcript read, with what that read said
+       * about whether the run is still executing. Every read already computes
+       * this (`readTranscriptSample` classifies `sessionInfo` on every call);
+       * without a way out it was simply discarded, and a caller deciding
+       * whether to stop watching had nothing but stillness to go on.
+       *
+       * Reporting it rather than acting on it is deliberate: this poll stays an
+       * observer with fixed exits, and the policy question — "is absence
+       * allowed to end a turn?" — stays with SessionManager, which is where the
+       * identical question is already answered for the quiet watchdog (see
+       * reconcileQuietRun's "absence is never a verdict").
+       */
+      onSample?: (sample: {
+        checkedAt: number;
+        upstream: RunObservation["upstream"];
+        /** The transcript advanced since the previous successful read. False on the first read — nothing to compare against yet. */
+        changed: boolean;
+      }) => void;
     },
   ): Promise<string> {
     const stableThreshold = Math.max(1, options.stableThreshold ?? 1);
@@ -752,9 +778,18 @@ export class OpenClawGateway {
         logDebug(`[poll ${diagId}] exit: shouldAbort=true after sleep at attempt=${attempt}`);
         return stableTrailingText;
       }
-      const sample = await this.readTranscriptSample(sessionKey);
+      const sample = await this.readTranscriptSample(sessionKey, options.runId);
       if (!sample) continue;
       const { snapshotKey, trailingText: currentTrailingText } = sample;
+      // Before any exit decision below: a read that succeeded is evidence
+      // about the run, and the caller needs it even on the polls that decide
+      // nothing — that is what makes "still executing" visible during a long
+      // still stretch rather than only in hindsight.
+      options.onSample?.({
+        checkedAt: Date.now(),
+        upstream: sample.upstream,
+        changed: lastSnapshotKey !== "" && snapshotKey !== lastSnapshotKey,
+      });
       logDebug(
         `[poll ${diagId}] attempt=${attempt} snapshotKey=${snapshotKey} ` +
           `trailingLen=${currentTrailingText.length} stableCount=${stableCount} ` +
