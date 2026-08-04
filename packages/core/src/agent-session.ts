@@ -26,7 +26,7 @@
  * There is deliberately NO list/enumerate callback and no spawn. Every
  * operation addresses exactly one already-known attachment, so there is no
  * surface through which ClawConnect could sweep a runtime's sessions — the
- * structural form of "no heuristic scanning" that the Fleet model already
+ * structural form of "no heuristic scanning" that the attachment model already
  * holds for claude-fleet.
  */
 
@@ -216,7 +216,7 @@ export type AgentSessionError = {
 /**
  * The neutral view of one attachment handed to a runtime callback. Built from
  * the durable record by session.ts, deliberately NOT the record itself: a host
- * never sees ClawConnect's Fleet-shaped internals (lineage ids, delegated turn
+ * never sees ClawConnect's internal attachment shape (lineage ids, delegated turn
  * tokens, stored results), only what it needs to address the session.
  */
 export type AgentSessionRef = {
@@ -505,7 +505,7 @@ export function isValidRuntimeId(value: unknown): value is string {
 
 /**
  * An INSTANCE, not a module-level singleton: it is injected into
- * SessionManager the same way the job store and the Fleet adapter are, so
+ * SessionManager the same way the job store and the legacy adapter are, so
  * tests never have to reset shared global state and two hosts in one process
  * cannot silently share a runtime table.
  */

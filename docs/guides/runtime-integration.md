@@ -169,7 +169,8 @@ async continue(ref, request, opts) {
 ```
 
 `continue` **dispatches** a turn — it must not block until the turn finishes.
-The default deadline for any single callback is 30 seconds, and a host that
+The default deadline for any single callback is 60 seconds
+(`AGENT_SESSION_CALL_TIMEOUT_MS`), and a host that
 waits out a whole agent turn inside it will simply be cut off with a
 `continue_timeout`. Report the state you can see immediately and let the next
 `inspect` carry the result.
@@ -178,7 +179,7 @@ A caller drives this by embedding an explicit directive rather than a marker:
 
 ```json
 {
-  "context": "[[clawconnect:fleet]]{\"op\":\"continue\",\"prompt\":\"also update the docs\"}[[/clawconnect:fleet]]"
+  "context": "[[clawconnect:agent-session]]{\"op\":\"continue\",\"prompt\":\"also update the docs\"}[[/clawconnect:agent-session]]"
 }
 ```
 
@@ -194,7 +195,7 @@ when the caller explicitly opts into stopping the session in your runtime.
 
 ```json
 {
-  "context": "[[clawconnect:fleet]]{\"op\":\"detach\",\"reason\":\"work finished\",\"stopRuntime\":true}[[/clawconnect:fleet]]"
+  "context": "[[clawconnect:agent-session]]{\"op\":\"detach\",\"reason\":\"work finished\",\"stopRuntime\":true}[[/clawconnect:agent-session]]"
 }
 ```
 
@@ -218,7 +219,7 @@ reason:
 
 ```json
 {
-  "context": "[[clawconnect:fleet]]{\"op\":\"replace\",\"runtime\":\"example-runtime\",\"sessionId\":\"sess-43\",\"host\":\"worker-1\",\"reason\":\"restarted after a crash\"}[[/clawconnect:fleet]]"
+  "context": "[[clawconnect:agent-session]]{\"op\":\"replace\",\"runtime\":\"example-runtime\",\"sessionId\":\"sess-43\",\"host\":\"worker-1\",\"reason\":\"restarted after a crash\"}[[/clawconnect:agent-session]]"
 }
 ```
 
@@ -227,10 +228,9 @@ replaced. A conversation still has exactly one current session.
 
 ## 7. Reading the result back
 
-The current attachment rides along on task snapshots as `fleetAttachment` —
-in `check_task`, `get_task`, and `get_session` — so you can branch on it every
-turn without a separate call. (The field is named for the legacy adapter that
-shipped first; it holds the normalized record for *any* runtime.) Expect:
+The current attachment rides along on task snapshots as `agentSession` — in
+`check_task`, `get_task`, and `get_session` — so you can branch on it every
+turn without a separate call. Expect:
 
 - `state` from the closed vocabulary, plus `alive` when the runtime could say.
 - `error` with a machine-branchable `code` when a *read* failed:

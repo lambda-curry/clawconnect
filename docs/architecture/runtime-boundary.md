@@ -146,7 +146,8 @@ callback is a lie a caller discovers at the worst possible moment; here, the
 absence of a callback *is* the absence of the capability, and asking for it
 returns a precise `unsupported_operation`.
 
-Every callback runs under a wall-clock deadline (30s by default) applied at
+Every callback runs under a wall-clock deadline (`AGENT_SESSION_CALL_TIMEOUT_MS`,
+60s by default, per-call overridable) applied at
 the seam, not left to each adapter, and receives an `AbortSignal` merging the
 caller's with that deadline. A host that hangs cannot wedge a task's recovery
 path.

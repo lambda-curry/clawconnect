@@ -95,10 +95,9 @@ export type ResultSource = "parent" | "fleet-transcript" | "agent-session";
  * only session.ts's own replace/detach transitions may set, never a directive
  * directly — see AgentSessionDirective.
  *
- * Named for Fleet because that is the name production already publishes; it
- * has always been the managed-session state type, and widening it is what lets
- * one record serve claude-fleet (terminal success "idle") and a service
- * runtime (terminal success "completed") without a second model.
+ * One record serves every runtime: claude-fleet (terminal success "idle")
+ * and a service-style runtime (terminal success "completed") share this type
+ * rather than each getting a model of its own.
  */
 export type AttachmentLiveStatus = Exclude<AgentSessionState, "unavailable" | "unknown">;
 
@@ -414,7 +413,7 @@ export type JobSnapshot = {
   continuationState?: ContinuationState;
   resultSource?: ResultSource;
   terminalReason?: string;
-  /** The session's CURRENT Fleet attachment, if any — not the full lineage. See AgentSessionAttachment. */
+  /** The session's CURRENT managed-session attachment, if any — not the full lineage. See AgentSessionAttachment. */
   agentSession?: AgentSessionAttachment;
   /**
    * OPAQUE cursor. Pass it back verbatim as the next call's `knownLogCount`
@@ -541,7 +540,7 @@ export type SessionInspectResult =
       nextAfter?: number;
       /** mode="tasks": every job ever submitted under this session, newest first. Plain core surface — not UI-specific. */
       tasks?: TaskSummary[];
-      /** The session's CURRENT Fleet attachment, if any — not the full lineage. */
+      /** The session's CURRENT managed-session attachment, if any — not the full lineage. */
       agentSession?: AgentSessionAttachment;
     };
 

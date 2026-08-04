@@ -12,8 +12,8 @@ export interface AttachmentStore {
  * job-store.ts's JsonFileJobStore. Unlike the job store — which only ever
  * holds currently-running jobs and prunes on every terminal transition — this
  * store holds every session that has ever had an attachment, including
- * superseded/detached lineage: it's bounded by "how many sessions have used
- * Fleet, times a handful of attachments each", not by event volume, so
+ * superseded/detached lineage: it's bounded by "how many sessions have ever
+ * attached, times a handful of attachments each", not by event volume, so
  * keeping full history here doesn't risk unbounded growth the way logs would.
  * Best-effort: a read/write failure is logged and swallowed, never thrown —
  * same rationale as the job store (restart recovery is a nice-to-have, not
@@ -29,7 +29,7 @@ export class JsonFileAttachmentStore implements AttachmentStore {
       const parsed = JSON.parse(readFileSync(this.filePath, "utf8"));
       return Array.isArray(parsed) ? parsed : [];
     } catch (err) {
-      console.error(`[fleet-attachment-store] failed to load ${this.filePath}: ${(err as Error).message}`);
+      console.error(`[attachment-store] failed to load ${this.filePath}: ${(err as Error).message}`);
       return [];
     }
   }
@@ -41,7 +41,7 @@ export class JsonFileAttachmentStore implements AttachmentStore {
       writeFileSync(tmpPath, JSON.stringify(states));
       renameSync(tmpPath, this.filePath);
     } catch (err) {
-      console.error(`[fleet-attachment-store] failed to save ${this.filePath}: ${(err as Error).message}`);
+      console.error(`[attachment-store] failed to save ${this.filePath}: ${(err as Error).message}`);
     }
   }
 }

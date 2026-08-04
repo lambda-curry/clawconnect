@@ -39,6 +39,9 @@ The core package owns all communication with OpenClaw. Nothing else speaks WebSo
 | `artifacts.ts` | Extracts structured data (files changed, PRs, branches) from gateway events and summaries |
 | `errors.ts` | Classifies gateway errors into categories (auth, timeout, connection, etc.) |
 | `agent-session.ts` | Optional runtime seam — registry, normalization, and bounded dispatch for host-supplied managed agent sessions |
+| `runtime-modules.ts` | Loads operator-named ES modules that register runtimes, so a shipped binary can reach the seam without embedding |
+| `session-handoff.ts` | Parses (and strips) the `<agent-session>` marker and the attachment directive out of `TaskInput.context` |
+| `attachment-store.ts` | Restart-durable attachment lineage, one JSON file per agent — same shape as `job-store.ts` |
 | `types.ts` | Shared TypeScript types |
 
 Key design decisions:
@@ -55,7 +58,9 @@ registers no runtime and every MCP tool behaves identically without one.
 
 The embedding host owns runtime choice, lifecycle, transport, authentication,
 approvals, and cleanup, and supplies `inspect`/`continue`/`detach` callbacks
-for one already-known session. ClawConnect owns the normalized attachment
+for one already-known session — either by constructing the server itself, or,
+for a shipped binary, by naming ES modules via
+`CLAWCONNECT_AGENT_SESSION_RUNTIME_MODULES`. ClawConnect owns the normalized attachment
 record, one-current-session authority, lineage, restart durability, and
 normalization of whatever the runtime reports.
 

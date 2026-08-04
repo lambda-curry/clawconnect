@@ -106,6 +106,29 @@ describe("public surface stays host-neutral", () => {
     expect(offenders(walk(REPO_ROOT, isMarkdown), BANNED_REFERENCES)).toEqual([]);
   });
 
+  it("uses no retired vocabulary in current docs or shipped source", () => {
+    // Renaming code and renaming the docs that describe it are two jobs, and
+    // the second is the one that gets skipped: three separate stale names
+    // survived the seam rename because the sweep ran over packages/ and apps/
+    // but not docs/. Dated records are exempt — they describe the old tree on
+    // purpose and carry a then/now map.
+    const RETIRED = [
+      "fleetAttachment",
+      "FleetAttachmentRecord",
+      "SessionFleetState",
+      "FleetDirective",
+      "FleetLiveStatus",
+      "FleetAttachmentStore",
+      "parseFleetDirective",
+      "fleetStoreDir",
+      "CLAWCONNECT_FLEET_STORE_DIR",
+      "[[clawconnect:fleet]]",
+      "DEFAULT_AGENT_SESSION_TIMEOUT_MS",
+    ];
+    const pattern = new RegExp(RETIRED.map((n) => n.replace(/[[\]]/g, "\\$&")).join("|"));
+    expect(offenders([...PUBLIC_DOCS, ...SHIPPED_SOURCE], pattern)).toEqual([]);
+  });
+
   it("cites no source file that does not exist, in public docs", () => {
     // The rename that moved fleet-*.ts left a public guide pointing at a
     // deleted test file. Historical records are exempt by the same rule as

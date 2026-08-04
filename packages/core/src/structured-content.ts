@@ -54,10 +54,10 @@ export function buildGetTaskStructuredContent(result: FoundCheckTaskResult, deta
     resultSource: snapshot.resultSource,
     terminalReason: snapshot.terminalReason,
     // Unconditional, same treatment as `recovery` above — the owning host needs the
-    // session's current Fleet attachment on every get_task call, not just
+    // session's current attachment on every get_task call, not just
     // under a detail preset. Absent entirely when there is no attachment
     // (buildSnapshot never sets the key), so this stays undefined for every
-    // session that has never used Fleet.
+    // session that has never had an attachment.
     agentSession: snapshot.agentSession,
   };
   if (d === "summary" || has("summary")) payload.summary = snapshot.summary;

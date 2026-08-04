@@ -40,5 +40,5 @@ Relevant exports:
 | `AgentSessionObservation` | The loose reply a runtime may return |
 | `AgentSessionStatus` / `AgentSessionState` | The normalized result and its closed state vocabulary |
 | `normalizeAgentSessionObservation`, `dispatchAgentSession` | Normalization and single-session dispatch |
-| `FleetAttachmentRecord` | The durable, normalized attachment record |
+| `AgentSessionAttachment` | The durable, normalized attachment record |
 | `LocalTmuxFleetAdapter` | Legacy local-only recovery path for pre-existing `claude-fleet` attachments — not a runtime selector |
