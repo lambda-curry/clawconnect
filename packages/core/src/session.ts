@@ -1521,6 +1521,17 @@ export class SessionManager {
       return;
     }
 
+    // Record what this round learned about liveness before deciding anything
+    // with it. This is the only place a reader can find out whether a silent
+    // run is still executing, and it is recorded on EVERY round — including
+    // the ones below that conclude nothing and just re-arm — so a consumer
+    // never has to infer "still alive" from the absence of an outcome.
+    job.liveness = {
+      checkedAt: Date.now(),
+      upstream: observation.upstream,
+      producing: observation.changed,
+    };
+
     // A live event during the read is proof the run is alive, and it already
     // reset the round count — but this round captured its round number
     // before that happened. Acting on it would let a stale count reach the
@@ -2065,6 +2076,7 @@ export class SessionManager {
       logEventCount: window.totalCount,
       artifacts: job.artifacts,
       recovery: job.recovery,
+      liveness: job.liveness,
       pollCount: job.pollCount,
       continuePolling,
       // A wait-mode check_task call already blocked for its full window

@@ -136,6 +136,9 @@ function toTaskSummary(job: Job, agentId: string, attachment?: AgentSessionAttac
     status: deriveTaskStatus(job, blocked),
     startedAt: job.startedAt,
     lastEventAt: job.lastEventAt,
+    // Carried per row: without it a listing can only see stillness, and a
+    // caller would have to get_task every quiet row to tell working from stuck.
+    ...(job.liveness ? { liveness: job.liveness } : {}),
     ...previewSummary(job.summary),
     error: job.error,
     ...(blocked ? { blockedDelegation: blocked } : {}),
