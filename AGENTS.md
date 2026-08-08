@@ -1,5 +1,7 @@
 # Working in this repo
 
+Last validated: 2026-08-08
+
 ## This repository is public
 
 No private host, company, deployment, or agent name belongs in docs, source,
