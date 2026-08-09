@@ -368,7 +368,7 @@ completed_no_summary and error are terminal — report them. Rarely, a long tool
       annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
       _meta: provider.toolMeta?.check_task,
     },
-    async ({ jobId, sessionKey, agent, knownLogCount, mode, waitMs }) => {
+    async ({ jobId, sessionKey, agent, knownLogCount, mode, waitMs }, ctx) => {
       const result = await checkTask(pool, {
         jobId,
         sessionKey,
@@ -376,6 +376,7 @@ completed_no_summary and error are terminal — report them. Rarely, a long tool
         knownLogCount,
         mode: (mode as CheckMode) ?? defaultMode,
         waitMs,
+        signal: ctx.mcpReq.signal,
       });
       return fmtCheck(result);
     },

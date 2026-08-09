@@ -628,6 +628,8 @@ export type CheckTaskOpts = {
    * clamp to the nearest bound rather than erroring.
    */
   waitMs?: number;
+  /** Cancels only this wait when the requesting transport disconnects. */
+  signal?: AbortSignal;
 };
 
 export type CheckTaskResult =

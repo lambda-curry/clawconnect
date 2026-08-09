@@ -356,6 +356,26 @@ describe("MCP 2026-07-28 over the SDK v2 handler", () => {
     expect(body.id).toBe(41);
   });
 
+  it("rejects non-JSON media types before either protocol-era route", async () => {
+    const { url } = await startTestApp({ widgetEnabled: false });
+    const legacy = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+    });
+    const modern = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "text/plain",
+        "MCP-Protocol-Version": "2026-07-28",
+        "Mcp-Method": "tools/list",
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }),
+    });
+    expect(legacy.status).toBe(415);
+    expect(modern.status).toBe(415);
+  });
+
   it("preserves MCP Apps resources and UI metadata in the modern era", async () => {
     const widgetHtmlPath = writeFixtureWidget("<html><body>modern widget</body></html>");
     const { url } = await startTestApp({ widgetEnabled: true, widgetHtmlPath });
@@ -438,6 +458,28 @@ describe("MCP 2026-07-28 over the SDK v2 handler", () => {
     });
     expect((checked.structuredContent as any).jobId).toBe(jobId);
     expect((checked.structuredContent as any).isTerminal).toBe(true);
+  });
+
+  it("abandons a cancelled modern check_task wait but leaves its task running", async () => {
+    const { url, pool } = await startTestApp({ widgetEnabled: false });
+    const client = await modernClient(url);
+    const run = await client.callTool({
+      name: "run_task",
+      arguments: { task: "continue after the HTTP caller disconnects" },
+    });
+    const jobId = (run.structuredContent as any).jobId as string;
+    const job = pool.forJob(jobId)!.sessions.getJob(jobId)!;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    job.status = "running";
+    const controller = new AbortController();
+    const pending = client.callTool(
+      { name: "check_task", arguments: { jobId, mode: "wait", waitMs: 120_000 } },
+      { signal: controller.signal },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    controller.abort();
+    await expect(pending).rejects.toThrow(/AbortError/);
+    expect(job.status).toBe("running");
   });
 
   it("preserves isError for a found task that terminates with an error", async () => {

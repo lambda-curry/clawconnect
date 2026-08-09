@@ -6,6 +6,7 @@ import { Hono } from "hono";
 import {
   createMcpHandler,
   fromJsonSchema,
+  isJsonContentType,
   isLegacyRequest,
   McpServer,
 } from "@modelcontextprotocol/server";
@@ -796,6 +797,7 @@ At detail levels that include it, \`updates\` is a bounded recent-activity windo
     args: Record<string, unknown>,
     scope: Scope,
     identity: Identity,
+    signal?: AbortSignal,
   ): Promise<ToolResponse | undefined> {
     if (name === "run_task") {
       const requestedAgent =
@@ -862,6 +864,7 @@ At detail levels that include it, \`updates\` is a bounded recent-activity windo
         knownLogCount: Number(args.knownLogCount) || 0,
         mode: (args.mode as CheckMode) ?? "wait",
         waitMs: args.waitMs !== undefined ? Number(args.waitMs) : undefined,
+        signal,
       });
       if (!result.found) {
         const message = args.sessionKey
@@ -1057,8 +1060,8 @@ At detail levels that include it, \`updates\` is a bounded recent-activity windo
           annotations: tool.annotations,
           _meta: tool._meta,
         },
-        async (args) => {
-          const result = await invokeTool(tool.name, args, scope, identity);
+        async (args, ctx) => {
+          const result = await invokeTool(tool.name, args, scope, identity, ctx.mcpReq.signal);
           return (
             result ?? {
               content: [{ type: "text", text: `Unknown tool: ${tool.name}` }],
@@ -1127,6 +1130,18 @@ At detail levels that include it, \`updates\` is a bounded recent-activity windo
       if (req.method !== "POST") {
         res.writeHead(405, { Allow: "POST, OPTIONS" });
         res.end();
+        return;
+      }
+
+      if (!isJsonContentType(req.headers["content-type"])) {
+        res.writeHead(415, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: null,
+            error: { code: -32000, message: "Unsupported Media Type: expected application/json" },
+          }),
+        );
         return;
       }
 
@@ -1316,6 +1331,7 @@ At detail levels that include it, \`updates\` is a bounded recent-activity windo
             knownLogCount: Number(args.knownLogCount) || 0,
             mode,
             waitMs: args.waitMs !== undefined ? Number(args.waitMs) : undefined,
+            signal: requestAbort.signal,
           });
 
           if (!result.found) {
