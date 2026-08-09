@@ -13,9 +13,8 @@ process.on("uncaughtException", (err) => {
 
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { loadAgentRegistry, loadAgentSessionRuntimes } from "@clawconnect/core";
-import { createMcpServer } from "./server.ts";
+import { serveClawConnectStdio } from "./stdio.ts";
 
 let registry;
 try {
@@ -37,8 +36,17 @@ console.error(
 // directory is inert until something actually attaches.
 const agentSessionRuntimes = await loadAgentSessionRuntimes();
 const attachmentStoreDir =
-  process.env.CLAWCONNECT_ATTACHMENT_STORE_DIR?.trim() || join(homedir(), ".clawconnect", "attachments");
+  process.env.CLAWCONNECT_ATTACHMENT_STORE_DIR?.trim() ||
+  join(homedir(), ".clawconnect", "attachments");
 
-const { server } = createMcpServer({ registry, agentSessionRuntimes, attachmentStoreDir });
-const transport = new StdioServerTransport();
-await server.connect(transport);
+// serveStdio owns the opening exchange: a 2026-07-28 server/discover probe
+// selects the modern per-request-envelope era, while initialize (or another
+// claim-less opening) explicitly falls back to the legacy 2025-era protocol.
+// One factory instance is then pinned for the lifetime of this stdio
+// connection, preserving the server-owned task pool across calls.
+serveClawConnectStdio(
+  { registry, agentSessionRuntimes, attachmentStoreDir },
+  {
+    onerror: (error) => console.error("[mcp] stdio serving error:", error),
+  },
+);

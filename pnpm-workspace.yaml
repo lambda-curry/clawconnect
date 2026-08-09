@@ -3,6 +3,10 @@ packages:
   - packages/*
 
 catalog:
+  '@modelcontextprotocol/client': 2.0.0
+  '@modelcontextprotocol/node': 2.0.0
+  '@modelcontextprotocol/sdk': 1.29.0
+  '@modelcontextprotocol/server': 2.0.0
   "@types/node": ^22
   '@typescript/native-preview': 7.0.0-dev.20260601.1
   typescript: ^5

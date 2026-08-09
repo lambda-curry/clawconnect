@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { createApp, checkTaskText } from "./app.ts";
 import { AgentSessionRuntimeRegistry } from "@clawconnect/core";
 import type { AgentRegistry, FleetAdapter, JobSnapshot } from "@clawconnect/core";
+import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 
 /**
  * Real HTTP integration tests against createApp()'s request listener — a
@@ -28,29 +29,46 @@ function fakeRegistry(): AgentRegistry {
 
 let servers: Server[] = [];
 let tmpDirs: string[] = [];
+let modernClients: Client[] = [];
 
 afterEach(() => {
+  for (const client of modernClients) void client.close();
+  modernClients = [];
   for (const s of servers) s.close();
   servers = [];
   for (const d of tmpDirs) rmSync(d, { recursive: true, force: true });
   tmpDirs = [];
+  delete process.env.PUBLIC_MCP_PASS;
 });
 
-async function startTestApp(opts: { widgetEnabled?: boolean; widgetHtmlPath?: string } = {}) {
+async function startTestApp(
+  opts: {
+    widgetEnabled?: boolean;
+    widgetHtmlPath?: string;
+    registry?: AgentRegistry;
+    authPass?: string;
+  } = {},
+) {
   if (opts.widgetEnabled) process.env.ENABLE_CHATGPT_UI_WIDGET = "true";
   else delete process.env.ENABLE_CHATGPT_UI_WIDGET;
+  if (opts.authPass) process.env.PUBLIC_MCP_PASS = opts.authPass;
+  else delete process.env.PUBLIC_MCP_PASS;
 
   // Scratch dir, never the real default — a test run must never read or
   // write apps/chatgpt/.job-store.
   const jobStoreDir = mkdtempSync(join(tmpdir(), "clawconnect-jobstore-"));
   tmpDirs.push(jobStoreDir);
 
-  const { requestListener, pool } = createApp(fakeRegistry(), { widgetHtmlPath: opts.widgetHtmlPath, jobStoreDir });
+  const { requestListener, pool } = createApp(opts.registry ?? fakeRegistry(), {
+    widgetHtmlPath: opts.widgetHtmlPath,
+    jobStoreDir,
+  });
   const server = createServer(requestListener);
   servers.push(server);
   await new Promise<void>((resolve) => server.listen(0, resolve));
   const address = server.address();
-  if (address === null || typeof address === "string") throw new Error("expected a bound TCP address");
+  if (address === null || typeof address === "string")
+    throw new Error("expected a bound TCP address");
   const url = `http://127.0.0.1:${address.port}/mcp`;
   return { url, pool };
 }
@@ -63,6 +81,24 @@ async function rpc(url: string, method: string, params?: Record<string, unknown>
     body: JSON.stringify({ jsonrpc: "2.0", id: ++rpcId, method, params }),
   });
   return res.json() as Promise<{ result?: any; error?: { code: number; message: string } }>;
+}
+
+async function modernClient(
+  url: string,
+  fetchImpl?: typeof fetch,
+  headers?: Record<string, string>,
+) {
+  const transport = new StreamableHTTPClientTransport(new URL(url), {
+    fetch: fetchImpl,
+    requestInit: headers ? { headers } : undefined,
+  });
+  const client = new Client(
+    { name: "modern-test-client", version: "0.0.0" },
+    { capabilities: {}, versionNegotiation: { mode: { pin: "2026-07-28" } } },
+  );
+  await client.connect(transport);
+  modernClients.push(client);
+  return client;
 }
 
 function writeFixtureWidget(html: string): string {
@@ -84,31 +120,51 @@ describe("unmounted core independence — run_task/get_task work identically reg
   // route itself is unaffected by widget state.
   it("widget disabled: run_task -> get_task round trip succeeds", async () => {
     const { url } = await startTestApp({ widgetEnabled: false });
-    const runResult = await rpc(url, "tools/call", { name: "run_task", arguments: { task: "do the thing" } });
+    const runResult = await rpc(url, "tools/call", {
+      name: "run_task",
+      arguments: { task: "do the thing" },
+    });
     expect(runResult.error).toBeUndefined();
     const structured = runResult.result.structuredContent;
     expect(structured.jobId).toBeTruthy();
-    expect(structured.nextAction).toEqual({ tool: "check_task", args: { jobId: structured.jobId, sessionKey: structured.sessionKey } });
+    expect(structured.nextAction).toEqual({
+      tool: "check_task",
+      args: { jobId: structured.jobId, sessionKey: structured.sessionKey },
+    });
 
-    const getResult = await rpc(url, "tools/call", { name: "get_task", arguments: { taskId: structured.jobId } });
+    const getResult = await rpc(url, "tools/call", {
+      name: "get_task",
+      arguments: { taskId: structured.jobId },
+    });
     expect(getResult.error).toBeUndefined();
     expect(getResult.result.structuredContent.jobId).toBe(structured.jobId);
   });
 
   it("widget enabled but its resource is missing/broken: run_task -> get_task still succeeds", async () => {
-    const { url } = await startTestApp({ widgetEnabled: true, widgetHtmlPath: "/no/such/path/widget.html" });
-    const runResult = await rpc(url, "tools/call", { name: "run_task", arguments: { task: "do the thing" } });
+    const { url } = await startTestApp({
+      widgetEnabled: true,
+      widgetHtmlPath: "/no/such/path/widget.html",
+    });
+    const runResult = await rpc(url, "tools/call", {
+      name: "run_task",
+      arguments: { task: "do the thing" },
+    });
     expect(runResult.error).toBeUndefined();
     expect(runResult.result.isError).toBeFalsy();
     const jobId = runResult.result.structuredContent.jobId;
 
-    const getResult = await rpc(url, "tools/call", { name: "get_task", arguments: { taskId: jobId } });
+    const getResult = await rpc(url, "tools/call", {
+      name: "get_task",
+      arguments: { taskId: jobId },
+    });
     expect(getResult.error).toBeUndefined();
     expect(getResult.result.structuredContent.jobId).toBe(jobId);
 
     // The broken resource itself surfaces as a JSON-RPC error on resources/read,
     // not a crash — a missing widget file must never affect the tool surface.
-    const readResult = await rpc(url, "resources/read", { uri: "ui://clawconnect/task-center-v1.html" });
+    const readResult = await rpc(url, "resources/read", {
+      uri: "ui://clawconnect/task-center-v1.html",
+    });
     expect(readResult.error).toBeDefined();
   });
 });
@@ -140,7 +196,9 @@ describe("missing UI metadata fallback — widget disabled means the surface loo
 
   it("resources/read for the widget URI errors cleanly when the widget is disabled", async () => {
     const { url } = await startTestApp({ widgetEnabled: false });
-    const result = await rpc(url, "resources/read", { uri: "ui://clawconnect/task-center-v1.html" });
+    const result = await rpc(url, "resources/read", {
+      uri: "ui://clawconnect/task-center-v1.html",
+    });
     expect(result.error).toBeDefined();
   });
 });
@@ -159,7 +217,9 @@ describe("widget enabled with a real resource", () => {
     expect(listResult.result.resources).toHaveLength(1);
     expect(listResult.result.resources[0].mimeType).toBe("text/html;profile=mcp-app");
 
-    const readResult = await rpc(url, "resources/read", { uri: listResult.result.resources[0].uri });
+    const readResult = await rpc(url, "resources/read", {
+      uri: listResult.result.resources[0].uri,
+    });
     expect(readResult.result.contents[0].text).toBe("<html><body>fixture widget</body></html>");
   });
 
@@ -191,7 +251,10 @@ describe("widget enabled with a real resource", () => {
     // Chaining is what kills the parent stream: each wait is bounded at 45s,
     // but seven of them is five and a half minutes in one reply with nothing
     // visible happening, and the host gives up on it.
-    const { url } = await startTestApp({ widgetEnabled: true, widgetHtmlPath: writeFixtureWidget("<html></html>") });
+    const { url } = await startTestApp({
+      widgetEnabled: true,
+      widgetHtmlPath: writeFixtureWidget("<html></html>"),
+    });
     const { result } = await rpc(url, "tools/list");
     const checkTask = result.tools.find((t: any) => t.name === "check_task");
 
@@ -214,6 +277,188 @@ describe("protocolVersion negotiation over real HTTP", () => {
     const { url } = await startTestApp({ widgetEnabled: false });
     const result = await rpc(url, "initialize", { protocolVersion: "1999-01-01" });
     expect(result.result.protocolVersion).toBe("2025-06-18");
+  });
+});
+
+describe("MCP 2026-07-28 over the SDK v2 handler", () => {
+  it("allows validated dynamic MCP parameter headers through browser preflight", async () => {
+    const { url } = await startTestApp({ widgetEnabled: false });
+    const res = await fetch(url, {
+      method: "OPTIONS",
+      headers: {
+        Origin: "https://example.test",
+        "Access-Control-Request-Method": "POST",
+        "Access-Control-Request-Headers":
+          "content-type, mcp-protocol-version, mcp-param-task, x-not-allowed",
+      },
+    });
+    const allowed = res.headers.get("access-control-allow-headers")?.toLowerCase() ?? "";
+    expect(res.status).toBe(204);
+    expect(allowed).toContain("mcp-param-task");
+    expect(allowed).not.toContain("x-not-allowed");
+  });
+
+  it("negotiates the modern era and serves the same tools/list surface", async () => {
+    const { url } = await startTestApp({ widgetEnabled: false });
+    const client = await modernClient(url);
+    expect(client.getProtocolEra()).toBe("modern");
+    const { tools } = await client.listTools();
+    expect(tools.map((tool) => tool.name)).toEqual(
+      expect.arrayContaining(["run_task", "check_task", "get_task", "list_tasks"]),
+    );
+    const runTaskMeta = tools.find((tool) => tool.name === "run_task")?._meta;
+    expect(runTaskMeta).not.toHaveProperty("ui/resourceUri");
+    expect(runTaskMeta).not.toHaveProperty("openai/outputTemplate");
+  });
+
+  it("emits modern standard headers and a per-request metadata envelope", async () => {
+    const seen: Array<{ headers: Headers; body: any }> = [];
+    const captureFetch: typeof fetch = async (input, init) => {
+      const request = new Request(input, init);
+      seen.push({ headers: request.headers, body: JSON.parse(await request.clone().text()) });
+      return fetch(request);
+    };
+    const { url } = await startTestApp({ widgetEnabled: false });
+    const client = await modernClient(url, captureFetch);
+    await client.listTools({ _meta: { trace: "per-request-marker" } });
+
+    const list = seen.find((entry) => entry.body.method === "tools/list")!;
+    expect(list.headers.get("MCP-Protocol-Version")).toBe("2026-07-28");
+    expect(list.headers.get("Mcp-Method")).toBe("tools/list");
+    expect(list.body.params._meta.trace).toBe("per-request-marker");
+    expect(list.body.params._meta["io.modelcontextprotocol/protocolVersion"]).toBe("2026-07-28");
+  });
+
+  it("rejects malformed modern header/envelope combinations as structured errors", async () => {
+    const { url } = await startTestApp({ widgetEnabled: false });
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "MCP-Protocol-Version": "2026-07-28",
+        "Mcp-Method": "tools/call",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 41,
+        method: "tools/list",
+        params: {
+          _meta: {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {},
+          },
+        },
+      }),
+    });
+    const body = (await res.json()) as any;
+    expect(res.status).toBe(400);
+    expect(body.error.code).toBe(-32020);
+    expect(body.id).toBe(41);
+  });
+
+  it("preserves MCP Apps resources and UI metadata in the modern era", async () => {
+    const widgetHtmlPath = writeFixtureWidget("<html><body>modern widget</body></html>");
+    const { url } = await startTestApp({ widgetEnabled: true, widgetHtmlPath });
+    const client = await modernClient(url);
+    const { resources } = await client.listResources();
+    expect(resources).toHaveLength(1);
+    const read = await client.readResource({ uri: resources[0].uri });
+    expect(read.contents[0]).toMatchObject({ text: "<html><body>modern widget</body></html>" });
+    const { tools } = await client.listTools();
+    expect(tools.find((tool) => tool.name === "run_task")?._meta).toMatchObject({
+      "ui/resourceUri": "ui://clawconnect/task-center-v1.html",
+      "openai/outputTemplate": "ui://clawconnect/task-center-v1.html",
+    });
+  });
+
+  it("applies the existing auth gate to the modern discovery probe and every request", async () => {
+    const { url } = await startTestApp({ widgetEnabled: false, authPass: "test-pass" });
+    const legacyFailure = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+    });
+    expect(legacyFailure.status).toBe(403);
+    await expect(modernClient(url)).rejects.toMatchObject({
+      code: "CLIENT_HTTP_FORBIDDEN",
+      data: { status: 403 },
+    });
+    const client = await modernClient(url, undefined, { Authorization: "Bearer test-pass" });
+    await expect(client.listTools()).resolves.toHaveProperty("tools");
+  });
+
+  it("isolates tools and calls to the agents selected by the request URL", async () => {
+    const registry = fakeRegistry();
+    registry.agents.push({
+      id: "other-agent",
+      url: "ws://127.0.0.1:1",
+      password: "x",
+      openclawAgentId: "other",
+    });
+    const { url } = await startTestApp({ widgetEnabled: false, registry });
+    const client = await modernClient(`${url}?agent=test-agent`);
+    const tools = await client.listTools();
+    const runTask = tools.tools.find((tool) => tool.name === "run_task")!;
+    expect((runTask.inputSchema.properties as any).agent.enum).toEqual(["test-agent"]);
+    const denied = await client.callTool({
+      name: "run_task",
+      arguments: { task: "should not cross scope", agent: "other-agent" },
+    });
+    expect(denied.isError).toBe(true);
+
+    const legacyTools = await rpc(`${url}?agent=test-agent`, "tools/list");
+    const legacyRunTask = legacyTools.result.tools.find((tool: any) => tool.name === "run_task");
+    expect(legacyRunTask.inputSchema.properties.agent.enum).toEqual(["test-agent"]);
+    const legacyDenied = await rpc(`${url}?agent=test-agent`, "tools/call", {
+      name: "run_task",
+      arguments: { task: "should not cross scope", agent: "other-agent" },
+    });
+    expect(legacyDenied.result.isError).toBe(true);
+  });
+
+  it("returns a structured tool error for malformed tool arguments", async () => {
+    const { url } = await startTestApp({ widgetEnabled: false });
+    const client = await modernClient(url);
+    const result = await client.callTool({ name: "run_task", arguments: {} });
+    expect(result.isError).toBe(true);
+    expect(result.content[0]).toMatchObject({ type: "text" });
+  });
+
+  it("keeps the task pool server-owned across run_task -> check_task -> terminal", async () => {
+    const { url, pool } = await startTestApp({ widgetEnabled: false });
+    const client = await modernClient(url);
+    const run = await client.callTool({ name: "run_task", arguments: { task: "finish quickly" } });
+    const jobId = (run.structuredContent as any).jobId as string;
+    const job = pool.forJob(jobId)!.sessions.getJob(jobId)!;
+    job.status = "completed";
+    job.summary = "finished by the test runtime";
+    const checked = await client.callTool({
+      name: "check_task",
+      arguments: { jobId, mode: "poll", waitMs: 1000 },
+    });
+    expect((checked.structuredContent as any).jobId).toBe(jobId);
+    expect((checked.structuredContent as any).isTerminal).toBe(true);
+  });
+
+  it("preserves isError for a found task that terminates with an error", async () => {
+    const { url, pool } = await startTestApp({ widgetEnabled: false });
+    const client = await modernClient(url);
+    const run = await client.callTool({
+      name: "run_task",
+      arguments: { task: "fail predictably" },
+    });
+    const jobId = (run.structuredContent as any).jobId as string;
+    const job = pool.forJob(jobId)!.sessions.getJob(jobId)!;
+    job.status = "error";
+    job.error = "terminal failure from test runtime";
+    const result = await client.callTool({ name: "get_task", arguments: { taskId: jobId } });
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({ taskId: jobId, status: "error" });
+    const legacyResult = await rpc(url, "tools/call", {
+      name: "get_task",
+      arguments: { taskId: jobId },
+    });
+    expect(legacyResult.result).toMatchObject({ isError: true });
   });
 });
 
@@ -245,14 +490,18 @@ describe("check_task model-facing text carries the resume cursor", () => {
   }
 
   it("a running response tells the caller which knownLogCount to send back", () => {
-    expect(checkTaskText(runningSnapshot(), false)).toBe("Still running. Poll again with knownLogCount=17.");
+    expect(checkTaskText(runningSnapshot(), false)).toBe(
+      "Still running. Poll again with knownLogCount=17.",
+    );
   });
 
   it("a late-recovery response carries the cursor too", () => {
     const snapshot = runningSnapshot({
       recovery: { reason: "no_live_final_text", startedAt: 1000, idleTimeoutMs: 1, hardCapMs: 2 },
     });
-    expect(checkTaskText(snapshot, false)).toBe("Recovering late transcript final text. Poll again with knownLogCount=17.");
+    expect(checkTaskText(snapshot, false)).toBe(
+      "Recovering late transcript final text. Poll again with knownLogCount=17.",
+    );
   });
 
   /**
@@ -277,7 +526,9 @@ describe("check_task model-facing text carries the resume cursor", () => {
         false,
       );
       expect(text, state).toContain("example-runtime/thr-abc123");
-      expect(text, state).toContain(state === "needs_permission" ? "waiting for permission" : "waiting for input");
+      expect(text, state).toContain(
+        state === "needs_permission" ? "waiting for permission" : "waiting for input",
+      );
       expect(text, state).toContain("Polling cannot advance it");
       expect(text, state).not.toContain("Still running.");
       // The resume cursor still has to survive: the caller does poll again,
@@ -304,7 +555,10 @@ describe("check_task model-facing text carries the resume cursor", () => {
   });
 
   it("a terminal response is the result itself — no polling instructions appended", () => {
-    const text = checkTaskText(runningSnapshot({ status: "completed", summary: "the answer" }), true);
+    const text = checkTaskText(
+      runningSnapshot({ status: "completed", summary: "the answer" }),
+      true,
+    );
     expect(text).toBe("the answer");
     expect(text).not.toContain("knownLogCount");
   });
@@ -345,9 +599,12 @@ describe("check_task model-facing text carries the resume cursor", () => {
       status: "needs_input" as const,
       delegatedTurnId: "job-0",
     };
-    expect(checkTaskText(runningSnapshot({ status: "completed", summary: "the answer", agentSession: attachment }), true)).toBe(
-      "the answer",
-    );
+    expect(
+      checkTaskText(
+        runningSnapshot({ status: "completed", summary: "the answer", agentSession: attachment }),
+        true,
+      ),
+    ).toBe("the answer");
     expect(
       checkTaskText(
         runningSnapshot({
@@ -395,16 +652,24 @@ describe("production entrypoint wiring — FleetAdapter", () => {
     const jobStoreDir = mkdtempSync(join(tmpdir(), "clawconnect-jobstore-"));
     tmpDirs.push(jobStoreDir);
     const runtimes = new AgentSessionRuntimeRegistry();
-    runtimes.register({ id: "example-runtime", provider: "anthropic-claude-code", inspect: async () => ({ state: "running" }) });
+    runtimes.register({
+      id: "example-runtime",
+      provider: "anthropic-claude-code",
+      inspect: async () => ({ state: "running" }),
+    });
 
     const { pool } = createApp(fakeRegistry(), { jobStoreDir, agentSessionRuntimes: runtimes });
-    expect(pool.forAgent("test-agent").sessions.hasAgentSessionRuntime("example-runtime")).toBe(true);
+    expect(pool.forAgent("test-agent").sessions.hasAgentSessionRuntime("example-runtime")).toBe(
+      true,
+    );
   });
 
   it("createApp leaves claude-fleet the only reachable runtime when no registry is supplied", () => {
     const jobStoreDir = mkdtempSync(join(tmpdir(), "clawconnect-jobstore-"));
     tmpDirs.push(jobStoreDir);
     const { pool } = createApp(fakeRegistry(), { jobStoreDir });
-    expect(pool.forAgent("test-agent").sessions.hasAgentSessionRuntime("example-runtime")).toBe(false);
+    expect(pool.forAgent("test-agent").sessions.hasAgentSessionRuntime("example-runtime")).toBe(
+      false,
+    );
   });
 });
