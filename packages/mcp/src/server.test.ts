@@ -99,6 +99,11 @@ describe("generic MCP 2026-07-28 handler-fetch coverage", () => {
     expect(tools.map((tool) => tool.name)).toEqual(
       expect.arrayContaining(["run_task", "check_task", "get_task", "list_tasks"]),
     );
+    const info = await client.callTool({ name: "get_mcp_info", arguments: {} });
+    expect(info.structuredContent).toMatchObject({
+      protocolEra: "modern",
+      protocolVersion: "2026-07-28",
+    });
     await client.close();
     await handler.close();
   });
@@ -158,6 +163,15 @@ describe("shipped dual-era stdio router", () => {
 });
 
 describe("generic MCP tools/list contract", () => {
+  it("reports the legacy protocol selected by initialize-era clients", async () => {
+    const client = await connectedClient();
+    const info = await client.callTool({ name: "get_mcp_info", arguments: {} });
+    expect(info.structuredContent).toMatchObject({
+      protocolEra: "legacy",
+      protocolVersion: "2025-06-18",
+    });
+  });
+
   it("exposes the unversioned core surface — run_task/check_task/get_task/list_tasks, no _v2 names anywhere", async () => {
     const client = await connectedClient();
     const { tools } = await client.listTools();

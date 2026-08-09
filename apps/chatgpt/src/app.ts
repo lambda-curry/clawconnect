@@ -217,6 +217,21 @@ export function createApp(registry: AgentRegistry, opts: CreateAppOptions = {}):
    * distinguishable. Otherwise it's the generic "ClawConnect".
    */
   const DEFAULT_SERVER_NAME = "ClawConnect";
+  const LEGACY_PROTOCOL_VERSION = "2025-06-18";
+  const MODERN_PROTOCOL_VERSION = "2026-07-28";
+
+  function protocolInfo(protocolEra: "legacy" | "modern", protocolVersion: string) {
+    const payload = {
+      protocolEra,
+      protocolVersion,
+      serverName: DEFAULT_SERVER_NAME,
+      serverVersion: "0.1.0",
+    };
+    return {
+      content: [{ type: "text" as const, text: JSON.stringify(payload) }],
+      structuredContent: payload,
+    };
+  }
 
   interface Scope {
     allowedIds: string[];
@@ -510,6 +525,19 @@ completed_no_summary and error are terminal — report them. Rarely, a long tool
         inputSchema: { type: "object", properties: {} },
         annotations: {
           title: "List Collections",
+          readOnlyHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: false,
+        },
+      },
+      {
+        name: "get_mcp_info",
+        description:
+          "Report the MCP protocol era and negotiated protocol version used by this connection. Use this when the user asks which MCP version ChatGPT is using.",
+        inputSchema: { type: "object", properties: {} },
+        annotations: {
+          title: "Get MCP Info",
           readOnlyHint: true,
           destructiveHint: false,
           idempotentHint: true,
@@ -1037,6 +1065,8 @@ At detail levels that include it, \`updates\` is a bounded recent-activity windo
       : new URL("http://localhost/mcp");
     const scope = resolveScope(requestUrl);
     const identity = (ctx.authInfo?.extra?.identity as Identity | undefined) ?? { user: null };
+    const negotiatedProtocolVersion =
+      ctx.requestInfo?.headers.get("MCP-Protocol-Version") ?? MODERN_PROTOCOL_VERSION;
     const extensions = buildExtensionsCapability(WIDGET_ENABLED);
     const server = new McpServer(
       {
@@ -1061,6 +1091,8 @@ At detail levels that include it, \`updates\` is a bounded recent-activity windo
           _meta: tool._meta,
         },
         async (args, ctx) => {
+          if (tool.name === "get_mcp_info")
+            return protocolInfo("modern", negotiatedProtocolVersion);
           const result = await invokeTool(tool.name, args, scope, identity, ctx.mcpReq.signal);
           return (
             result ?? {
@@ -1154,7 +1186,11 @@ At detail levels that include it, \`updates\` is a bounded recent-activity windo
       // A per-request protocol envelope is the 2026-07-28 era claim. Route
       // those requests to the SDK v2 entry; claim-less initialize-era traffic
       // stays on the verified legacy router below until legacy clients retire.
-      if (!(await isLegacyRequest(webRequest))) {
+      const legacyRequest = await isLegacyRequest(webRequest);
+      if (!legacyRequest) {
+        console.log(
+          `[mcp] ${req.method} era=modern protocol=${String(req.headers["mcp-protocol-version"] ?? MODERN_PROTOCOL_VERSION)} method=${String(req.headers["mcp-method"] ?? "unknown")}`,
+        );
         const webResponse = await modernMcpHandler.fetch(webRequest, {
           authInfo: authInfoFor(identity),
         });
@@ -1196,7 +1232,9 @@ At detail levels that include it, \`updates\` is a bounded recent-activity windo
         res.end(JSON.stringify({ jsonrpc: "2.0", id: msg.id ?? null, error: { code, message } }));
       };
 
-      console.log(`[mcp] ${req.method} ${msg.method}`);
+      console.log(
+        `[mcp] ${req.method} era=legacy protocol=${LEGACY_PROTOCOL_VERSION} method=${msg.method}`,
+      );
 
       if (msg.method === "initialize") {
         const requestedProtocolVersion = (msg.params as { protocolVersion?: unknown } | undefined)
@@ -1256,7 +1294,9 @@ At detail levels that include it, \`updates\` is a bounded recent-activity windo
           arguments: Record<string, string>;
         };
 
-        if (name === "run_task") {
+        if (name === "get_mcp_info") {
+          respond(protocolInfo("legacy", LEGACY_PROTOCOL_VERSION));
+        } else if (name === "run_task") {
           const requestedAgent =
             typeof args.agent === "string" && args.agent ? args.agent : scope.defaultId;
           if (!scope.allowedIds.includes(requestedAgent)) {

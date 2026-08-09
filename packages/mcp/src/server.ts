@@ -286,6 +286,30 @@ export function createMcpServer(config: CreateMcpServerOptions) {
   const agentDescription = `OpenClaw agent to dispatch to: ${agentBlurbs}. Default: ${defaultAgent}. See list_agents for full routing guidance.`;
 
   server.registerTool(
+    "get_mcp_info",
+    {
+      description:
+        "Report the MCP protocol era and negotiated protocol version used by this connection.",
+      inputSchema: z.object({}),
+      annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+      _meta: provider.toolMeta?.get_mcp_info,
+    },
+    async (_args, ctx) => {
+      const protocolEra = ctx.mcpReq.envelope === undefined ? "legacy" : "modern";
+      const payload = {
+        protocolEra,
+        protocolVersion: protocolEra === "modern" ? "2026-07-28" : "2025-06-18",
+        serverName: "ClawConnect",
+        serverVersion: "0.1.0",
+      };
+      return {
+        content: [{ type: "text", text: JSON.stringify(payload) }],
+        structuredContent: payload,
+      };
+    },
+  );
+
+  server.registerTool(
     "run_task",
     {
       description: `Delegate work to an OpenClaw agent. Returns a jobId and sessionKey immediately; the task runs in the background.

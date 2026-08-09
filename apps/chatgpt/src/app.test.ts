@@ -311,6 +311,25 @@ describe("MCP 2026-07-28 over the SDK v2 handler", () => {
     expect(runTaskMeta).not.toHaveProperty("openai/outputTemplate");
   });
 
+  it("lets ChatGPT report the protocol version for either HTTP era", async () => {
+    const { url } = await startTestApp({ widgetEnabled: false });
+    const modern = await modernClient(url);
+    const modernInfo = await modern.callTool({ name: "get_mcp_info", arguments: {} });
+    expect(modernInfo.structuredContent).toMatchObject({
+      protocolEra: "modern",
+      protocolVersion: "2026-07-28",
+    });
+
+    const legacyInfo = await rpc(url, "tools/call", {
+      name: "get_mcp_info",
+      arguments: {},
+    });
+    expect(legacyInfo.result.structuredContent).toMatchObject({
+      protocolEra: "legacy",
+      protocolVersion: "2025-06-18",
+    });
+  });
+
   it("emits modern standard headers and a per-request metadata envelope", async () => {
     const seen: Array<{ headers: Headers; body: any }> = [];
     const captureFetch: typeof fetch = async (input, init) => {
