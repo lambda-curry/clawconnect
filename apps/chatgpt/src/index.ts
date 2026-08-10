@@ -15,26 +15,36 @@ process.on("uncaughtException", (err) => {
   console.error("[connector] uncaughtException (kept alive):", err);
 });
 
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { execFileSync } from "node:child_process";
+import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadAgentRegistry, loadAgentSessionRuntimes } from "@clawconnect/core";
 import type { AgentRegistry } from "@clawconnect/core";
 import { createApp } from "./app.js";
 
-// Build identity, written next to this file by scripts/stamp-build.mjs at
-// build time (see get_connection_info). An explicit CLAWCONNECT_BUILD_SHA
-// still wins, for deployments that build elsewhere and ship the artifact.
+// Build identity, resolved at BOOT (see get_connection_info).
+//
+// This was first written by a build step, which the build cache promptly
+// defeated: the stamp script's own inputs had not changed, so a cache hit
+// replayed the previous commit's SHA into an artifact built from a newer one
+// — a build identity confidently reporting the wrong commit, which is the
+// exact failure it exists to prevent and worse than reporting nothing.
+//
+// Reading it at process start cannot be cached. What it reports is the commit
+// the deployed checkout is on, which for a build-then-restart deploy is the
+// code now running. An explicit CLAWCONNECT_BUILD_SHA still wins, for
+// deployments that ship an artifact with no repository beside it; with
+// neither, get_connection_info reports "unknown" rather than guessing.
 if (!process.env.CLAWCONNECT_BUILD_SHA) {
   try {
-    const sha = readFileSync(
-      join(dirname(fileURLToPath(import.meta.url)), "build-sha.txt"),
-      "utf8",
-    ).trim();
-    if (sha) process.env.CLAWCONNECT_BUILD_SHA = sha;
+    process.env.CLAWCONNECT_BUILD_SHA = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: dirname(fileURLToPath(import.meta.url)),
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
   } catch {
-    // No stamp (running from source, or an artifact built without git) —
-    // get_connection_info reports "unknown", which is the honest answer.
+    // No repository to ask — an installed package or a container built from a
+    // tarball. "unknown" is the honest answer.
   }
 }
 
