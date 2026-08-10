@@ -978,6 +978,75 @@ export function shouldRenderImmediately(prevGroup, nextGroup) {
   return prevGroup == null || prevGroup !== nextGroup;
 }
 
+/**
+ * Status groups that should nudge the host conversation once when a mounted
+ * card first observes the transition. First sight of a task only seeds
+ * priorGroups — waking on hydrate would spam an already-finished card.
+ *
+ * @type {ReadonlySet<TaskGroup>}
+ */
+export const FOLLOW_UP_WAKE_GROUPS = new Set(["needs_attention", "completed", "failed"]);
+
+/** @param {string} taskId @param {TaskGroup} group */
+export function followUpWakeKey(taskId, group) {
+  return `${taskId}:${group}`;
+}
+
+/**
+ * @param {TaskGroup} group
+ * @param {{ taskId: string, sessionKey?: string }} task
+ */
+export function followUpWakePrompt(group, task) {
+  const id = task.taskId;
+  const session = task.sessionKey ? ` (sessionKey: ${task.sessionKey})` : "";
+  if (group === "needs_attention") {
+    return `ClawConnect: task ${id} needs attention. Use check_task with this jobId to see what it is waiting on${session}.`;
+  }
+  if (group === "completed") {
+    return `ClawConnect: task ${id} completed. Use check_task with this jobId to report the result${session}.`;
+  }
+  return `ClawConnect: task ${id} failed. Use check_task with this jobId to report what went wrong${session}.`;
+}
+
+/**
+ * Diff this poll's tasks against the groups last seen while mounted.
+ * Returns wake events for newly entered wake groups; always returns the
+ * updated priorGroups map to persist (including first-sight seeds).
+ *
+ * @param {{
+ *   tasks: WidgetTask[],
+ *   priorGroups: Map<string, TaskGroup>,
+ *   alreadyWoken: Set<string>,
+ * }} args
+ * @returns {{
+ *   wakes: { taskId: string, sessionKey: string, group: TaskGroup, key: string, prompt: string }[],
+ *   priorGroups: Map<string, TaskGroup>,
+ * }}
+ */
+export function collectFollowUpWakes({ tasks, priorGroups, alreadyWoken }) {
+  const wakes = [];
+  const nextPrior = new Map(priorGroups);
+  for (const task of tasks) {
+    const taskId = task.taskId ?? task.jobId;
+    if (!taskId) continue;
+    const group = groupStatus(task.status);
+    const prev = priorGroups.get(taskId);
+    nextPrior.set(taskId, group);
+    if (prev === undefined || prev === group) continue;
+    if (!FOLLOW_UP_WAKE_GROUPS.has(group)) continue;
+    const key = followUpWakeKey(taskId, group);
+    if (alreadyWoken.has(key)) continue;
+    wakes.push({
+      taskId,
+      sessionKey: task.sessionKey,
+      group,
+      key,
+      prompt: followUpWakePrompt(group, { taskId, sessionKey: task.sessionKey }),
+    });
+  }
+  return { wakes, priorGroups: nextPrior };
+}
+
 export function nextCardTab(tabs, current, key) {
   const index = Math.max(0, tabs.indexOf(current));
   if (key === "ArrowRight" || key === "ArrowDown") return tabs[(index + 1) % tabs.length];

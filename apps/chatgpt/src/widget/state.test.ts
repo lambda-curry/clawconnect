@@ -34,6 +34,7 @@ import {
   mergeRingBuffer,
   RING_BUFFER_MAX,
   shouldRenderImmediately,
+  collectFollowUpWakes,
   deriveDelegationIdentity,
   deriveUpstreamEvidence,
   normalizeDiagnostics,
@@ -842,6 +843,74 @@ describe("shouldRenderImmediately — lifecycle/terminal changes render now, cos
 
   it("the same group as last render is not immediate — cosmetic activity may debounce", () => {
     expect(shouldRenderImmediately("active", "active")).toBe(false);
+  });
+});
+
+describe("collectFollowUpWakes — once-per-transition host nudges", () => {
+  it("seeds first sight without waking (hydrate of an already-terminal card stays quiet)", () => {
+    const priorGroups = new Map();
+    const alreadyWoken = new Set();
+    const first = collectFollowUpWakes({
+      tasks: [task({ taskId: "t1", status: "completed" })],
+      priorGroups,
+      alreadyWoken,
+    });
+    expect(first.wakes).toEqual([]);
+    expect(first.priorGroups.get("t1")).toBe("completed");
+  });
+
+  it("wakes once when a seeded task enters needs_attention, completed, or failed", () => {
+    const priorGroups = new Map([["t1", "active"]]);
+    const alreadyWoken = new Set();
+    for (const [status, group] of [
+      ["needs-human", "needs_attention"],
+      ["completed", "completed"],
+      ["failed", "failed"],
+    ]) {
+      const { wakes } = collectFollowUpWakes({
+        tasks: [task({ taskId: "t1", sessionKey: "s1", status })],
+        priorGroups: new Map(priorGroups),
+        alreadyWoken,
+      });
+      expect(wakes).toHaveLength(1);
+      expect(wakes[0]?.group).toBe(group);
+      expect(wakes[0]?.prompt).toContain("check_task");
+      expect(wakes[0]?.prompt).toContain("t1");
+      expect(wakes[0]?.prompt).toContain("sessionKey: s1");
+    }
+  });
+
+  it("does not re-wake the same taskId+group, and ignores same-group status renames", () => {
+    const priorGroups = new Map([["t1", "active"]]);
+    const alreadyWoken = new Set();
+    const intoNeeds = collectFollowUpWakes({
+      tasks: [task({ taskId: "t1", status: "needs-human" })],
+      priorGroups,
+      alreadyWoken,
+    });
+    expect(intoNeeds.wakes).toHaveLength(1);
+    alreadyWoken.add(intoNeeds.wakes[0]!.key);
+    const stillNeeds = collectFollowUpWakes({
+      tasks: [task({ taskId: "t1", status: "blocked" })],
+      priorGroups: intoNeeds.priorGroups,
+      alreadyWoken,
+    });
+    expect(stillNeeds.wakes).toEqual([]);
+    const replay = collectFollowUpWakes({
+      tasks: [task({ taskId: "t1", status: "needs-human" })],
+      priorGroups: new Map([["t1", "active"]]),
+      alreadyWoken,
+    });
+    expect(replay.wakes).toEqual([]);
+  });
+
+  it("does not wake on active-only transitions", () => {
+    const { wakes } = collectFollowUpWakes({
+      tasks: [task({ taskId: "t1", status: "queued" })],
+      priorGroups: new Map([["t1", "active"]]),
+      alreadyWoken: new Set(),
+    });
+    expect(wakes).toEqual([]);
   });
 });
 

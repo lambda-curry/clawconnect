@@ -182,8 +182,8 @@ __STATE_MODULE__
 
 // ── Bridge: window.openai primary (ChatGPT's actual implemented surface),
 // a minimal hand-rolled MCP-Apps postMessage fallback for a spec-compliant
-// host that doesn't implement window.openai. Read-only/navigation only —
-// no ui/message completion, no mutation calls, ever.
+// Read-only/navigation only — no mutation tool calls. Lifecycle wakes use
+// sendFollowUpMessage (needs_attention / completed / failed) once per transition.
 const bridge = (() => {
   let mcpAppsRequestId = 0;
   const pending = new Map();
@@ -346,6 +346,10 @@ const app = {
   cardTabByTask: new Map(),
   lastRenderedGroup: null, // status group as of the last render — drives shouldRenderImmediately()
   renderTimer: null, // pending debounced render, for cosmetic-only updates
+  // Once-per-transition host wakes (needs_attention / completed / failed).
+  // First sight of a taskId only seeds followUpPriorGroups — see collectFollowUpWakes.
+  followUpPriorGroups: new Map(), // taskId -> TaskGroup
+  wokenFollowUps: new Set(), // `${taskId}:${group}` already sent
 };
 
 /**
@@ -507,6 +511,7 @@ async function refresh() {
       app.timelineFor = null;
     }
     app.pollFailures = 0;
+    maybeWakeFollowUps();
   } catch {
     if (!isCurrent()) return;
     app.pollFailures += 1;
@@ -680,9 +685,27 @@ async function toggleExpand(sessionKey) {
   render();
 }
 
+/**
+ * Nudge ChatGPT when a visible task newly enters needs_attention / completed /
+ * failed. Only works while this iframe is mounted; the server cannot wake the
+ * conversation. Deduped per taskId+group for the life of the mount.
+ */
+function maybeWakeFollowUps() {
+  const { wakes, priorGroups } = collectFollowUpWakes({
+    tasks: compactVisibleTasks(),
+    priorGroups: app.followUpPriorGroups,
+    alreadyWoken: app.wokenFollowUps,
+  });
+  app.followUpPriorGroups = priorGroups;
+  for (const wake of wakes) {
+    app.wokenFollowUps.add(wake.key);
+    window.openai?.sendFollowUpMessage?.({ prompt: wake.prompt });
+  }
+}
+
 function composeFollowUp(sessionKey, text) {
-  // Actions are messages, never mutations — the widget never calls a
-  // mutating tool itself; it hands a prompt back to the assistant.
+  // Explicit user actions are messages, never mutations — the widget never
+  // calls a mutating tool itself; it hands a prompt back to the assistant.
   window.openai?.sendFollowUpMessage?.({ prompt: `${text} (sessionKey: ${sessionKey})` });
 }
 

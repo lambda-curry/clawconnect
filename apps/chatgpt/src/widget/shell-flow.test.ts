@@ -164,6 +164,10 @@ function createHost(opts: { mountedOnBoot?: boolean; knownSessionKeys?: string[]
     setWidgetState(value: unknown) {
       host.widgetState = value as typeof host.widgetState;
     },
+    followUps: [] as { prompt: string }[],
+    sendFollowUpMessage(args: { prompt: string }) {
+      host.followUps.push(args);
+    },
     // Test control, not part of window.openai's real surface.
     pushEvent(text: string) {
       cursor += 1;
@@ -418,6 +422,47 @@ describe("render cadence: lifecycle/terminal changes are immediate, cosmetic-onl
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("follow-up wake on needs_attention / completed / failed", () => {
+  it("seeds on first poll without waking, then wakes once when status enters a wake group", async () => {
+    vi.useFakeTimers();
+    try {
+      const world = { tasks: [{ taskId: TASK_ID, jobId: TASK_ID, sessionKey: SESSION_KEY, agent: "assistant", status: "running", lastEventAt: 0 }] };
+      const host = createHost({ mountedOnBoot: true, world });
+      mount(host);
+      await settle();
+      expect(host.followUps).toHaveLength(0);
+
+      host.completeTask("needs-human");
+      await vi.advanceTimersByTimeAsync(3_000);
+      await settle();
+      expect(host.followUps).toHaveLength(1);
+      expect(host.followUps[0]?.prompt).toContain("needs attention");
+      expect(host.followUps[0]?.prompt).toContain(TASK_ID);
+
+      // Still needs-human on the next poll — no second wake.
+      await vi.advanceTimersByTimeAsync(10_000);
+      await settle();
+      expect(host.followUps).toHaveLength(1);
+
+      host.completeTask("completed");
+      await vi.advanceTimersByTimeAsync(10_000);
+      await settle();
+      expect(host.followUps).toHaveLength(2);
+      expect(host.followUps[1]?.prompt).toContain("completed");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not wake when mounting onto an already-completed task", async () => {
+    const world = { tasks: [{ taskId: TASK_ID, jobId: TASK_ID, sessionKey: SESSION_KEY, agent: "assistant", status: "completed", lastEventAt: 0 }] };
+    const host = createHost({ mountedOnBoot: true, world });
+    mount(host);
+    await settle();
+    expect(host.followUps).toHaveLength(0);
   });
 });
 
