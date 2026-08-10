@@ -21,6 +21,13 @@ function toolMessage(sequence: number, name: string) {
   };
 }
 
+function legacyToolMessage(name: string) {
+  return {
+    role: "assistant",
+    content: [{ type: "toolCall", id: `legacy-${name}`, name, arguments: { command: "legacy step" } }],
+  };
+}
+
 function sessionMessage(sequence: number, name: string) {
   return JSON.stringify({
     type: "event",
@@ -120,7 +127,11 @@ describe("OpenClawGateway resumable transcript", () => {
           history.push(toolMessage(1, "Read"));
           socket.send(sessionMessage(1, "Read"));
           setTimeout(() => {
-            history.push(toolMessage(2, "Bash"), toolMessage(3, "Edit"));
+            history.push(
+              toolMessage(2, "Bash"),
+              toolMessage(3, "Edit"),
+              legacyToolMessage("Grep"),
+            );
             socket.terminate();
           }, 20);
         }
@@ -151,6 +162,7 @@ describe("OpenClawGateway resumable transcript", () => {
       "Read",
       "Bash",
       "Edit",
+      "Grep",
       "Write",
     ]);
     expect(subscribeCount).toBe(2);

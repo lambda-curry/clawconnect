@@ -49,6 +49,9 @@ export function runTask(pool: GatewayPool, input: TaskInput): RunTaskResult {
     durationMs: Date.now() - start,
     duplicateJob: job.errorInfo?.message === "session busy",
   });
+  if (job.status === "error") {
+    throw new Error(job.error ?? job.errorInfo?.message ?? "Task submission failed");
+  }
   return {
     jobId: job.jobId,
     taskId: job.jobId,

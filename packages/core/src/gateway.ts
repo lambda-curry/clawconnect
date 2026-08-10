@@ -187,6 +187,15 @@ function transcriptMessageIdentity(message: Record<string, unknown>): {
   };
 }
 
+/**
+ * Older history rows can predate durable message metadata. Their content hash
+ * is weaker than the upstream identity, but still prevents a catch-up read
+ * from projecting the same legacy tool row on every replay pass.
+ */
+function transcriptMessageFallbackId(message: Record<string, unknown>): string {
+  return `legacy:${createHash("sha256").update(JSON.stringify(message)).digest("hex")}`;
+}
+
 /** Project one durable transcript row into the connector's progress events. */
 export function transcriptMessageEvents(message: Record<string, unknown>): GatewayEvent[] {
   const role = message.role;
@@ -684,7 +693,7 @@ export class OpenClawGateway {
     onEvent: ((entry: GatewayEvent) => void) | undefined,
     onState: ((update: TranscriptTransportUpdate) => void) | undefined,
     resumeAfterSequence?: number,
-  ): Promise<void> {
+  ): Promise<() => void> {
     this.stopTranscriptWatch(sessionKey);
     let stopped = false;
     let lastSeenSequence = resumeAfterSequence ?? 0;
@@ -705,7 +714,7 @@ export class OpenClawGateway {
     const accept = (message: Record<string, unknown>, payload?: SessionMessagePayload) => {
       const identity = transcriptMessageIdentity(message);
       const sequence = payload?.messageSeq ?? identity.sequence;
-      const id = payload?.messageId ?? identity.id;
+      const id = payload?.messageId ?? identity.id ?? transcriptMessageFallbackId(message);
       if (sequence !== undefined && sequence <= lastSeenSequence) return;
       if (id && seenIds.has(id)) return;
       if (id) seenIds.add(id);
@@ -724,7 +733,7 @@ export class OpenClawGateway {
       if (baseline) {
         for (const message of messages) {
           const identity = transcriptMessageIdentity(message);
-          if (identity.id) seenIds.add(identity.id);
+          seenIds.add(identity.id ?? transcriptMessageFallbackId(message));
           if (identity.sequence !== undefined) {
             lastSeenSequence = Math.max(lastSeenSequence, identity.sequence);
           }
@@ -807,6 +816,7 @@ export class OpenClawGateway {
     });
 
     await enqueueRecovery(resumeAfterSequence === undefined);
+    return stop;
   }
 
   resumeTranscript(
@@ -815,7 +825,9 @@ export class OpenClawGateway {
     onEvent: ((entry: GatewayEvent) => void) | undefined,
     onState: ((update: TranscriptTransportUpdate) => void) | undefined,
   ): Promise<void> {
-    return this.startTranscriptWatch(sessionKey, onEvent, onState, resumeAfterSequence);
+    return this.startTranscriptWatch(sessionKey, onEvent, onState, resumeAfterSequence).then(
+      () => undefined,
+    );
   }
 
   stopTranscriptWatch(sessionKey: string): void {
@@ -848,7 +860,12 @@ export class OpenClawGateway {
           `[openclaw-gateway] chat.send acknowledgement lost; retrying the same idempotency key ` +
             `(attempt ${attempt + 1}/3)`,
         );
-        await this.connect();
+        try {
+          await this.connect();
+        } catch {
+          // sendRpc reconnects on the next attempt; keep the acknowledgement
+          // failure as the retry's authoritative error in the meantime.
+        }
       }
     }
     throw lastError ?? new Error("chat.send failed without an error");
@@ -1188,7 +1205,11 @@ export class OpenClawGateway {
       );
     }
 
-    await this.startTranscriptWatch(sessionKey, onEvent, onTranscriptState);
+    const stopThisTranscriptWatch = await this.startTranscriptWatch(
+      sessionKey,
+      onEvent,
+      onTranscriptState,
+    );
 
     const idempotencyKey = randomUUID();
 
@@ -1244,7 +1265,7 @@ export class OpenClawGateway {
         this.streamCloseListeners.delete(onStreamClosed);
         this.subscribers.delete(subId);
         this.subscribers.delete(agentSubId);
-        if (stopTranscript) this.stopTranscriptWatch(sessionKey);
+        if (stopTranscript) stopThisTranscriptWatch();
       };
 
       /**
