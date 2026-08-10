@@ -63,6 +63,7 @@ export function runTask(pool: GatewayPool, input: TaskInput): RunTaskResult {
 function mapTaskStatus(status: string): TaskSummary["status"] {
   if (status === "running") return "running";
   if (status === "completed" || status === "completed_no_summary") return "done";
+  if (status === "cancelled") return "cancelled";
   if (status === "needs-human") return "needs-human";
   if (status === "blocked") return "blocked";
   if (status === "queued") return "queued";
@@ -84,6 +85,7 @@ function deriveTaskStatus(
   // live, actionable block goes unnoticed for as long as anyone keeps polling.
   if (blocked) return "needs-human";
   if (job.status === "running") return "running";
+  if (job.status === "cancelled") return "cancelled";
   // The same fact for a turn that ENDED with nothing to show because of the
   // block. Checked before the terminal mapping below, and only for that one
   // terminalReason, so every ordinary terminal job keeps its existing status.
@@ -347,6 +349,36 @@ export function getTaskPrompt(
   const job = entry.sessions.resolveJob(opts.jobId, opts.sessionKey);
   if (!job) return { found: false };
   return { found: true, prompt: job.prompt };
+}
+
+/**
+ * cancel_task: ask the agent to stop the turn a job is running.
+ *
+ * Deliberately reports what was REQUESTED, not what was achieved. The stop
+ * lands as an upstream abort a few seconds later and the job settles itself
+ * (see SessionManager.requestCancel); claiming the work had stopped at the
+ * moment of asking would be a promise this layer cannot keep.
+ */
+export async function cancelTask(
+  pool: GatewayPool,
+  opts: { jobId?: string; sessionKey?: string; agent?: string },
+): Promise<{ found: boolean; alreadyTerminal?: boolean; status?: string; jobId?: string }> {
+  const start = Date.now();
+  const entry = resolvePoolEntry(pool, opts);
+  if (!entry) {
+    recordTelemetry({ tool: "cancel_task", jobId: opts.jobId, sessionKey: opts.sessionKey, status: "not_found", durationMs: Date.now() - start });
+    return { found: false };
+  }
+  const result = await entry.sessions.requestCancel(opts.jobId, opts.sessionKey);
+  recordTelemetry({
+    tool: "cancel_task",
+    jobId: result.jobId ?? opts.jobId,
+    sessionKey: opts.sessionKey,
+    agent: entry.agent.id,
+    status: result.found ? (result.alreadyTerminal ? "already_terminal" : "requested") : "not_found",
+    durationMs: Date.now() - start,
+  });
+  return result;
 }
 
 /**

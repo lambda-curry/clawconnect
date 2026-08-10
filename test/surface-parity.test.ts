@@ -136,12 +136,19 @@ describe("read/write separation is stated in prose, not only in annotations", ()
     expect(runTask?.description).not.toMatch(/only tool|starts anything|destructive/i);
     expect(runTask?.annotations).toMatchObject({ destructiveHint: false });
     expect(runTask?.annotations).toMatchObject({ readOnlyHint: false });
-    // Exactly one tool mutates anything. A second one appearing here without
-    // a deliberate decision is the thing worth failing on.
+    // Two tools mutate: run_task starts work, cancel_task stops it. A THIRD
+    // appearing here without a deliberate decision is the thing worth failing
+    // on — the read/write split is the whole safety story of this surface.
     const mutating = tools.filter(
       (t) => (t.annotations as { readOnlyHint?: boolean } | undefined)?.readOnlyHint !== true,
     );
-    expect(mutating.map((t) => t.name)).toEqual(["run_task"]);
+    expect(mutating.map((t) => t.name).sort()).toEqual(["cancel_task", "run_task"]);
+    // Neither claims to be destructive: one queues work, the other stops it.
+    // Nothing already produced is deleted by either.
+    for (const tool of mutating) {
+      expect(tool.annotations, `${tool.name}`).toMatchObject({ destructiveHint: false });
+      expect(tool.description, `${tool.name}`).not.toMatch(/^READ ONLY:/);
+    }
   });
 });
 

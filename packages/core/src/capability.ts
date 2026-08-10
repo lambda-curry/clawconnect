@@ -10,6 +10,7 @@ import {
 } from "./structured-content.ts";
 import {
   TASK_SUMMARY_PREVIEW_MAX,
+  cancelTask,
   checkTask,
   getSession,
   getTask,
@@ -205,7 +206,7 @@ const TASK_SUMMARY_SCHEMA: Record<string, unknown> = {
     jobId: { type: "string" },
     sessionKey: { type: "string" },
     agent: { type: "string" },
-    status: { type: "string", enum: ["queued", "running", "done", "failed", "blocked", "needs-human"] },
+    status: { type: "string", enum: ["queued", "running", "done", "failed", "blocked", "needs-human", "cancelled"] },
     startedAt: { type: "number" },
     lastEventAt: { type: "number" },
     summary: { type: "string" },
@@ -352,6 +353,72 @@ Pass a sessionKey from a previous task to continue the same thread.`,
         } catch (err) {
           return errorResult(`Failed to submit: ${(err as Error).message}`);
         }
+      },
+    },
+
+    {
+      name: "cancel_task",
+      title: "Cancel Task",
+      mutates: true,
+      description: `Stop a running task. Sends a stop to the agent working on it, which aborts the turn in progress.
+
+Only affects the one task you name — it does not touch other tasks, other sessions, or anything the agent already finished and wrote down. Work already completed before the stop lands is not undone.
+
+Best effort, and it reports what it ASKED for, not what happened: the stop takes a few seconds to land upstream. Call get_task afterwards to see whether the task actually reached status "cancelled". A task that has already finished is left alone and reported as already terminal.`,
+      inputSchema: {
+        type: "object",
+        properties: {
+          taskId: { type: "string", description: "Task identifier from run_task. Same value as jobId." },
+          sessionKey: { type: "string", description: "Alternative to taskId — cancels that session's latest task." },
+        },
+      },
+      outputSchema: {
+        type: "object",
+        additionalProperties: true,
+        properties: {
+          found: { type: "boolean" },
+          requested: { type: "boolean" },
+          alreadyTerminal: { type: "boolean" },
+          status: { type: "string" },
+          jobId: { type: "string" },
+        },
+        required: ["found"],
+      },
+      annotations: {
+        title: "Cancel Task",
+        readOnlyHint: false,
+        // It stops work rather than deleting anything: nothing already
+        // produced is lost, and a stopped task leaves its logs, artifacts and
+        // partial output intact and readable.
+        destructiveHint: false,
+        // Asking twice is the same as asking once — the second call finds the
+        // task already terminal and does nothing.
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+      handler: async (args) => {
+        const taskId = str(args.taskId);
+        const sessionKey = str(args.sessionKey);
+        if (!taskId && !sessionKey) return errorResult("Pass taskId (or sessionKey) to say which task to stop.");
+        const result = await cancelTask(pool, { jobId: taskId, sessionKey });
+        if (!result.found) {
+          return {
+            text: "Task not found — nothing to cancel. The server may have restarted.",
+            structuredContent: { found: false },
+            isError: true,
+          };
+        }
+        if (result.alreadyTerminal) {
+          return jsonResult({
+            ...result,
+            requested: false,
+            note: `Task already finished with status "${result.status}" — nothing to stop.`,
+          });
+        }
+        return {
+          structuredContent: { ...result, requested: true },
+          text: `Stop sent. It takes a few seconds to land — check get_task for status "cancelled" to confirm it stopped.`,
+        };
       },
     },
 
@@ -541,7 +608,7 @@ At detail levels that include it, \`updates\` is a bounded recent-activity windo
             type: "string",
             enum: ["active", "all"],
             description:
-              '"active" returns only non-terminal tasks (queued, running, blocked, needs-human); omit to include terminal ones too.',
+              '"active" returns only non-terminal tasks (queued, running, blocked, needs-human); omit to include terminal ones too. Cancelled tasks are terminal.',
           },
         },
       },

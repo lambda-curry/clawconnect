@@ -318,6 +318,17 @@ export class SessionManager {
    * run's actual terminal text was then discarded.
    */
   private recheckSettled = new Set<string>();
+
+  /**
+   * Jobs a caller has explicitly asked to stop.
+   *
+   * Sending "stop" into a busy OpenClaw session aborts the run upstream, and
+   * the gateway reports that abort on the SAME rejection path as a genuine
+   * failure ("OpenClaw task aborted"). Without this set there is no way to
+   * tell the two apart at the point of settlement, and every cancellation a
+   * user asked for would be handed back to them as an error.
+   */
+  private cancelRequested = new Set<string>();
   /**
    * openclaw's runId per job, once chat.send has returned one. Kept outside
    * the reconciler state so it cannot be lost to callback/arming order —
@@ -1490,6 +1501,24 @@ export class SessionManager {
             return;
           }
           const message = err instanceof Error ? err.message : String(err);
+          // Someone asked for this. The upstream abort arrives here looking
+          // exactly like a failure, so the request is what distinguishes them.
+          if (this.cancelRequested.delete(jobId)) {
+            this.setOutcome(job, "cancelled", undefined, undefined, {
+              resultSource: "parent",
+              terminalReason: "cancelled-by-request",
+            });
+            this.sessions.set(sessionKey, {
+              sessionKey,
+              lastJobId: jobId,
+              lastSummary: "Cancelled before it finished.",
+              artifacts,
+              recommendedNextStep: "Send a new task if you still want this done.",
+            });
+            this.persistActiveJobs();
+            logDebug(`[job ${jobId}] cancelled by request`);
+            return;
+          }
           this.setOutcome(job, "error", undefined, message, {
             resultSource: "parent",
             terminalReason: "chat-error",
@@ -1509,6 +1538,47 @@ export class SessionManager {
     this.scheduleReconcile(job, RECONCILE_QUIET_MS);
 
     return job;
+  }
+
+  /**
+   * Ask the agent to stop the turn this job is running.
+   *
+   * "stop" is sent as an ordinary message, which OpenClaw consumes as an
+   * interrupt rather than as a new turn — verified against a live agent: the
+   * in-flight run is aborted within a few seconds and the stop itself never
+   * returns a runId, so it creates no second job. That is why this bypasses
+   * submitTask's session-busy guard entirely: the guard exists to stop a
+   * DUPLICATE dispatch, and a stop is the one message whose whole purpose is
+   * to arrive while the session is busy.
+   *
+   * Best-effort by construction. The job is not marked terminal here — it is
+   * marked when the abort actually lands (see cancelRequested), so a stop that
+   * upstream ignores leaves the task honestly still running rather than
+   * reporting a cancellation that did not happen.
+   */
+  async requestCancel(
+    jobId?: string,
+    sessionKey?: string,
+  ): Promise<{ found: boolean; alreadyTerminal?: boolean; status?: JobStatus; jobId?: string }> {
+    const job = this.resolveJob(jobId, sessionKey);
+    if (!job) return { found: false };
+    if (job.status !== "running") {
+      return { found: true, alreadyTerminal: true, status: job.status, jobId: job.jobId };
+    }
+    this.cancelRequested.add(job.jobId);
+    pushLog(job, { ts: Date.now(), type: "lifecycle", text: "Stop requested by the caller." });
+    job.lastEventAt = Date.now();
+    // Fire-and-forget: this send is an interrupt and never resolves with a
+    // turn of its own, so awaiting it would block the caller for the full
+    // timeout on the happy path.
+    void this.gateway
+      .chat(job.sessionKey, "stop", 15_000)
+      .catch((err: unknown) =>
+        logDebug(
+          `[job ${job.jobId}] stop message settled: ${err instanceof Error ? err.message : String(err)}`,
+        ),
+      );
+    return { found: true, alreadyTerminal: false, status: job.status, jobId: job.jobId };
   }
 
   /**

@@ -55,6 +55,7 @@ export { classifyError } from "./errors.ts";
 export { emptyArtifacts, processEvent, extractPatternsFromSummary, deriveNextStep } from "./artifacts.ts";
 export {
   runTask,
+  cancelTask,
   checkTask,
   getTask,
   getTaskPrompt,

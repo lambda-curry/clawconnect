@@ -55,8 +55,21 @@ export type ErrorInfo = {
  */
 export type LogEntry = { ts: number; type: string; text: string; isError?: boolean; seq?: number };
 
-export type JobStatus = "running" | "completed" | "completed_no_summary" | "error";
-export type TaskStatus = "queued" | "running" | "blocked" | "needs-human" | "done" | "failed";
+/**
+ * `cancelled` is a distinct TERMINAL state, not a flavour of error. Sending
+ * "stop" into a busy OpenClaw session genuinely aborts the run upstream (the
+ * gateway answers state:"aborted", see gateway.ts) — verified twice against a
+ * live agent. That arrives on the same rejection path as a real failure, so
+ * without its own status every cancellation a user asked for would be
+ * reported back to them as something that went wrong.
+ *
+ * Deriving the rest for free is the reason it lives on JobStatus rather than
+ * being faked further up: `isTerminal` is `status !== "running"` and
+ * `isError` is `status === "error"`, so a cancelled job is correctly terminal
+ * and correctly not an error without either check being touched.
+ */
+export type JobStatus = "running" | "completed" | "completed_no_summary" | "error" | "cancelled";
+export type TaskStatus = "queued" | "running" | "blocked" | "needs-human" | "done" | "failed" | "cancelled";
 
 /**
  * Where a job's terminal summary text actually came from. Absent (undefined)
