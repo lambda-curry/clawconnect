@@ -49,13 +49,42 @@ and fails on any divergence, so adding a tool in one place alone will not pass.
 
 Conventions the surface enforces, all covered by that test:
 
-- Every read-only tool's description **opens with `READ ONLY:`**. The
-  annotation says it too; a client's safety layer may read either.
-- Every tool declares an `outputSchema`, kept permissive
-  (`additionalProperties` open, minimal `required`) — a strict client
-  validates `structuredContent` against it, so over-promising turns a normal
-  response into a client error.
+- Every read-only tool's description **opens with one `READ ONLY:` sentence**,
+  and carries `readOnlyHint: true`. Both, deliberately: the spec calls
+  `readOnlyHint` a hint clients need not trust, and a ChatGPT safety layer has
+  been observed blocking a read **before the request ever reached the server**
+  when a tool multiplexed reads and writes under one description. Keep the
+  prefix to one sentence — the win is structural (a tool whose name,
+  description, and schema tell one consistent story), not verbose prose.
+- Every tool declares an `outputSchema`: **strict on the chaining contract,
+  permissive on everything else.** Fields a caller reads to decide its next
+  call (`taskId`, `sessionKey`, `status`, `isTerminal`, `logCursor`,
+  search hits' `file`) get declared types; `additionalProperties` stays open
+  and `required` names only what EVERY branch returns. The SDK validates
+  `structuredContent` against this server-side, so requiring a field the
+  not-found branch omits turns an ordinary "not found" into a schema
+  violation — `check_task` can answer without a `jobId`, and `get_task`'s
+  `prompt` preset returns no `status` at all.
 - `run_task` is the only capability that mutates anything.
+
+## Deploying a tool-surface change
+
+**ChatGPT freezes the approved tool snapshot.** Editing a declaration and
+restarting the server is NOT enough: the connector keeps serving the catalog
+approved at setup, so a renamed tool answers "Tool not found" while the server
+is perfectly healthy. The owner must hit **Refresh** on the app's action
+configuration to pull the new declarations, and **newly added actions arrive
+disabled by default** and must be enabled explicitly.
+
+Do not rely on `notifications/tools/list_changed` to do this. It is a real
+protocol capability, but there is no evidence ChatGPT updates an approved app's
+frozen snapshot from it, and none for Claude either.
+
+So after changing any declaration: restart the service, then refresh/re-approve
+the connector on each client, then confirm with `get_connection_info` —
+its `toolsetVersion` is hashed from the declarations, so a client whose cached
+catalog disagrees with the server's value is holding a stale snapshot rather
+than talking to a broken server.
 
 Both protocol eras are served by the SDK from one factory
 (`createMcpHandler`, whose `legacy` option defaults to `'stateless'`). There is
@@ -63,6 +92,22 @@ no hand-rolled JSON-RPC router and no hand-maintained list of supported
 protocol revisions — version negotiation belongs to the SDK. `get_connection_info`
 reports the era from `McpRequestContext.era` and **omits** the revision when the
 transport was never told one; never substitute a constant there.
+
+## Tasks: our model is canonical, the extension is a future adapter
+
+`run_task`/`check_task` hand-rolls what the `io.modelcontextprotocol/tasks`
+extension standardises, and the vocabularies already nearly line up — its
+`working`/`input_required`/`completed`/`failed`/`cancelled` against our
+running/needs-human/completed/error, with `input_required` matching our
+blocked-delegation case almost exactly.
+
+Do not adopt it as the transport yet. It is absent from the published client
+support matrix, and neither ChatGPT nor Claude negotiates it; MCP Inspector is
+the one implementation to test against. Keep our job model canonical and keep
+it shaped so that `tools/call → CreateTaskResult → tasks/get → tasks/update →
+tasks/cancel` can later be a thin adapter over it — which mainly means not
+baking today's `check_task` wire shape into the job model itself. The
+capability layer is where that adapter goes.
 
 ## The runtime seam is optional
 

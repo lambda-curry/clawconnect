@@ -168,6 +168,35 @@ function num(v: unknown): number | undefined {
  */
 const OPEN: Record<string, unknown> = { type: "object", additionalProperties: true };
 
+/**
+ * The chaining contract: fields a caller reads to decide its NEXT call.
+ *
+ * These get declared types so they arrive in stable, typed locations instead
+ * of being extracted from prose — that is where structured output actually
+ * pays, because it removes the chance to manufacture a malformed follow-up.
+ * `required` stays deliberately minimal: several of these tools answer
+ * not-found (and get_task's `prompt` preset) with a legitimately different
+ * payload, so requiring a field the error branch omits would turn an ordinary
+ * "not found" into a client-side schema violation. Strict where it chains,
+ * permissive everywhere else.
+ */
+const TASK_CHAINING_PROPERTIES: Record<string, unknown> = {
+  jobId: { type: "string" },
+  taskId: { type: "string" },
+  sessionKey: { type: "string" },
+  agent: { type: "string" },
+  status: { type: "string" },
+  isTerminal: { type: "boolean" },
+  isError: { type: "boolean" },
+  continuePolling: { type: "boolean" },
+  // The opaque resume token a caller must hand back verbatim as knownLogCount.
+  logCursor: { type: "number" },
+  logEventCount: { type: "number" },
+  summary: { type: "string" },
+  error: { type: "string" },
+  nextAction: { type: ["object", "null"] },
+};
+
 const TASK_SUMMARY_SCHEMA: Record<string, unknown> = {
   type: "object",
   additionalProperties: true,
@@ -360,7 +389,12 @@ completed_no_summary and error are terminal — report them. Rarely, a long tool
           },
         },
       },
-      outputSchema: OPEN,
+      outputSchema: {
+        type: "object",
+        additionalProperties: true,
+        properties: TASK_CHAINING_PROPERTIES,
+        required: ["status"],
+      },
       annotations: {
         title: "Check Task Status",
         readOnlyHint: true,
@@ -444,7 +478,12 @@ At detail levels that include it, \`updates\` is a bounded recent-activity windo
         },
         required: ["taskId"],
       },
-      outputSchema: OPEN,
+      outputSchema: {
+        type: "object",
+        additionalProperties: true,
+        properties: { ...TASK_CHAINING_PROPERTIES, prompt: OPEN },
+        required: ["taskId"],
+      },
       annotations: {
         title: "Get Task",
         readOnlyHint: true,
@@ -543,7 +582,22 @@ At detail levels that include it, \`updates\` is a bounded recent-activity windo
         },
         required: ["sessionId"],
       },
-      outputSchema: OPEN,
+      outputSchema: {
+        type: "object",
+        additionalProperties: true,
+        properties: {
+          found: { type: "boolean" },
+          sessionKey: { type: "string" },
+          agent: { type: "string" },
+          jobId: { type: "string" },
+          status: { type: "string" },
+          // Pass back as `after` to page forward; pagination is exhausted when
+          // it stops advancing.
+          nextAfter: { type: "number" },
+          tasks: { type: "array", items: TASK_SUMMARY_SCHEMA },
+        },
+        required: ["found"],
+      },
       annotations: {
         title: "Get Session",
         readOnlyHint: true,
@@ -645,7 +699,25 @@ At detail levels that include it, \`updates\` is a bounded recent-activity windo
       outputSchema: {
         type: "object",
         additionalProperties: true,
-        properties: { hits: { type: "array", items: OPEN }, errors: { type: "array", items: OPEN } },
+        properties: {
+          hits: {
+            type: "array",
+            items: {
+              type: "object",
+              additionalProperties: true,
+              // `file` is the qmd:// path a caller hands straight to
+              // get_memory — the one field here that chains.
+              properties: {
+                file: { type: "string" },
+                collection: { type: "string" },
+                score: { type: "number" },
+                snippet: { type: "string" },
+              },
+              required: ["file"],
+            },
+          },
+          errors: { type: "array", items: OPEN },
+        },
         required: ["hits", "errors"],
       },
       annotations: {
