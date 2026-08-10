@@ -21,6 +21,8 @@ export type PersistedJob = {
   prompt: JobPrompt;
   /** OpenClaw's runId for this job, once chat.send's onRunId has fired. Absent on records written before this field existed — old files still load fine. */
   parentRunId?: string;
+  /** Durable OpenClaw transcript sequence confirmed before the connector stopped. */
+  lastSeenSequence?: number;
 };
 
 export interface JobStore {

@@ -54,6 +54,10 @@ export function runTask(pool: GatewayPool, input: TaskInput): RunTaskResult {
     taskId: job.jobId,
     sessionKey: job.sessionKey,
     status: "running",
+    execution: "running",
+    upstream: job.upstreamState,
+    transcript: job.transcriptState,
+    cancellation: job.cancellationState,
     agent: entry.agent.id,
     // args keys are check_task's own parameter names — see NextAction.
     nextAction: { tool: "check_task", args: { jobId: job.jobId, sessionKey: job.sessionKey } },

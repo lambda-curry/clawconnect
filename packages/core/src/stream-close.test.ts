@@ -48,6 +48,14 @@ async function startFakeGateway(onRequest: RequestHandler) {
         socket.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: { protocol: 4 } }));
         return;
       }
+      if (frame.method === "chat.history") {
+        socket.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: { messages: [], hasMore: false } }));
+        return;
+      }
+      if (frame.method === "sessions.messages.subscribe") {
+        socket.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: { ok: true } }));
+        return;
+      }
       onRequest(frame, socket);
     });
   });

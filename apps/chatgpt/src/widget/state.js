@@ -28,6 +28,10 @@
  * @property {string} sessionKey
  * @property {string} [agent]
  * @property {string} status
+ * @property {"running"|"completed"|"failed"|"cancelled"} [execution]
+ * @property {"connected"|"reconnecting"|"unavailable"} [upstream]
+ * @property {"live"|"replaying"|"detached"|"complete"} [transcript]
+ * @property {"none"|"requested"|"acknowledged"|"reconciled"} [cancellation]
  * @property {number} [startedAt]
  * @property {number} [lastEventAt]
  * @property {string} [summary]
@@ -762,7 +766,41 @@ export function deriveLivenessState(task, now) {
  * still going and being recovered, so the copy has to say so rather than
  * report a bare "connection interrupted" over work that is fine.
  */
-export function deriveConnectionNotice({ pollFailures = 0, recovery = null } = {}) {
+/**
+ * @param {{
+ *   pollFailures?: number,
+ *   recovery?: { reason?: string } | null,
+ *   upstream?: "connected"|"reconnecting"|"unavailable",
+ *   transcript?: "live"|"replaying"|"detached"|"complete"
+ * }} [options]
+ */
+export function deriveConnectionNotice({
+  pollFailures = 0,
+  recovery = null,
+  upstream,
+  transcript,
+} = {}) {
+  if (upstream === "unavailable") {
+    return {
+      connector: pollFailures >= 2 ? "reconnecting" : "connected",
+      stream: "detached",
+      text: "Upstream is unavailable. The connector is reconciling execution separately and will not assume the task stopped.",
+    };
+  }
+  if (transcript === "replaying") {
+    return {
+      connector: pollFailures >= 2 ? "reconnecting" : "connected",
+      stream: "replaying",
+      text: "Replaying missed upstream transcript events before live progress resumes.",
+    };
+  }
+  if (transcript === "detached") {
+    return {
+      connector: pollFailures >= 2 ? "reconnecting" : "connected",
+      stream: "detached",
+      text: "Transcript transport detached; the task may still be running upstream while the connector reconnects.",
+    };
+  }
   const streamEnded =
     recovery != null &&
     typeof recovery === "object" &&
