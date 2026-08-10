@@ -164,3 +164,52 @@ describe("check_task's default wait behaviour", () => {
     expect(mode).toMatch(/"wait" \(default\)/);
   });
 });
+
+describe("output schemas do not over-require", () => {
+  /**
+   * The SDK validates structuredContent against outputSchema server-side, so
+   * a `required` field that some branch legitimately omits turns an ordinary
+   * response into a schema violation. These are the three branches that bite,
+   * each verified against the live connector before being pinned here:
+   *
+   *   check_task resolved by sessionKey  -> answers with NO jobId
+   *   get_task detail="prompt"           -> answers with NO status
+   *   get_session not-found              -> answers with only sessionId+found
+   */
+  const requiredOf = (tool: ToolShape | undefined) =>
+    ((tool?.outputSchema as { required?: string[] } | undefined)?.required ?? []) as string[];
+
+  it("check_task requires only status — a sessionKey lookup can answer without a jobId", async () => {
+    const tools = await stdioTools();
+    expect(requiredOf(tools.find((t) => t.name === "check_task"))).toEqual(["status"]);
+  });
+
+  it("get_task requires only taskId — the prompt preset returns no status", async () => {
+    const tools = await stdioTools();
+    expect(requiredOf(tools.find((t) => t.name === "get_task"))).toEqual(["taskId"]);
+  });
+
+  it("still declares the chaining fields it does not require", async () => {
+    const tools = await stdioTools();
+    // Permissive `required` must not mean untyped: the point of the schema is
+    // that these arrive in stable, typed places.
+    const props = (
+      tools.find((t) => t.name === "check_task")?.outputSchema as
+        | { properties?: Record<string, unknown> }
+        | undefined
+    )?.properties;
+    for (const field of ["jobId", "sessionKey", "isTerminal", "continuePolling", "logCursor"]) {
+      expect(props, `check_task.${field}`).toHaveProperty(field);
+    }
+  });
+
+  it("keeps additionalProperties open on every tool", async () => {
+    const tools = await stdioTools();
+    for (const tool of tools) {
+      expect(
+        (tool.outputSchema as { additionalProperties?: boolean }).additionalProperties,
+        `${tool.name} additionalProperties`,
+      ).toBe(true);
+    }
+  });
+});
