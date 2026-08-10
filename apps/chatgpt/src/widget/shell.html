@@ -901,7 +901,12 @@ function render() {
 function renderInline(root) {
   // Above the rows, because it explains the card itself rather than any one
   // task — and it must never be mistaken for a task's own status pill.
-  const notice = deriveConnectionNotice({ pollFailures: app.pollFailures, recovery: app.pinnedDetail?.recovery });
+  const notice = deriveConnectionNotice({
+    pollFailures: app.pollFailures,
+    recovery: app.pinnedDetail?.recovery,
+    upstream: app.pinnedDetail?.upstream,
+    transcript: app.pinnedDetail?.transcript,
+  });
   if (notice.text) {
     root.append(el("div", { class: "cc-note", role: "status" }, [notice.text]));
   }

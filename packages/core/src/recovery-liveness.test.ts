@@ -316,6 +316,29 @@ describe("late recovery — a still transcript is not a finished run", () => {
     expectCoherent(sessions.buildSnapshot(live), Date.now());
   });
 
+  it("terminalizes an unreachable upstream after the documented recovery window", async () => {
+    vi.useFakeTimers();
+    const ctrl = harness(null);
+    const sessions = new SessionManager(ctrl.gateway);
+    const job = sessions.submitTask({ task: "a run whose gateway disappears" });
+    job.upstreamState = "unavailable";
+    job.transcriptState = "detached";
+    ctrl.closeStream();
+
+    await vi.advanceTimersByTimeAsync(PAST_IDLE_MS);
+
+    const terminal = sessions.getJob(job.jobId)!;
+    expect(terminal.status).toBe("error");
+    expect(terminal.terminalReason).toBe("upstream-unavailable");
+    expect(terminal.error).toMatch(/remained unreachable/);
+    expect(sessions.buildSnapshot(terminal)).toMatchObject({
+      execution: "failed",
+      upstream: "unavailable",
+      transcript: "complete",
+      continuePolling: false,
+    });
+  });
+
   it("stops extending the moment upstream stops claiming the run", async () => {
     vi.useFakeTimers();
     const ctrl = harness(frozenAndActive);

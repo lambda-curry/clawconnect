@@ -30,7 +30,7 @@ type RequestHandler = (frame: RequestFrame, socket: ServerSocket) => void;
  * hands every other request to the test's own handler, which decides exactly
  * what to send and in what order.
  */
-async function startFakeGateway(onRequest: RequestHandler) {
+async function startFakeGateway(onRequest: RequestHandler, autoTranscript = true) {
   const wss = new WebSocketServer({ port: 0, host: "127.0.0.1" });
   await once(wss, "listening");
   wss.on("connection", (socket) => {
@@ -39,6 +39,14 @@ async function startFakeGateway(onRequest: RequestHandler) {
       const frame = JSON.parse(raw.toString()) as RequestFrame;
       if (frame.method === "connect") {
         socket.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: { protocol: 4 } }));
+        return;
+      }
+      if (autoTranscript && frame.method === "chat.history") {
+        socket.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: { messages: [], hasMore: false } }));
+        return;
+      }
+      if (autoTranscript && frame.method === "sessions.messages.subscribe") {
+        socket.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: { ok: true } }));
         return;
       }
       onRequest(frame, socket);
@@ -74,6 +82,22 @@ const agentToolEvent = (runId: string, name: string) =>
     payload: { runId, stream: "tool", data: { phase: "start", name, args: { command: "pnpm test" } } },
   });
 
+const sessionToolEvent = (sequence: number, name: string) =>
+  JSON.stringify({
+    type: "event",
+    event: "session.message",
+    payload: {
+      sessionKey: "agent:main:main:thread:test",
+      messageId: `tool-${sequence}`,
+      messageSeq: sequence,
+      message: {
+        role: "assistant",
+        content: [{ type: "toolCall", id: `call-${sequence}`, name, arguments: {} }],
+        __openclaw: { id: `tool-${sequence}`, seq: sequence },
+      },
+    },
+  });
+
 const sendAck = (id: string | undefined, runId: string) =>
   JSON.stringify({ type: "res", id, ok: true, payload: { runId } });
 
@@ -94,8 +118,8 @@ afterEach(async () => {
   cleanup = [];
 });
 
-async function harness(onRequest: RequestHandler) {
-  const server = await startFakeGateway(onRequest);
+async function harness(onRequest: RequestHandler, autoTranscript = true) {
+  const server = await startFakeGateway(onRequest, autoTranscript);
   const gateway = new OpenClawGateway({ url: server.url, token: "test-token" });
   cleanup.push(async () => {
     gateway.close();
@@ -124,8 +148,8 @@ describe("OpenClawGateway.chat — run correlation across the send boundary", ()
   it("replays pre-acknowledgement tool events to onEvent, in order, before the final", async () => {
     const gateway = await harness((frame, socket) => {
       if (frame.method !== "chat.send") return;
-      socket.send(agentToolEvent("run-2", "Bash"));
-      socket.send(agentToolEvent("run-2", "Read"));
+      socket.send(sessionToolEvent(1, "Bash"));
+      socket.send(sessionToolEvent(2, "Read"));
       socket.send(chatEvent("run-2", "final", "done"));
       socket.send(sendAck(frame.id, "run-2"));
     });
@@ -187,6 +211,7 @@ describe("OpenClawGateway.chat — run correlation across the send boundary", ()
       if (frame.method !== "chat.send") return;
       socket.send(sendAck(frame.id, "run-4"));
       socket.send(agentToolEvent("run-4", "Bash"));
+      socket.send(sessionToolEvent(1, "Bash"));
       socket.send(chatEvent("run-4", "delta", "partial"));
       socket.send(chatEvent("run-4", "final", "the final answer"));
     });
@@ -203,6 +228,7 @@ describe("OpenClawGateway.chat — run correlation across the send boundary", ()
     const gateway = await harness((frame, socket) => {
       if (frame.method !== "chat.send") return;
       socket.send(agentToolEvent("run-9", "Bash"));
+      socket.send(sessionToolEvent(1, "Bash"));
       socket.send(sendAck(frame.id, "run-9"));
       socket.send(chatEvent("run-9", "final", "done"));
     });
@@ -382,7 +408,7 @@ describe("OpenClawGateway.reconcileRun — bounded read of upstream truth", () =
           ]),
         }),
       );
-    });
+    }, false);
 
     const observation = await gateway.reconcileRun("agent:main:main:thread:test", { intervalMs: 1 });
     expect(observation).toMatchObject({ ok: true, changed: false, trailingText: "here is the report" });
@@ -406,7 +432,7 @@ describe("OpenClawGateway.reconcileRun — bounded read of upstream truth", () =
           ),
         }),
       );
-    });
+    }, false);
 
     const observation = await gateway.reconcileRun("agent:main:main:thread:test", { intervalMs: 1 });
     expect(observation.changed).toBe(true);
@@ -424,7 +450,7 @@ describe("OpenClawGateway.reconcileRun — bounded read of upstream truth", () =
           payload: history([{ role: "toolResult", content: "exit 0" }]),
         }),
       );
-    });
+    }, false);
 
     const observation = await gateway.reconcileRun("agent:main:main:thread:test", { intervalMs: 1 });
     expect(observation).toMatchObject({ ok: true, changed: false, trailingText: "" });
@@ -435,7 +461,7 @@ describe("OpenClawGateway.reconcileRun — bounded read of upstream truth", () =
     const gateway = await harness((frame, socket) => {
       if (frame.method !== "chat.history") return;
       socket.send(JSON.stringify({ type: "res", id: frame.id, ok: false, error: { message: "no such session" } }));
-    });
+    }, false);
 
     await expect(gateway.reconcileRun("agent:main:main:thread:test", { intervalMs: 1 })).resolves.toMatchObject({
       ok: false,

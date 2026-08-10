@@ -329,6 +329,7 @@ export class SessionManager {
    * user asked for would be handed back to them as an error.
    */
   private cancelRequested = new Set<string>();
+  private cancelInFlight = new Map<string, Promise<void>>();
   /**
    * openclaw's runId per job, once chat.send has returned one. Kept outside
    * the reconciler state so it cannot be lost to callback/arming order —
@@ -427,6 +428,10 @@ export class SessionManager {
         pollCount: pj.pollCount,
         prompt: pj.prompt,
         parentRunId: pj.parentRunId,
+        lastSeenSequence: pj.lastSeenSequence,
+        upstreamState: "reconnecting",
+        transcriptState: "replaying",
+        cancellationState: "none",
       };
       this.jobs.set(pj.jobId, job);
       this.latestJobBySession.set(pj.sessionKey, pj.jobId);
@@ -435,6 +440,32 @@ export class SessionManager {
       this.jobHistoryBySession.set(pj.sessionKey, history);
       logDebug(
         `[job ${pj.jobId.slice(0, 8)}] reloaded from job store, reattaching via transcript recovery`,
+      );
+      void this.gateway.resumeTranscript?.(
+        pj.sessionKey,
+        pj.lastSeenSequence,
+        (event) => {
+          if (job.status !== "running") return;
+          job.lastEventAt = Date.now();
+          this.noteLiveActivity(job.jobId, event);
+          pushLog(job, {
+            ts: Date.now(),
+            type: event.type,
+            text: event.text,
+            ...(event.type === "tool-result" && event.isError ? { isError: true } : {}),
+          });
+          processEvent(artifacts, event);
+        },
+        (update) => {
+          if (job.status !== "running") return;
+          job.upstreamState = update.upstream;
+          job.transcriptState = update.transcript;
+          const previousSequence = job.lastSeenSequence;
+          if (update.lastSeenSequence !== undefined) {
+            job.lastSeenSequence = update.lastSeenSequence;
+          }
+          if (job.lastSeenSequence !== previousSequence) this.persistActiveJobs();
+        },
       );
       this.recoverLateFinalText(job, pj.sessionKey, pj.jobId, artifacts);
     }
@@ -489,6 +520,7 @@ export class SessionManager {
         pollCount: j.pollCount,
         prompt: j.prompt,
         parentRunId: j.parentRunId,
+        lastSeenSequence: j.lastSeenSequence,
       }));
     this.store.save(active);
   }
@@ -1297,6 +1329,9 @@ export class SessionManager {
           context: effectiveInput.context,
           senderName: effectiveInput.senderName,
         },
+        upstreamState: priorJob.upstreamState,
+        transcriptState: "complete",
+        cancellationState: "none",
       };
       this.jobs.set(busyJobId, busyJob);
       logDebug(
@@ -1327,6 +1362,9 @@ export class SessionManager {
         context: effectiveInput.context,
         senderName: effectiveInput.senderName,
       },
+      upstreamState: "reconnecting",
+      transcriptState: "detached",
+      cancellationState: "none",
     };
     if (!input.sessionKey) {
       pushLog(job, {
@@ -1360,6 +1398,7 @@ export class SessionManager {
         message,
         TIMEOUT_MS,
         (event) => {
+          if (job.status !== "running") return;
           job.lastEventAt = Date.now();
           this.noteLiveActivity(jobId, event);
           pushLog(job, {
@@ -1384,6 +1423,47 @@ export class SessionManager {
           job.parentRunId = runId;
           this.persistActiveJobs();
           logDebug(`[job ${jobId.slice(0, 8)}] upstream runId ${runId}`);
+        },
+        (update) => {
+          if (job.status !== "running") return;
+          const previousTranscript = job.transcriptState;
+          const previousUpstream = job.upstreamState;
+          const previousSequence = job.lastSeenSequence;
+          job.upstreamState = update.upstream;
+          job.transcriptState = update.transcript;
+          if (update.lastSeenSequence !== undefined) {
+            job.lastSeenSequence = update.lastSeenSequence;
+          }
+          if (job.lastSeenSequence !== previousSequence) this.persistActiveJobs();
+          if (previousTranscript === update.transcript && previousUpstream === update.upstream) return;
+          job.lastEventAt = Date.now();
+          if (update.transcript === "detached") {
+            pushLog(job, {
+              ts: Date.now(),
+              type: "recovery",
+              text: update.upstream === "unavailable"
+                ? "Upstream transcript transport is unavailable; execution state remains independent while reconciliation continues."
+                : "Transcript transport detached; reconnecting without starting a duplicate task.",
+            });
+          } else if (update.transcript === "replaying") {
+            pushLog(job, {
+              ts: Date.now(),
+              type: "recovery",
+              text: "Replaying durable upstream transcript events from the last confirmed sequence.",
+            });
+          } else if (update.transcript === "live" && previousTranscript !== "detached") {
+            pushLog(job, {
+              ts: Date.now(),
+              type: "recovery",
+              text: "Upstream transcript subscription is live.",
+            });
+          } else if (update.transcript === "live") {
+            pushLog(job, {
+              ts: Date.now(),
+              type: "recovery",
+              text: "Durable transcript gap replay completed; live subscription restored.",
+            });
+          }
         },
       )
       .then(
@@ -1551,28 +1631,39 @@ export class SessionManager {
     // The public tool is idempotent. Do not send a second abort while the
     // first bounded RPC is still in flight; duplicate stop requests were part
     // of the observed wedge and add no new evidence.
-    if (this.cancelRequested.has(job.jobId)) {
-      return { found: true, alreadyTerminal: false, status: job.status, jobId: job.jobId };
+    let operation = this.cancelInFlight.get(job.jobId);
+    if (!operation) {
+      this.cancelRequested.add(job.jobId);
+      job.cancellationState = "requested";
+      pushLog(job, { ts: Date.now(), type: "lifecycle", text: "Stop requested by the caller." });
+      job.lastEventAt = Date.now();
+      operation = this.gateway
+        .abort(job.sessionKey, job.parentRunId)
+        .then((result) => {
+          if (job.status !== "running") return;
+          if (result.aborted) job.cancellationState = "acknowledged";
+          this.finishCancellation(job, result.aborted);
+        })
+        .catch((err: unknown) => {
+          if (job.status !== "running") return;
+          const message =
+            `Cancellation request failed before OpenClaw confirmed the stop: ` +
+            `${err instanceof Error ? err.message : String(err)}`;
+          this.finishCancellation(job, false, message);
+        })
+        .finally(() => {
+          this.cancelInFlight.delete(job.jobId);
+          this.cancelRequested.delete(job.jobId);
+        });
+      this.cancelInFlight.set(job.jobId, operation);
     }
-    this.cancelRequested.add(job.jobId);
-    pushLog(job, { ts: Date.now(), type: "lifecycle", text: "Stop requested by the caller." });
-    job.lastEventAt = Date.now();
-    // Fire-and-forget: the public tool reports that the request was accepted;
-    // the job transition is written when the bounded upstream RPC answers.
-    void this.gateway
-      .abort(job.sessionKey, job.parentRunId)
-      .then((result) => {
-        if (job.status !== "running") return;
-        this.finishCancellation(job, result.aborted);
-      })
-      .catch((err: unknown) => {
-        if (job.status !== "running") return;
-        const message =
-          `Cancellation request failed before OpenClaw confirmed the stop: ` +
-          `${err instanceof Error ? err.message : String(err)}`;
-        this.finishCancellation(job, false, message);
-      });
-    return { found: true, alreadyTerminal: false, status: job.status, jobId: job.jobId };
+    await operation;
+    return {
+      found: true,
+      alreadyTerminal: false,
+      status: job.status,
+      jobId: job.jobId,
+    };
   }
 
   /**
@@ -1678,6 +1769,7 @@ export class SessionManager {
     const message =
       failure ??
       `Cancellation was requested, but OpenClaw reported no active run for session ${job.sessionKey}.`;
+    job.cancellationState = "reconciled";
     this.setOutcome(job, "error", undefined, message, {
       resultSource: "parent",
       terminalReason: "cancellation-not-confirmed",
@@ -2078,9 +2170,10 @@ export class SessionManager {
     // the verdict standing (deliberately — see the extension branch) while its
     // age grows, which is what stops a minutes-old "active" from being
     // reported as a fresh confirmation.
-    const observed: { upstream: RunObservation["upstream"]; at: number } = {
+    const observed: { upstream: RunObservation["upstream"]; at: number; readable: boolean } = {
       upstream: "unknown",
       at: window.startedAt,
+      readable: false,
     };
     let extensions = 0;
     let recovered: string | undefined;
@@ -2111,6 +2204,7 @@ export class SessionManager {
           if (job.status !== "running") return;
           observed.upstream = sample.upstream;
           observed.at = sample.checkedAt;
+          observed.readable = true;
           // Recorded on EVERY read, exactly as reconcileQuietRun records its
           // own rounds. Without it a job spends its whole recovery with
           // liveness frozen at whatever the last quiet round saw — or with
@@ -2313,6 +2407,34 @@ export class SessionManager {
       return;
     }
 
+    if (!observed.readable && job.upstreamState === "unavailable") {
+      const message =
+        `OpenClaw remained unreachable for the ${Math.round(window.idleTimeoutMs / 60_000)}m ` +
+        `transcript recovery window, so the connector could not confirm whether the run completed.`;
+      this.setOutcome(job, "error", undefined, message, {
+        resultSource: "parent",
+        terminalReason: "upstream-unavailable",
+        errorInfo: {
+          category: "timeout",
+          message,
+          suggestedRecovery:
+            "Inspect upstream before reusing this session. Start a new thread if upstream state cannot be confirmed.",
+        },
+      });
+      job.recovery = undefined;
+      pushLog(job, { ts: Date.now(), type: "recovery", text: message });
+      this.sessions.set(sessionKey, {
+        sessionKey,
+        lastJobId: jobId,
+        lastSummary: message.slice(0, 500),
+        artifacts,
+        recommendedNextStep:
+          "Inspect upstream before reusing this session, or start a new thread.",
+      });
+      this.persistActiveJobs();
+      return;
+    }
+
     this.setOutcome(job, "completed_no_summary", NO_SUMMARY_SENTINEL, undefined, {
       resultSource: "parent",
       terminalReason: "late-recovery-exhausted",
@@ -2367,6 +2489,11 @@ export class SessionManager {
     job.outcomeVersion = (job.outcomeVersion ?? 0) + 1;
     job.resultSource = meta?.resultSource;
     job.terminalReason = meta?.terminalReason;
+    job.transcriptState = "complete";
+    if (job.cancellationState !== "none") job.cancellationState = "reconciled";
+    if (this.latestJobBySession.get(job.sessionKey) === job.jobId) {
+      this.gateway.stopTranscriptWatch?.(job.sessionKey);
+    }
   }
 
   /**
@@ -2570,6 +2697,20 @@ export class SessionManager {
       jobId: job.jobId,
       sessionKey: job.sessionKey,
       status: job.status,
+      execution:
+        job.status === "running"
+          ? "running"
+          : job.status === "cancelled"
+            ? "cancelled"
+            : job.status === "error"
+              ? "failed"
+              : "completed",
+      upstream: job.upstreamState,
+      transcript: job.transcriptState,
+      cancellation: job.cancellationState,
+      ...(job.lastSeenSequence !== undefined
+        ? { lastSeenSequence: job.lastSeenSequence }
+        : {}),
       startedAt: job.startedAt,
       lastEventAt: job.lastEventAt,
       lastPollAt: Date.now(),

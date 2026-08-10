@@ -700,6 +700,21 @@ describe("isStale / deriveActivityLabel — a liveness claim paired with the evi
 });
 
 describe("deriveConnectionNotice — the task, the connector, and the chat stream are three different things", () => {
+  it("uses the connector-native transcript state instead of inferring execution failure", () => {
+    expect(deriveConnectionNotice({ upstream: "reconnecting", transcript: "detached" })).toMatchObject({
+      stream: "detached",
+      text: expect.stringMatching(/may still be running upstream/i),
+    });
+    expect(deriveConnectionNotice({ upstream: "reconnecting", transcript: "replaying" })).toMatchObject({
+      stream: "replaying",
+      text: expect.stringMatching(/replaying missed/i),
+    });
+    expect(deriveConnectionNotice({ upstream: "unavailable", transcript: "detached" })).toMatchObject({
+      stream: "detached",
+      text: expect.stringMatching(/will not assume the task stopped/i),
+    });
+  });
+
   it("says nothing when everything is nominal", () => {
     expect(deriveConnectionNotice({ pollFailures: 0, recovery: null })).toEqual({
       connector: "connected",

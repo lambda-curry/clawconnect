@@ -116,9 +116,10 @@ describe("concurrent taskId/sessionKey safety", () => {
   it("a second run_task on the same still-running session is rejected as busy — the original job stays intact and pollable", () => {
     const pool = freshPool();
     const first = runTask(pool, { task: "first" });
-    const second = runTask(pool, { task: "second", sessionKey: first.sessionKey });
+    expect(() => runTask(pool, { task: "second", sessionKey: first.sessionKey })).toThrow(
+      /already running on this session/,
+    );
 
-    expect(second.jobId).not.toBe(first.jobId);
     expect(pool.forJob(first.jobId)).toBeDefined();
   });
 
@@ -536,14 +537,16 @@ describe("a RUNNING task whose delegated session is waiting on a human", () => {
     // A duplicate submit on a busy session is rejected, so it never claims the
     // attachment — its row must read as the ordinary busy rejection it is,
     // not inherit the previous turn's block.
-    const duplicate = runTask(pool, { task: "again", sessionKey: run.sessionKey });
-    expect(duplicate.jobId).not.toBe(run.jobId);
+    expect(() => runTask(pool, { task: "again", sessionKey: run.sessionKey })).toThrow(
+      /already running on this session/,
+    );
 
     const session = getSession(pool, { sessionId: run.sessionKey, mode: "tasks" });
     const rows = new Map((session.found ? (session.tasks ?? []) : []).map((t) => [t.taskId, t]));
     expect(rows.get(run.jobId)?.status).toBe("needs-human");
-    expect(rows.get(duplicate.jobId)?.status).not.toBe("needs-human");
-    expect(rows.get(duplicate.jobId)?.blockedDelegation).toBeUndefined();
+    const rejected = [...rows.values()].find((row) => row.taskId !== run.jobId);
+    expect(rejected?.status).not.toBe("needs-human");
+    expect(rejected?.blockedDelegation).toBeUndefined();
   });
 
   it("leaves an ordinary running row untouched — same status, no new field", () => {

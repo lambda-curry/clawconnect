@@ -202,6 +202,9 @@ describe("task cancellation — upstream and recovery share one terminal path", 
     });
     expect(sessions.buildSnapshot(sessions.getJob(job.jobId)!)).toMatchObject({
       status: "cancelled",
+      execution: "cancelled",
+      cancellation: "reconciled",
+      transcript: "complete",
       continuePolling: false,
       nextAction: null,
     });
@@ -226,6 +229,7 @@ describe("task cancellation — upstream and recovery share one terminal path", 
     await vi.advanceTimersByTimeAsync(0);
     expect(sessions.getJob(job.jobId)).toMatchObject({
       status: "cancelled",
+      cancellationState: "reconciled",
       terminalReason: "cancelled-by-request",
     });
 
@@ -247,6 +251,7 @@ describe("task cancellation — upstream and recovery share one terminal path", 
 
     const terminal = sessions.getJob(job.jobId)!;
     expect(terminal.status).toBe("error");
+    expect(terminal.cancellationState).toBe("reconciled");
     expect(terminal.terminalReason).toBe("cancellation-not-confirmed");
     expect(terminal.error).toMatch(/no active run/);
     expect(sessions.buildSnapshot(terminal).continuePolling).toBe(false);

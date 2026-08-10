@@ -18,6 +18,10 @@ function fixtureSnapshot(overrides: Partial<JobSnapshot> = {}): JobSnapshot {
     jobId: "job-1",
     sessionKey: "session-1",
     status: "running",
+    execution: "running",
+    upstream: "connected",
+    transcript: "live",
+    cancellation: "none",
     startedAt: 1000,
     lastEventAt: 1500,
     lastPollAt: 2000,
@@ -47,6 +51,10 @@ describe("buildRunTaskStructuredContent", () => {
       taskId: "job-1",
       sessionKey: "session-1",
       status: "running",
+      execution: "running",
+      upstream: "reconnecting",
+      transcript: "detached",
+      cancellation: "none",
       agent: "test-agent",
       nextAction: { tool: "check_task", args: { jobId: "job-1", sessionKey: "session-1" } },
     };
@@ -57,12 +65,27 @@ describe("buildRunTaskStructuredContent", () => {
       taskId: "job-1",
       sessionKey: "session-1",
       status: "running",
+      execution: "running",
+      upstream: "reconnecting",
+      transcript: "detached",
+      cancellation: "none",
       agent: "test-agent",
       nextAction: { tool: "check_task", args: { jobId: "job-1", sessionKey: "session-1" } },
     });
     // RunTaskResult has no prompt/task/context field to begin with — this
     // assertion documents that guarantee rather than testing a redaction step.
-    expect(Object.keys(structured).sort()).toEqual(["agent", "jobId", "nextAction", "sessionKey", "status", "taskId"]);
+    expect(Object.keys(structured).sort()).toEqual([
+      "agent",
+      "cancellation",
+      "execution",
+      "jobId",
+      "nextAction",
+      "sessionKey",
+      "status",
+      "taskId",
+      "transcript",
+      "upstream",
+    ]);
   });
 });
 

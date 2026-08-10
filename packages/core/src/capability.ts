@@ -187,6 +187,11 @@ const TASK_CHAINING_PROPERTIES: Record<string, unknown> = {
   sessionKey: { type: "string" },
   agent: { type: "string" },
   status: { type: "string" },
+  execution: { type: "string", enum: ["running", "completed", "failed", "cancelled"] },
+  upstream: { type: "string", enum: ["connected", "reconnecting", "unavailable"] },
+  transcript: { type: "string", enum: ["live", "replaying", "detached", "complete"] },
+  cancellation: { type: "string", enum: ["none", "requested", "acknowledged", "reconciled"] },
+  lastSeenSequence: { type: "number" },
   isTerminal: { type: "boolean" },
   isError: { type: "boolean" },
   continuePolling: { type: "boolean" },
@@ -300,6 +305,10 @@ Pass a sessionKey from a previous task to continue the same thread.`,
           taskId: { type: "string" },
           sessionKey: { type: "string" },
           status: { type: "string", enum: ["running"] },
+          execution: { type: "string", enum: ["running"] },
+          upstream: { type: "string", enum: ["connected", "reconnecting", "unavailable"] },
+          transcript: { type: "string", enum: ["live", "replaying", "detached"] },
+          cancellation: { type: "string", enum: ["none"] },
           agent: { type: "string" },
           nextAction: {
             type: ["object", "null"],
@@ -316,7 +325,7 @@ Pass a sessionKey from a previous task to continue the same thread.`,
             required: ["tool", "args"],
           },
         },
-        required: ["jobId", "taskId", "sessionKey", "status", "nextAction"],
+        required: ["jobId", "taskId", "sessionKey", "status", "execution", "upstream", "transcript", "cancellation", "nextAction"],
       },
       annotations: {
         title: "Run Task",
@@ -364,7 +373,7 @@ Pass a sessionKey from a previous task to continue the same thread.`,
 
 Only affects the one task you name — it does not touch other tasks, other sessions, or anything the agent already finished and wrote down. Work already completed before the stop lands is not undone.
 
-Best effort, and it reports what it ASKED for, not what happened: the upstream abort is confirmed asynchronously. Call get_task afterwards to see whether the task reached status "cancelled" or became a terminal cancellation error. A task that has already finished is left alone and reported as already terminal.`,
+The call is bounded and reconciled: it returns only after OpenClaw confirms the abort and the task is "cancelled", or after the connector records an actionable terminal error because the stop could not be confirmed. Concurrent duplicate calls join the same cancellation. A task that has already finished is left alone and reported as already terminal.`,
       inputSchema: {
         type: "object",
         properties: {
@@ -417,7 +426,10 @@ Best effort, and it reports what it ASKED for, not what happened: the upstream a
         }
         return {
           structuredContent: { ...result, requested: true },
-          text: `Stop requested. Check get_task for the terminal cancellation result.`,
+          text:
+            result.status === "cancelled"
+              ? "Stop confirmed upstream. The task is cancelled and its session is reusable."
+              : `Stop could not be confirmed; the task reconciled to terminal status "${result.status}".`,
         };
       },
     },

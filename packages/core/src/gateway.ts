@@ -9,6 +9,7 @@ import {
   ParentObservationTimeoutError,
   type GatewayConfig,
   type GatewayEvent,
+  type TranscriptTransportUpdate,
 } from "./types.ts";
 
 /**
@@ -157,6 +158,81 @@ interface ChatEventPayload {
   errorMessage?: string;
 }
 
+type SessionMessagePayload = {
+  sessionKey?: string;
+  messageId?: string;
+  messageSeq?: number;
+  message?: Record<string, unknown>;
+};
+
+type HistoryPage = {
+  messages?: unknown[];
+  hasMore?: boolean;
+  nextOffset?: number | null;
+};
+
+function transcriptMessageIdentity(message: Record<string, unknown>): {
+  id?: string;
+  sequence?: number;
+} {
+  const meta = message.__openclaw;
+  const record = meta && typeof meta === "object" && !Array.isArray(meta)
+    ? (meta as Record<string, unknown>)
+    : undefined;
+  return {
+    ...(typeof record?.id === "string" ? { id: record.id } : {}),
+    ...(typeof record?.seq === "number" && Number.isSafeInteger(record.seq) && record.seq > 0
+      ? { sequence: record.seq }
+      : {}),
+  };
+}
+
+/**
+ * Older history rows can predate durable message metadata. Their content hash
+ * is weaker than the upstream identity, but still prevents a catch-up read
+ * from projecting the same legacy tool row on every replay pass.
+ */
+function transcriptMessageFallbackId(message: Record<string, unknown>): string {
+  return `legacy:${createHash("sha256").update(JSON.stringify(message)).digest("hex")}`;
+}
+
+/** Project one durable transcript row into the connector's progress events. */
+export function transcriptMessageEvents(message: Record<string, unknown>): GatewayEvent[] {
+  const role = message.role;
+  if (role === "assistant" && Array.isArray(message.content)) {
+    return message.content.flatMap((block): GatewayEvent[] => {
+      if (!block || typeof block !== "object" || Array.isArray(block)) return [];
+      const value = block as Record<string, unknown>;
+      if (value.type !== "toolCall") return [];
+      const toolName = typeof value.name === "string" ? value.name : "unknown";
+      const candidate = value.arguments ?? value.input;
+      const args = candidate && typeof candidate === "object" && !Array.isArray(candidate)
+        ? (candidate as Record<string, unknown>)
+        : {};
+      const summary = args.command ?? args.file_path ?? args.pattern ?? args.query ?? "";
+      const summaryText =
+        typeof summary === "string" || typeof summary === "number" || typeof summary === "boolean"
+          ? String(summary)
+          : "";
+      return [{
+        type: "tool",
+        text: `${toolName}: ${summaryText.slice(0, 80)}`,
+        toolName,
+        args,
+      }];
+    });
+  }
+  if (role !== "toolResult") return [];
+  const toolName = typeof message.toolName === "string" ? message.toolName : "unknown";
+  const isError = message.isError === true;
+  return [{
+    type: "tool-result",
+    text: `${toolName} ${isError ? "failed" : "done"}`,
+    toolName,
+    isError,
+  }];
+}
+
 /**
  * Extract visible assistant text from a `chat.history` message. The gateway
  * projects history messages with `content` as either an array of typed blocks
@@ -290,6 +366,9 @@ export class OpenClawGateway {
   private subscribers = new Map<string, (frame: Frame) => void>();
   /** One entry per in-flight chat run — see notifyStreamClose. */
   private streamCloseListeners = new Set<() => void>();
+  /** Resubscribe hooks for connection-scoped session.message subscriptions. */
+  private reconnectListeners = new Set<() => void>();
+  private transcriptWatches = new Map<string, () => void>();
   private pendingRpcs = new Map<
     string,
     { resolve: (v: unknown) => void; reject: (e: Error) => void }
@@ -311,9 +390,11 @@ export class OpenClawGateway {
   connect(): Promise<void> {
     if (this.connectPromise) return this.connectPromise;
     this.intentionallyClosed = false;
+    const reconnecting = this.reconnectAttempt > 0;
     this.connectPromise = this._connect().then(
       () => {
         this.reconnectAttempt = 0;
+        if (reconnecting) this.notifyReconnect();
       },
       (err) => {
         this.connectPromise = null;
@@ -469,13 +550,23 @@ export class OpenClawGateway {
    */
   private notifyStreamClose(): void {
     // Copied first: a listener settling its run removes itself during iteration.
-    for (const listener of [...this.streamCloseListeners]) {
+    for (const listener of Array.from(this.streamCloseListeners)) {
       try {
         listener();
       } catch (err) {
         // A single run's close handling must never break socket teardown for
         // the others, or for the reconnect that follows.
         logDebug("[openclaw-gateway] stream-close listener threw:", err);
+      }
+    }
+  }
+
+  private notifyReconnect(): void {
+    for (const listener of Array.from(this.reconnectListeners)) {
+      try {
+        listener();
+      } catch (err) {
+        logDebug("[openclaw-gateway] reconnect listener threw:", err);
       }
     }
   }
@@ -516,6 +607,8 @@ export class OpenClawGateway {
       this.ws = null;
     }
     this.connectPromise = null;
+    for (const stop of Array.from(this.transcriptWatches.values())) stop();
+    this.transcriptWatches.clear();
   }
 
   private async sendRpc(
@@ -548,6 +641,234 @@ export class OpenClawGateway {
       });
       this.ws!.send(JSON.stringify({ type: "req", id, method, params }));
     });
+  }
+
+  private async readHistoryAfter(
+    sessionKey: string,
+    afterSequence: number,
+  ): Promise<Record<string, unknown>[]> {
+    const collected: Record<string, unknown>[] = [];
+    let offset = 0;
+    for (;;) {
+      const page = (await this.sendRpc(
+        "chat.history",
+        { sessionKey, limit: 1_000, offset, maxChars: 500_000 },
+        20_000,
+      )) as HistoryPage;
+      const messages = Array.isArray(page.messages)
+        ? page.messages.filter(
+            (message): message is Record<string, unknown> =>
+              Boolean(message) && typeof message === "object" && !Array.isArray(message),
+          )
+        : [];
+      collected.push(...messages);
+      const sequences = messages
+        .map((message) => transcriptMessageIdentity(message).sequence)
+        .filter((sequence): sequence is number => sequence !== undefined);
+      if (
+        page.hasMore !== true ||
+        typeof page.nextOffset !== "number" ||
+        page.nextOffset <= offset ||
+        (sequences.length > 0 && Math.min(...sequences) <= afterSequence)
+      ) {
+        break;
+      }
+      offset = page.nextOffset;
+    }
+    return collected.sort((left, right) => {
+      const a = transcriptMessageIdentity(left).sequence ?? Number.MAX_SAFE_INTEGER;
+      const b = transcriptMessageIdentity(right).sequence ?? Number.MAX_SAFE_INTEGER;
+      return a - b;
+    });
+  }
+
+  /**
+   * Start one resumable durable transcript reader for a session. History is
+   * read before subscription, then again after subscription to close the
+   * history/subscribe race. Reconnects run the same replay/subscribe/catch-up
+   * sequence. Stable sequence/message identities make every pass idempotent.
+   */
+  private async startTranscriptWatch(
+    sessionKey: string,
+    onEvent: ((entry: GatewayEvent) => void) | undefined,
+    onState: ((update: TranscriptTransportUpdate) => void) | undefined,
+    resumeAfterSequence?: number,
+  ): Promise<() => void> {
+    this.stopTranscriptWatch(sessionKey);
+    let stopped = false;
+    let lastSeenSequence = resumeAfterSequence ?? 0;
+    const seenIds = new Set<string>();
+    let work = Promise.resolve();
+    let unavailableTimer: ReturnType<typeof setTimeout> | undefined;
+    const subId = randomUUID();
+
+    const report = (
+      upstream: TranscriptTransportUpdate["upstream"],
+      transcript: TranscriptTransportUpdate["transcript"],
+    ) => onState?.({
+      upstream,
+      transcript,
+      ...(lastSeenSequence > 0 ? { lastSeenSequence } : {}),
+    });
+
+    const accept = (message: Record<string, unknown>, payload?: SessionMessagePayload) => {
+      const identity = transcriptMessageIdentity(message);
+      const sequence = payload?.messageSeq ?? identity.sequence;
+      const id = payload?.messageId ?? identity.id ?? transcriptMessageFallbackId(message);
+      if (sequence !== undefined && sequence <= lastSeenSequence) return;
+      if (id && seenIds.has(id)) return;
+      if (id) seenIds.add(id);
+      if (sequence !== undefined) lastSeenSequence = Math.max(lastSeenSequence, sequence);
+      for (const event of transcriptMessageEvents(message)) onEvent?.(event);
+    };
+
+    const replay = async (baseline: boolean) => {
+      // A new watch only needs the current high-water mark, not the session's
+      // entire lifetime. Resume/gap-fill reads walk older pages until they
+      // cross the stored cursor.
+      const messages = await this.readHistoryAfter(
+        sessionKey,
+        baseline ? Number.MAX_SAFE_INTEGER : lastSeenSequence,
+      );
+      if (baseline) {
+        for (const message of messages) {
+          const identity = transcriptMessageIdentity(message);
+          seenIds.add(identity.id ?? transcriptMessageFallbackId(message));
+          if (identity.sequence !== undefined) {
+            lastSeenSequence = Math.max(lastSeenSequence, identity.sequence);
+          }
+        }
+        return;
+      }
+      for (const message of messages) accept(message);
+    };
+
+    const recover = async (baseline: boolean) => {
+      if (stopped) return;
+      if (unavailableTimer) {
+        clearTimeout(unavailableTimer);
+        unavailableTimer = undefined;
+      }
+      report(baseline ? "connected" : "reconnecting", "replaying");
+      await replay(baseline);
+      if (stopped) return;
+      await this.sendRpc("sessions.messages.subscribe", { key: sessionKey }, 20_000);
+      await replay(false);
+      if (stopped) return;
+      report("connected", "live");
+    };
+
+    const enqueueRecovery = (baseline: boolean) => {
+      work = work.then(() => recover(baseline)).catch((err: unknown) => {
+        if (stopped) return;
+        report("unavailable", "detached");
+        logDebug(
+          `[openclaw-gateway] transcript recovery failed for ${sessionKey}: ` +
+            `${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
+      return work;
+    };
+
+    const onReconnect = () => {
+      if (stopped) return;
+      void enqueueRecovery(false);
+    };
+    const onDisconnected = () => {
+      if (stopped) return;
+      report("reconnecting", "detached");
+      unavailableTimer = setTimeout(() => {
+        if (!stopped) report("unavailable", "detached");
+      }, 60_000);
+      unavailableTimer.unref?.();
+    };
+
+    const stop = () => {
+      if (stopped) return;
+      stopped = true;
+      if (unavailableTimer) clearTimeout(unavailableTimer);
+      this.subscribers.delete(subId);
+      this.reconnectListeners.delete(onReconnect);
+      this.streamCloseListeners.delete(onDisconnected);
+      if (this.transcriptWatches.get(sessionKey) === stop) {
+        this.transcriptWatches.delete(sessionKey);
+      }
+    };
+    this.transcriptWatches.set(sessionKey, stop);
+    this.reconnectListeners.add(onReconnect);
+    this.streamCloseListeners.add(onDisconnected);
+    this.subscribers.set(subId, (frame) => {
+      if (frame.type !== "event" || frame.event !== "session.message") return;
+      const payload = frame.payload as SessionMessagePayload;
+      if (payload.sessionKey !== sessionKey || !payload.message) return;
+      work = work.then(async () => {
+        const sequence = payload.messageSeq ?? transcriptMessageIdentity(payload.message!).sequence;
+        if (sequence !== undefined && sequence > lastSeenSequence + 1) {
+          report("connected", "replaying");
+          await replay(false);
+        }
+        accept(payload.message!, payload);
+        report("connected", "live");
+      }).catch((err: unknown) => {
+        report("unavailable", "detached");
+        logDebug("[openclaw-gateway] live transcript gap-fill failed:", err);
+      });
+    });
+
+    await enqueueRecovery(resumeAfterSequence === undefined);
+    return stop;
+  }
+
+  resumeTranscript(
+    sessionKey: string,
+    resumeAfterSequence: number | undefined,
+    onEvent: ((entry: GatewayEvent) => void) | undefined,
+    onState: ((update: TranscriptTransportUpdate) => void) | undefined,
+  ): Promise<void> {
+    return this.startTranscriptWatch(sessionKey, onEvent, onState, resumeAfterSequence).then(
+      () => undefined,
+    );
+  }
+
+  stopTranscriptWatch(sessionKey: string): void {
+    this.transcriptWatches.get(sessionKey)?.();
+  }
+
+  private async sendChatWithRetry(
+    sessionKey: string,
+    message: string,
+    idempotencyKey: string,
+  ): Promise<unknown> {
+    let lastError: Error | undefined;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        return await this.sendRpc(
+          "chat.send",
+          { sessionKey, message, idempotencyKey },
+          30_000,
+        );
+      } catch (err) {
+        lastError = err instanceof Error ? err : new Error(String(err));
+        const retryable =
+          lastError.message === "Gateway disconnected" ||
+          lastError.message === "Gateway not connected" ||
+          lastError.message.startsWith("RPC timeout: chat.send") ||
+          lastError.message.includes("WebSocket closed") ||
+          lastError.message.includes("handshake timeout");
+        if (!retryable || attempt === 3) throw lastError;
+        logDebug(
+          `[openclaw-gateway] chat.send acknowledgement lost; retrying the same idempotency key ` +
+            `(attempt ${attempt + 1}/3)`,
+        );
+        try {
+          await this.connect();
+        } catch {
+          // sendRpc reconnects on the next attempt; keep the acknowledgement
+          // failure as the retry's authoritative error in the meantime.
+        }
+      }
+    }
+    throw lastError ?? new Error("chat.send failed without an error");
   }
 
   /**
@@ -873,8 +1194,22 @@ export class OpenClawGateway {
     timeoutMs: number,
     onEvent?: (entry: GatewayEvent) => void,
     onRunId?: (runId: string) => void,
+    onTranscriptState?: (update: TranscriptTransportUpdate) => void,
   ): Promise<string> {
-    await this.connect();
+    try {
+      await this.connect();
+    } catch (err) {
+      throw new Error(
+        `OpenClaw gateway unavailable at task startup: ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
+    const stopThisTranscriptWatch = await this.startTranscriptWatch(
+      sessionKey,
+      onEvent,
+      onTranscriptState,
+    );
 
     const idempotencyKey = randomUUID();
 
@@ -910,7 +1245,7 @@ export class OpenClawGateway {
       const timer = setTimeout(() => {
         // Only unsubscribes — nothing here aborts the upstream run, which is
         // why this rejection is typed: the run is very likely still going.
-        cleanup();
+        cleanup(false);
         reject(new ParentObservationTimeoutError(timeoutMs));
       }, timeoutMs);
 
@@ -923,13 +1258,14 @@ export class OpenClawGateway {
       let settled = false;
       let closeGraceTimer: ReturnType<typeof setTimeout> | undefined;
 
-      const cleanup = () => {
+      const cleanup = (stopTranscript = true) => {
         settled = true;
         clearTimeout(timer);
         if (closeGraceTimer) clearTimeout(closeGraceTimer);
         this.streamCloseListeners.delete(onStreamClosed);
         this.subscribers.delete(subId);
         this.subscribers.delete(agentSubId);
+        if (stopTranscript) stopThisTranscriptWatch();
       };
 
       /**
@@ -960,7 +1296,7 @@ export class OpenClawGateway {
             `[openclaw-gateway] socket closed with no terminal event; handing off to durable ` +
               `recovery after ${STREAM_CLOSE_GRACE_MS}ms grace (${heldLength} chars were held)`,
           );
-          cleanup();
+          cleanup(false);
           resolve(NO_SUMMARY_SENTINEL);
         }, STREAM_CLOSE_GRACE_MS);
         // Never hold the process open for a run nobody is waiting on.
@@ -987,33 +1323,14 @@ export class OpenClawGateway {
           if (captured) messageToolReply = captured;
         }
 
-        if (onEvent) {
-          if (p.stream === "lifecycle") {
+          if (onEvent) {
+            if (p.stream === "lifecycle") {
             onEvent({
               type: "lifecycle",
               text: formatLifecycleEventText(p.data?.phase),
             });
-          } else if (p.stream === "tool" && p.data?.phase === "start") {
-            const toolName = (p.data?.name as string) ?? "unknown";
-            const args = (p.data?.args as Record<string, unknown>) ?? {};
-            const summary = args.command ?? args.file_path ?? args.pattern ?? args.query ?? "";
-            onEvent({
-              type: "tool",
-              text: `${toolName}: ${String(summary).slice(0, 80)}`,
-              toolName,
-              args,
-            });
-          } else if (p.stream === "tool" && p.data?.phase === "result") {
-            const toolName = (p.data?.name as string) ?? "unknown";
-            const isError = p.data?.isError as boolean;
-            onEvent({
-              type: "tool-result",
-              text: `${toolName} ${isError ? "failed" : "done"}`,
-              toolName,
-              isError,
-            });
+            }
           }
-        }
       };
 
       const handleChatEvent = (payload: ChatEventPayload) => {
@@ -1023,7 +1340,6 @@ export class OpenClawGateway {
           const text = extractText(payload.message?.content ?? []);
           if (text) accumulated = text; // each delta is cumulative, not incremental
         } else if (payload.state === "final") {
-          cleanup();
           const blocks = payload.message?.content ?? [];
           logDebug(
             "[openclaw-gateway] final blocks:",
@@ -1038,12 +1354,14 @@ export class OpenClawGateway {
           // chat.") and the real body lives in the tool args.
           const liveText = extractText(blocks) || accumulated || agentStreamText;
           if (messageToolReply) {
+            cleanup();
             logDebug(
               `[openclaw-gateway] preferring captured \`message\` tool reply ` +
                 `(${messageToolReply.length} chars) over live final text (${liveText.length} chars)`,
             );
             resolve(messageToolReply);
           } else if (liveText) {
+            cleanup();
             resolve(liveText);
           } else {
             // The live stream yielded no final text. On long / compaction-heavy
@@ -1052,6 +1370,7 @@ export class OpenClawGateway {
             // exists only in the persisted transcript (SFR-247). Read it back
             // before falling through to the generic "no response" sentinel.
             logDebug("[openclaw-gateway] no live final text — trying transcript fallback");
+            cleanup(false);
             this.fetchTranscriptFinalText(sessionKey).then(
               (transcriptText) =>
                 resolve(transcriptText || NO_SUMMARY_SENTINEL),
@@ -1129,7 +1448,7 @@ export class OpenClawGateway {
         handleChatEvent(frame.payload as ChatEventPayload);
       });
 
-      this.sendRpc("chat.send", { sessionKey, message, idempotencyKey }, 30_000).then(
+      this.sendChatWithRetry(sessionKey, message, idempotencyKey).then(
         (sendResult) => {
           const id = (sendResult as { runId?: string } | undefined)?.runId;
           if (!id) {

@@ -71,6 +71,19 @@ export type LogEntry = { ts: number; type: string; text: string; isError?: boole
 export type JobStatus = "running" | "completed" | "completed_no_summary" | "error" | "cancelled";
 export type TaskStatus = "queued" | "running" | "blocked" | "needs-human" | "done" | "failed" | "cancelled";
 
+/** Independent lifecycle axes exposed to callers. */
+export type TaskExecutionState = "running" | "completed" | "failed" | "cancelled";
+export type TaskUpstreamState = "connected" | "reconnecting" | "unavailable";
+export type TaskTranscriptState = "live" | "replaying" | "detached" | "complete";
+export type TaskCancellationState = "none" | "requested" | "acknowledged" | "reconciled";
+
+/** Transport observation emitted by the resumable OpenClaw transcript reader. */
+export type TranscriptTransportUpdate = {
+  upstream: TaskUpstreamState;
+  transcript: TaskTranscriptState;
+  lastSeenSequence?: number;
+};
+
 /**
  * Where a job's terminal summary text actually came from. Absent (undefined)
  * on every pre-existing terminal path — including the ordinary live-final and
@@ -393,6 +406,11 @@ export type Job = {
   logs: LogEntry[];
   artifacts: Artifacts;
   recovery?: JobRecoveryState;
+  upstreamState: TaskUpstreamState;
+  transcriptState: TaskTranscriptState;
+  cancellationState: TaskCancellationState;
+  /** Durable OpenClaw transcript cursor, independent of check_task's presentation cursor. */
+  lastSeenSequence?: number;
   /** Last upstream liveness check. Unset until something has had cause to look — see JobLiveness. */
   liveness?: JobLiveness;
   /** Timestamp of the most recent lazy-transcript-recheck for a terminal job
@@ -443,6 +461,11 @@ export type JobSnapshot = {
   jobId: string;
   sessionKey: string;
   status: JobStatus;
+  execution: TaskExecutionState;
+  upstream: TaskUpstreamState;
+  transcript: TaskTranscriptState;
+  cancellation: TaskCancellationState;
+  lastSeenSequence?: number;
   startedAt: number;
   lastEventAt: number;
   lastPollAt: number;
@@ -549,6 +572,10 @@ export type RunTaskResult = {
   taskId?: string;
   sessionKey: string;
   status: "running";
+  execution: TaskExecutionState;
+  upstream: TaskUpstreamState;
+  transcript: TaskTranscriptState;
+  cancellation: TaskCancellationState;
   /** ClawConnect agent alias the task was dispatched to. */
   agent?: string;
   /** Exact next call to make to collect the result. Always non-null immediately after run_task. */
