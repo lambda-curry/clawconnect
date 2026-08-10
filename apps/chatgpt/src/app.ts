@@ -32,7 +32,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 // __dirname already is dist/) or via `tsx watch src/index.ts` in dev.
 const DEFAULT_WIDGET_HTML_PATH = join(__dirname, "..", "dist", "widget.html");
 /** Versioned so a shape change bumps the URI rather than serving a stale cached resource under the same id. */
-const WIDGET_URI = "ui://clawconnect/task-center-v2.html";
+const WIDGET_URI = "ui://clawconnect/task-center-v3.html";
 // One JSON file per agent (see GatewayPool/JsonFileJobStore) — outside dist/
 // and src/ so a build never touches it.
 const DEFAULT_JOB_STORE_DIR = join(__dirname, "..", ".job-store");

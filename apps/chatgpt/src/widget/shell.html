@@ -182,8 +182,8 @@ __STATE_MODULE__
 
 // ── Bridge: window.openai primary (ChatGPT's actual implemented surface),
 // a minimal hand-rolled MCP-Apps postMessage fallback for a spec-compliant
-// Read-only/navigation only — no mutation tool calls. Lifecycle wakes use
-// sendFollowUpMessage (needs_attention / completed / failed) once per transition.
+// Read-only/navigation only — no mutation tool calls. Lifecycle notifies use
+// a click → sendFollowUpMessage (needs_attention / completed / failed).
 const bridge = (() => {
   let mcpAppsRequestId = 0;
   const pending = new Map();
@@ -346,10 +346,12 @@ const app = {
   cardTabByTask: new Map(),
   lastRenderedGroup: null, // status group as of the last render — drives shouldRenderImmediately()
   renderTimer: null, // pending debounced render, for cosmetic-only updates
-  // Once-per-transition host wakes (needs_attention / completed / failed).
+  // Once-per-transition notify affordance (needs_attention / completed / failed).
+  // Queued for a click — ChatGPT blocks sendFollowUpMessage without a user gesture.
   // First sight of a taskId only seeds followUpPriorGroups — see collectFollowUpWakes.
   followUpPriorGroups: new Map(), // taskId -> TaskGroup
-  wokenFollowUps: new Set(), // `${taskId}:${group}` already sent
+  pendingFollowUps: new Map(), // `${taskId}:${group}` -> wake { prompt, … }
+  wokenFollowUps: new Set(), // `${taskId}:${group}` already sent via click
 };
 
 /**
@@ -511,7 +513,7 @@ async function refresh() {
       app.timelineFor = null;
     }
     app.pollFailures = 0;
-    maybeWakeFollowUps();
+    notePendingFollowUps();
   } catch {
     if (!isCurrent()) return;
     app.pollFailures += 1;
@@ -686,27 +688,38 @@ async function toggleExpand(sessionKey) {
 }
 
 /**
- * Nudge ChatGPT when a visible task newly enters needs_attention / completed /
- * failed. Only works while this iframe is mounted; the server cannot wake the
- * conversation. Deduped per taskId+group for the life of the mount.
+ * Queue a Notify button when a visible task newly enters needs_attention /
+ * completed / failed. Does not call sendFollowUpMessage — the host requires a
+ * synchronous user gesture; sendPendingFollowUp runs from the click handler.
  */
-function maybeWakeFollowUps() {
+function notePendingFollowUps() {
+  const already = new Set([...app.wokenFollowUps, ...app.pendingFollowUps.keys()]);
   const { wakes, priorGroups } = collectFollowUpWakes({
     tasks: compactVisibleTasks(),
     priorGroups: app.followUpPriorGroups,
-    alreadyWoken: app.wokenFollowUps,
+    alreadyWoken: already,
   });
   app.followUpPriorGroups = priorGroups;
-  for (const wake of wakes) {
-    app.wokenFollowUps.add(wake.key);
-    window.openai?.sendFollowUpMessage?.({ prompt: wake.prompt });
-  }
+  for (const wake of wakes) app.pendingFollowUps.set(wake.key, wake);
 }
 
-function composeFollowUp(sessionKey, text) {
-  // Explicit user actions are messages, never mutations — the widget never
-  // calls a mutating tool itself; it hands a prompt back to the assistant.
-  window.openai?.sendFollowUpMessage?.({ prompt: `${text} (sessionKey: ${sessionKey})` });
+function sendPendingFollowUp(key, event) {
+  event?.stopPropagation?.();
+  const wake = app.pendingFollowUps.get(key);
+  if (!wake) return;
+  // Must stay inside the click handler — ChatGPT drops follow-ups without a
+  // synchronous user gesture (poll/timer paths log and no-op).
+  window.openai?.sendFollowUpMessage?.({ prompt: wake.prompt });
+  app.pendingFollowUps.delete(key);
+  app.wokenFollowUps.add(key);
+  render();
+}
+
+function pendingFollowUpForTask(taskId) {
+  for (const wake of app.pendingFollowUps.values()) {
+    if (wake.taskId === taskId) return wake;
+  }
+  return null;
 }
 
 function el(tag, props, children) {
@@ -780,6 +793,19 @@ function renderRow(row, opts = {}) {
 
   // Tabs lead the card, then the title row and meta line beneath them.
   children.push(...headChildren);
+
+  const pending = pendingFollowUpForTask(taskId);
+  if (pending) {
+    children.push(
+      el("div", { class: "cc-actions" }, [
+        el("button", {
+          class: "cc-btn cc-btn--primary",
+          type: "button",
+          onclick: (e) => sendPendingFollowUp(pending.key, e),
+        }, ["Notify ChatGPT"]),
+      ]),
+    );
+  }
 
   const panelChildren = [];
   if (activeTab === "request") {

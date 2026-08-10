@@ -979,9 +979,10 @@ export function shouldRenderImmediately(prevGroup, nextGroup) {
 }
 
 /**
- * Status groups that should nudge the host conversation once when a mounted
- * card first observes the transition. First sight of a task only seeds
- * priorGroups — waking on hydrate would spam an already-finished card.
+ * Status groups that offer a one-click "Notify ChatGPT" button when a mounted
+ * card first observes the transition. ChatGPT rejects sendFollowUpMessage
+ * outside a synchronous user gesture, so the card queues these and waits for
+ * a click — it never auto-sends. First sight of a task only seeds priorGroups.
  *
  * @type {ReadonlySet<TaskGroup>}
  */

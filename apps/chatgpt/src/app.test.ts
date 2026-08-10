@@ -202,7 +202,7 @@ describe("unmounted core independence — run_task/get_task work identically reg
     // The broken resource itself surfaces as a JSON-RPC error on resources/read,
     // not a crash — a missing widget file must never affect the tool surface.
     const readResult = await rpc(url, "resources/read", {
-      uri: "ui://clawconnect/task-center-v2.html",
+      uri: "ui://clawconnect/task-center-v3.html",
     });
     expect(readResult.error).toBeDefined();
   });
@@ -236,7 +236,7 @@ describe("missing UI metadata fallback — widget disabled means the surface loo
   it("resources/read for the widget URI errors cleanly when the widget is disabled", async () => {
     const { url } = await startTestApp({ widgetEnabled: false });
     const result = await rpc(url, "resources/read", {
-      uri: "ui://clawconnect/task-center-v2.html",
+      uri: "ui://clawconnect/task-center-v3.html",
     });
     expect(result.error).toBeDefined();
   });
@@ -268,7 +268,7 @@ describe("widget enabled with a real resource", () => {
     const { result } = await rpc(url, "tools/list");
     const byName = Object.fromEntries(result.tools.map((t: any) => [t.name, t]));
 
-    expect(byName.run_task._meta.ui.resourceUri).toBe("ui://clawconnect/task-center-v2.html");
+    expect(byName.run_task._meta.ui.resourceUri).toBe("ui://clawconnect/task-center-v3.html");
     expect(byName.run_task._meta.ui.visibility).toEqual(["model", "app"]);
 
     for (const name of ["get_task", "list_tasks", "get_session"]) {
@@ -457,8 +457,8 @@ describe("MCP 2026-07-28 over the SDK v2 handler", () => {
     expect(read.contents[0]).toMatchObject({ text: "<html><body>modern widget</body></html>" });
     const { tools } = await client.listTools();
     expect(tools.find((tool) => tool.name === "run_task")?._meta).toMatchObject({
-      "ui/resourceUri": "ui://clawconnect/task-center-v2.html",
-      "openai/outputTemplate": "ui://clawconnect/task-center-v2.html",
+      "ui/resourceUri": "ui://clawconnect/task-center-v3.html",
+      "openai/outputTemplate": "ui://clawconnect/task-center-v3.html",
     });
   });
 

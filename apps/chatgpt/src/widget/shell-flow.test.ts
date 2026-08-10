@@ -425,30 +425,45 @@ describe("render cadence: lifecycle/terminal changes are immediate, cosmetic-onl
   });
 });
 
-describe("follow-up wake on needs_attention / completed / failed", () => {
-  it("seeds on first poll without waking, then wakes once when status enters a wake group", async () => {
+describe("Notify ChatGPT button on needs_attention / completed / failed", () => {
+  it("queues a button on transition, sends only on click, and does not re-queue the same group", async () => {
     vi.useFakeTimers();
     try {
       const world = { tasks: [{ taskId: TASK_ID, jobId: TASK_ID, sessionKey: SESSION_KEY, agent: "assistant", status: "running", lastEventAt: 0 }] };
       const host = createHost({ mountedOnBoot: true, world });
-      mount(host);
+      const { root } = mount(host);
       await settle();
       expect(host.followUps).toHaveLength(0);
+      expect(withClass(root, "cc-btn").filter((n) => textOf(n) === "Notify ChatGPT")).toHaveLength(0);
 
       host.completeTask("needs-human");
       await vi.advanceTimersByTimeAsync(3_000);
       await settle();
+      // Queued for a user gesture — no auto sendFollowUpMessage.
+      expect(host.followUps).toHaveLength(0);
+      const notify = withClass(root, "cc-btn").find((n) => textOf(n) === "Notify ChatGPT");
+      expect(notify).toBeTruthy();
+
+      click(notify!);
+      await settle();
       expect(host.followUps).toHaveLength(1);
       expect(host.followUps[0]?.prompt).toContain("needs attention");
       expect(host.followUps[0]?.prompt).toContain(TASK_ID);
+      expect(withClass(root, "cc-btn").filter((n) => textOf(n) === "Notify ChatGPT")).toHaveLength(0);
 
-      // Still needs-human on the next poll — no second wake.
+      // Still needs-human on the next poll — no second button.
       await vi.advanceTimersByTimeAsync(10_000);
       await settle();
       expect(host.followUps).toHaveLength(1);
+      expect(withClass(root, "cc-btn").filter((n) => textOf(n) === "Notify ChatGPT")).toHaveLength(0);
 
       host.completeTask("completed");
       await vi.advanceTimersByTimeAsync(10_000);
+      await settle();
+      expect(host.followUps).toHaveLength(1);
+      const notifyDone = withClass(root, "cc-btn").find((n) => textOf(n) === "Notify ChatGPT");
+      expect(notifyDone).toBeTruthy();
+      click(notifyDone!);
       await settle();
       expect(host.followUps).toHaveLength(2);
       expect(host.followUps[1]?.prompt).toContain("completed");
@@ -457,12 +472,13 @@ describe("follow-up wake on needs_attention / completed / failed", () => {
     }
   });
 
-  it("does not wake when mounting onto an already-completed task", async () => {
+  it("does not offer Notify when mounting onto an already-completed task", async () => {
     const world = { tasks: [{ taskId: TASK_ID, jobId: TASK_ID, sessionKey: SESSION_KEY, agent: "assistant", status: "completed", lastEventAt: 0 }] };
     const host = createHost({ mountedOnBoot: true, world });
-    mount(host);
+    const { root } = mount(host);
     await settle();
     expect(host.followUps).toHaveLength(0);
+    expect(withClass(root, "cc-btn").filter((n) => textOf(n) === "Notify ChatGPT")).toHaveLength(0);
   });
 });
 
