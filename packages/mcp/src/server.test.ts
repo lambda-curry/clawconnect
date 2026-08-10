@@ -79,7 +79,12 @@ async function connectedClient() {
 }
 
 async function connectedModernClient() {
-  const handler = createMcpHandler(() => createMcpServer({ registry: fakeRegistry() }).server);
+  const handler = createMcpHandler((ctx) =>
+    createMcpServer({
+      registry: fakeRegistry(),
+      protocol: { era: ctx.era, ...(ctx.era === "modern" ? { version: "2026-07-28" } : {}) },
+    }).server,
+  );
   const transport = new StreamableHTTPClientTransport(new URL("http://test.local/mcp"), {
     fetch: (input, init) => handler.fetch(new Request(input, init)),
   });
@@ -99,7 +104,7 @@ describe("generic MCP 2026-07-28 handler-fetch coverage", () => {
     expect(tools.map((tool) => tool.name)).toEqual(
       expect.arrayContaining(["run_task", "check_task", "get_task", "list_tasks"]),
     );
-    const info = await client.callTool({ name: "get_mcp_info", arguments: {} });
+    const info = await client.callTool({ name: "get_connection_info", arguments: {} });
     expect(info.structuredContent).toMatchObject({
       protocolEra: "modern",
       protocolVersion: "2026-07-28",
@@ -163,13 +168,28 @@ describe("shipped dual-era stdio router", () => {
 });
 
 describe("generic MCP tools/list contract", () => {
-  it("reports the legacy protocol selected by initialize-era clients", async () => {
+  it("reports the era it is actually serving, and omits a revision it was never told", async () => {
     const client = await connectedClient();
-    const info = await client.callTool({ name: "get_mcp_info", arguments: {} });
-    expect(info.structuredContent).toMatchObject({
-      protocolEra: "legacy",
-      protocolVersion: "2025-06-18",
-    });
+    const info = await client.callTool({ name: "get_connection_info", arguments: {} });
+    expect(info.structuredContent).toMatchObject({ protocolEra: "legacy" });
+    // A legacy stdio connection carries no protocol-version header, so there
+    // is nothing to report. The previous implementation answered a hardcoded
+    // "2025-06-18" here while `initialize` separately echoed whatever the
+    // client asked for — including "2024-11-05" — so the one tool whose job
+    // was describing the connection could contradict its own handshake.
+    expect(info.structuredContent).not.toHaveProperty("protocolVersion");
+  });
+
+  it("reports a build identity and a tool-catalog fingerprint, so a stale client is detectable", async () => {
+    const client = await connectedClient();
+    const info = await client.callTool({ name: "get_connection_info", arguments: {} });
+    const manifest = info.structuredContent as Record<string, unknown>;
+    expect(manifest.build).toBeTypeOf("string");
+    expect(manifest.toolsetVersion).toMatch(/^[0-9a-f]{12}$/);
+    // The fingerprint must cover the catalog actually served, so a client
+    // holding an older snapshot reports a different value than the server.
+    const { tools } = await client.listTools();
+    expect(manifest.tools).toEqual(tools.map((t) => t.name).sort());
   });
 
   it("exposes the unversioned core surface — run_task/check_task/get_task/list_tasks, no _v2 names anywhere", async () => {

@@ -64,6 +64,15 @@ export {
   TASK_SUMMARY_PREVIEW_MAX,
   TASK_BLOCKED_NOTICE_MAX,
 } from "./tools.ts";
+export { buildCapabilities, GET_TOKEN_HINT } from "./capability.ts";
+export type {
+  Capability,
+  CapabilityContext,
+  CapabilityResult,
+  Identity,
+  Scope,
+} from "./capability.ts";
+export { SERVER_VERSION, buildSha, toolsetVersion } from "./build-info.ts";
 export { collapseToolPairs, projectLogWindow, INITIAL_WINDOW_MAX, DELTA_WINDOW_MAX, EVENT_TEXT_MAX } from "./log-projection.ts";
 export type { LogWindow } from "./log-projection.ts";
 export { setTelemetrySink, recordTelemetry } from "./telemetry.ts";
