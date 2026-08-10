@@ -3,49 +3,22 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Hono } from "hono";
-import {
-  createMcpHandler,
-  fromJsonSchema,
-  isJsonContentType,
-  isLegacyRequest,
-  McpServer,
-} from "@modelcontextprotocol/server";
-import type { AuthInfo, CallToolResult, McpRequestContext } from "@modelcontextprotocol/server";
+import { McpServer, createMcpHandler, isJsonContentType } from "@modelcontextprotocol/server";
+import type { AuthInfo, McpRequestContext } from "@modelcontextprotocol/server";
 import { toWebRequest } from "@modelcontextprotocol/node";
-import {
-  GatewayPool,
-  LocalTmuxFleetAdapter,
-  runTask,
-  checkTask,
-  getTask,
-  getTaskPrompt,
-  listSessions,
-  listTasks,
-  getSession,
-  agentBlurb,
-  agentDescriptor,
-  searchMemory,
-  getMemory,
-  listCollections,
-  buildRunTaskStructuredContent,
-  buildCheckTaskStructuredContent,
-  buildGetTaskStructuredContent,
-  blockedDelegation,
-  blockedDelegationNotice,
-  TASK_SUMMARY_PREVIEW_MAX,
-} from "@clawconnect/core";
+import { GatewayPool, LocalTmuxFleetAdapter, buildCapabilities } from "@clawconnect/core";
+import { registerCapability } from "@clawconnect/mcp";
 import type {
-  AgentEntry,
   AgentRegistry,
   AgentSessionRuntimeRegistry,
-  CheckMode,
+  ContinuationState,
   FleetAdapter,
+  Identity,
   JobSnapshot,
-  TaskDetail,
-  TaskSummary,
+  Scope,
 } from "@clawconnect/core";
+import { blockedDelegation, blockedDelegationNotice } from "@clawconnect/core";
 import {
-  negotiateProtocolVersion,
   buildExtensionsCapability,
   buildMountMeta,
   buildAppCallableMeta,
@@ -56,40 +29,30 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 // scripts/build-widget.mjs always writes to <package root>/dist/widget.html.
 // Resolving via "../dist" (not the running module's own directory) finds it
 // correctly whether this module is running compiled (dist/app.js, so
-// __dirname already is dist/) or via `tsx watch src/index.ts` in dev
-// (__dirname is src/) — as long as `node scripts/build-widget.mjs` has been
-// run at least once in either case.
+// __dirname already is dist/) or via `tsx watch src/index.ts` in dev.
 const DEFAULT_WIDGET_HTML_PATH = join(__dirname, "..", "dist", "widget.html");
 /** Versioned so a shape change bumps the URI rather than serving a stale cached resource under the same id. */
 const WIDGET_URI = "ui://clawconnect/task-center-v1.html";
 // One JSON file per agent (see GatewayPool/JsonFileJobStore) — outside dist/
-// and src/ so a build never touches it. Restart-safety only: deleting this
-// directory just means in-flight jobs re-derive from scratch instead of
-// reattaching, same as the pre-persistence behavior.
+// and src/ so a build never touches it.
 const DEFAULT_JOB_STORE_DIR = join(__dirname, "..", ".job-store");
 
 export interface CreateAppOptions {
   /** Path to the built, self-contained widget HTML. Overridable so tests don't depend on a real build having run. */
   widgetHtmlPath?: string;
-  /** Directory for per-agent job-persistence files. Defaults on (DEFAULT_JOB_STORE_DIR) — override so tests write into a scratch dir instead of the real default. */
+  /** Directory for per-agent job-persistence files. Defaults on — override so tests write into a scratch dir. */
   jobStoreDir?: string;
   /**
-   * Fleet-transcript recovery adapter (see docs/architecture/2026-08-02-
-   * managed-fleet-attachment-plan.md). Defaults to a real LocalTmuxFleetAdapter
-   * so recovery tier 3 is actually reachable in production — without this,
-   * A host could attach a managed session all day and ClawConnect would never
-   * consult it. Override in tests to inject a fake and assert on wiring
-   * without needing a real tmux/filesystem.
+   * Fleet-transcript recovery adapter. Defaults to a real LocalTmuxFleetAdapter
+   * so recovery tier 3 is actually reachable in production. Override in tests
+   * to inject a fake and assert on wiring.
    */
   fleetAdapter?: FleetAdapter;
   /**
    * Managed-agent-session runtimes this deployment can drive (see
-   * agent-session.ts). A host registers one runtime id/provider plus
-   * per-session inspect/continue/detach callbacks and keeps every detail of
-   * that runtime's CLI, transport, and project model on its own side of the
-   * boundary. Omitted, claude-fleet stays the only reachable runtime and an
-   * attachment naming any other reads back as a precise unknown_runtime
-   * result rather than failing the task.
+   * agent-session.ts). Omitted, claude-fleet stays the only reachable runtime
+   * and an attachment naming any other reads back as a precise
+   * unknown_runtime result rather than failing the task.
    */
   agentSessionRuntimes?: AgentSessionRuntimeRegistry;
 }
@@ -124,17 +87,27 @@ export function checkTaskText(snapshot: JobSnapshot, isTerminal: boolean): strin
   const blocked = blockedDelegation(snapshot);
   const resume = `Poll again with knownLogCount=${snapshot.logCursor}.`;
   if (blocked) return `${blocked.notice} ${resume}`;
-  return snapshot.recovery
-    ? `Recovering late transcript final text. ${resume}`
-    : `Still running. ${resume}`;
+  return snapshot.recovery ? `Recovering late transcript final text. ${resume}` : `Still running. ${resume}`;
 }
 
 /**
- * Builds the full ChatGPT HTTP MCP surface for a given agent registry, with
- * no side effects (no env reads beyond feature flags, no listen()). Split
- * out of index.ts so it's testable without the registry-loading /
- * process.exit(1) / server.listen() side effects that used to run at module
- * import time — see docs/architecture/2026-07-27-chatgpt-ui-reconciliation.md.
+ * Builds the ChatGPT HTTP MCP surface for a given agent registry, with no
+ * side effects (no listen(), no registry loading).
+ *
+ * This app declares no tools. It projects core's capability registry, which
+ * is the same array the stdio transport serves — so a description, a schema,
+ * or an authorization rule cannot be right on one transport and wrong on the
+ * other. What remains here is genuinely HTTP-shaped: credentials, per-URL
+ * agent scoping, CORS, the widget resource, and the terse model-facing text a
+ * UI client wants in place of the stdio transport's verbose polling payload.
+ *
+ * Both protocol eras are served by the SDK from one factory. The ~450-line
+ * hand-rolled 2025-era JSON-RPC router this file used to carry is gone:
+ * `createMcpHandler` defaults to `legacy: 'stateless'`, answering each 2025
+ * request from a fresh instance of the same factory. Deleting it removed the
+ * duplicate tool declarations and the duplicate authorization checks that
+ * came with it, and version negotiation now belongs to the SDK rather than to
+ * a hand-maintained list of supported revisions.
  */
 export function createApp(registry: AgentRegistry, opts: CreateAppOptions = {}): App {
   const widgetHtmlPath = opts.widgetHtmlPath ?? DEFAULT_WIDGET_HTML_PATH;
@@ -148,7 +121,7 @@ export function createApp(registry: AgentRegistry, opts: CreateAppOptions = {}):
     try {
       cachedWidgetHtml = readFileSync(widgetHtmlPath, "utf8");
     } catch (err) {
-      // Missing/broken widget resource must never take down the connector —
+      // A missing/broken widget resource must never take down the connector —
       // run_task/check_task correctness does not depend on this file existing.
       console.error(
         `[chatgpt-app] failed to load widget resource from ${widgetHtmlPath}: ${(err as Error).message}`,
@@ -212,32 +185,10 @@ export function createApp(registry: AgentRegistry, opts: CreateAppOptions = {}):
    * configured agents (so a typo doesn't hand the caller an empty enum).
    *
    * `serverName` is the MCP serverInfo.name to report: when the connection is
-   * scoped to exactly one labelled group, it's that group's label (e.g.
-   * "Bakery ClawConnect") so multiple connectors on the same client are
-   * distinguishable. Otherwise it's the generic "ClawConnect".
+   * scoped to exactly one labelled group, it's that group's label so multiple
+   * connectors on the same client are distinguishable.
    */
   const DEFAULT_SERVER_NAME = "ClawConnect";
-  const LEGACY_PROTOCOL_VERSION = "2025-06-18";
-  const MODERN_PROTOCOL_VERSION = "2026-07-28";
-
-  function protocolInfo(protocolEra: "legacy" | "modern", protocolVersion: string) {
-    const payload = {
-      protocolEra,
-      protocolVersion,
-      serverName: DEFAULT_SERVER_NAME,
-      serverVersion: "0.1.0",
-    };
-    return {
-      content: [{ type: "text" as const, text: JSON.stringify(payload) }],
-      structuredContent: payload,
-    };
-  }
-
-  interface Scope {
-    allowedIds: string[];
-    defaultId: string;
-    serverName: string;
-  }
 
   function resolveScope(url: URL): Scope {
     const csv = (vals: string[]) =>
@@ -285,392 +236,26 @@ export function createApp(registry: AgentRegistry, opts: CreateAppOptions = {}):
     return { allowedIds: allowed, defaultId, serverName };
   }
 
-  /** Non-terminal task statuses — tasks that still need attention. */
-  const ACTIVE_STATUSES: ReadonlySet<TaskSummary["status"]> = new Set([
-    "queued",
-    "running",
-    "blocked",
-    "needs-human",
-  ]);
-
-  const AGENTS_BY_ID = new Map<string, AgentEntry>(registry.agents.map((a) => [a.id, a]));
-
-  function blurbsFor(ids: string[]): string {
-    return ids
-      .map((id) =>
-        agentBlurb(AGENTS_BY_ID.get(id) ?? { id, url: "", password: "", openclawAgentId: "" }),
-      )
-      .join("; ");
-  }
-
-  function buildTools(allowedIds: string[], defaultId: string, identity: Identity) {
-    const blurbs = blurbsFor(allowedIds);
-    const senderNameProp = identity.user
-      ? {
-          type: "string" as const,
-          description: `Ignored — this connection is authenticated as ${identity.user}, and the server stamps that identity on every task.`,
-        }
-      : {
-          type: "string" as const,
-          description: identity.legacy
-            ? `Name of the person you're chatting with, on whose behalf this task is dispatched. Pass it when known so the receiving agent knows who it's helping. Also: ${GET_TOKEN_HINT}`
-            : "Name of the person you're chatting with, on whose behalf this task is dispatched. This connection may be shared by multiple people — when the user has identified themselves (or you otherwise know who you're talking to), pass their name so the receiving agent knows who it's helping. The agent has no other way to tell.",
-        };
-    const agentProp = {
-      type: "string" as const,
-      enum: allowedIds,
-      description: `OpenClaw agent to dispatch to. Available: ${blurbs}. Default: ${defaultId}. Use list_agents for full descriptions and routing guidance.`,
-    };
-    return [
-      {
-        name: "run_task",
-        description: `Delegate work to an OpenClaw agent. Returns a jobId and sessionKey immediately; the task runs in the background.
-
-The result is what the user wants — not the jobId. Call check_task in a loop until continuePolling is false, then report the real outcome. \`nextAction\` is the exact next call: its args are check_task's parameters, so pass them through unchanged. A typical short task takes 30s–3min.
-
-Skip the polling loop only for explicit fire-and-forget, or when parallel-dispatching to several agents (dispatch all first, then poll each).
-
-Pass sessionKey from a previous result to continue the same thread.`,
-        inputSchema: {
-          type: "object",
-          properties: {
-            task: { type: "string", description: "The task to perform" },
-            agent: agentProp,
-            context: { type: "string", description: "Optional context for the task" },
-            sessionKey: {
-              type: "string",
-              description:
-                "Session key from a previous call to continue the same thread. Omit to start a new thread.",
-            },
-            senderName: senderNameProp,
-          },
-          required: ["task"],
-        },
-        // Matches buildRunTaskStructuredContent's exact shape (packages/core/
-        // src/structured-content.ts) — this is what the widget's mount data
-        // and any structuredContent-reading client actually receive.
-        outputSchema: {
-          type: "object",
-          properties: {
-            jobId: { type: "string" },
-            taskId: { type: "string" },
-            sessionKey: { type: "string" },
-            status: { type: "string", enum: ["running"] },
-            agent: { type: "string" },
-            nextAction: {
-              type: ["object", "null"],
-              properties: {
-                tool: { type: "string", enum: ["check_task"] },
-                args: {
-                  type: "object",
-                  // check_task's own parameter names — the args object is
-                  // meant to be forwarded verbatim.
-                  properties: {
-                    jobId: { type: "string" },
-                    sessionKey: { type: "string" },
-                  },
-                  required: ["jobId", "sessionKey"],
-                },
-              },
-              required: ["tool", "args"],
-            },
-          },
-          required: ["jobId", "taskId", "sessionKey", "status", "nextAction"],
-        },
-        annotations: {
-          title: "Run Task",
-          readOnlyHint: false,
-          destructiveHint: false,
-          // The dispatched agent has its own tools and can reach outside this
-          // connection (filesystem, network, other services) — this
-          // connection has no visibility into what run_task itself does
-          // beyond queueing. Matches the generic MCP server's annotation;
-          // annotations are hints for client UX, not enforced guarantees.
-          openWorldHint: true,
-        },
-        _meta: {
-          ...buildMountMeta(WIDGET_ENABLED, WIDGET_URI),
-          "openai/toolInvocation/invoking": "Sending task to OpenClaw agent...",
-        },
-      },
-      {
-        name: "check_task",
-        description: `Wait for a dispatched run_task job and collect its result. The only tool that waits — get_task is the immediate, non-blocking read.
-
-mode="wait" (default) blocks up to waitMs and returns early only on a terminal status: completed, completed_no_summary, or error. A timeout return is neither an error nor terminal — continuePolling is true, so call again with the same jobId. Never submit a new run_task because a check_task timed out; the session-busy guard would reject the duplicate anyway.
-
-Do not wait indefinitely inside one reply. Each individual wait is bounded, but chaining them is not: several consecutive 45s waits keep one response open for minutes with nothing visible happening, and that is what breaks the connection — the host gives up on a reply that produces no output for long enough, and the user sees a failure even though the job is fine. After roughly two or three waits (~2 minutes), stop waiting and end your reply: say the task is still running and give the jobId. The job is durable and keeps going without you, its progress card keeps updating on its own, and you or the user can pick it up with another check_task whenever. Ending the reply is a handoff, not an abandonment — a run that outlives one reply is normal, not a failure to report.
-
-mode="poll" returns as soon as any new log activity appears (still bounded by waitMs) — for live progress UIs, not for collecting a final result.
-
-Each response's logCursor is an opaque resume token: pass it back verbatim as knownLogCount on the next call. Do not derive it from how many log entries you received.
-
-completed_no_summary and error are terminal — report them. Rarely, a long tool-heavy run finishes its answer after the connector marks it terminal; one follow-up check_task ~30s later can upgrade such a job to completed. Do that at most once or twice, not as routine.`,
-        inputSchema: {
-          type: "object",
-          properties: {
-            jobId: { type: "string", description: "The jobId returned by run_task." },
-            sessionKey: {
-              type: "string",
-              description:
-                "The sessionKey from run_task — resolves the session's latest job. Alternative to jobId, and how a status check reattaches after a refresh.",
-            },
-            agent: {
-              ...agentProp,
-              description: "Usually inferred from jobId; set only if run_task ran elsewhere.",
-            },
-            knownLogCount: {
-              type: "number",
-              description:
-                "The previous response's logCursor, passed back UNCHANGED — an opaque resume token, never a count you compute from the entries you received. Omit or 0 for the initial window. The server returns only events after it (a bounded delta, not the full log); in poll mode it also gates the early return.",
-            },
-            mode: {
-              type: "string",
-              enum: ["poll", "wait"],
-              description:
-                '"wait" (default) blocks up to waitMs, returning early only on a terminal status; a timeout return is non-terminal, just call again. "poll" returns on any new log activity — for live progress UIs.',
-            },
-            waitMs: {
-              type: "number",
-              description:
-                "Max time to block, in ms. Default 45000; clamped to [1000, 120000] rather than erroring.",
-            },
-          },
-        },
-        annotations: {
-          title: "Check Task Status",
-          readOnlyHint: true,
-          destructiveHint: false,
-          idempotentHint: true,
-          openWorldHint: false,
-        },
-      },
-      {
-        name: "list_sessions",
-        description: `List every OpenClaw session this connector knows about, across agents — including finished ones, since a completed session's sessionKey is what you pass to run_task to continue that thread.`,
-        inputSchema: { type: "object", properties: {} },
-        annotations: {
-          title: "List Sessions",
-          readOnlyHint: true,
-          destructiveHint: false,
-          idempotentHint: true,
-          openWorldHint: false,
-        },
-      },
-      {
-        name: "list_agents",
-        description: `List the OpenClaw agents reachable from this connection, with role, emoji, description, and "when to use" guidance. Useful when deciding which agent to delegate to.`,
-        inputSchema: { type: "object", properties: {} },
-        annotations: {
-          title: "List Agents",
-          readOnlyHint: true,
-          destructiveHint: false,
-          idempotentHint: true,
-          openWorldHint: false,
-        },
-      },
-      {
-        name: "search_memory",
-        description: `Search shared QMD memory for context — notes, decisions, identity files, project docs, past cycle records. Useful any time you want to ground yourself in what's already known about a topic: to answer directly without delegating, to enrich a prompt before run_task, or just to recall something. Returns top-matching snippets across collections this connection can reach. Independent of run_task — use whenever it helps.`,
-        inputSchema: {
-          type: "object",
-          properties: {
-            query: { type: "string", description: "Search query (keyword + semantic combined)" },
-            limit: { type: "number", description: "Max results to return (default 8, max 50)" },
-            collections: {
-              type: "array",
-              items: { type: "string" },
-              description:
-                "Restrict to these collection names. Omit to search all collections the connection can reach. Use list_collections to discover them.",
-            },
-            intent: {
-              type: "string",
-              description: "One-line description of why you're searching — telemetry only.",
-            },
-          },
-          required: ["query"],
-        },
-        annotations: {
-          title: "Search Memory",
-          readOnlyHint: true,
-          destructiveHint: false,
-          idempotentHint: true,
-          openWorldHint: false,
-        },
-      },
-      {
-        name: "get_memory",
-        description: `Fetch the full body of a memory document by its qmd:// path (returned in search_memory hits as 'file').`,
-        inputSchema: {
-          type: "object",
-          properties: {
-            file: {
-              type: "string",
-              description: "qmd://collection/<id>.md path from a search_memory hit",
-            },
-          },
-          required: ["file"],
-        },
-        annotations: {
-          title: "Get Memory",
-          readOnlyHint: true,
-          destructiveHint: false,
-          idempotentHint: true,
-          openWorldHint: false,
-        },
-      },
-      {
-        name: "list_collections",
-        description: `List the QMD memory collections this connection can search. Each entry shows which agents grant access. Useful when you want to scope a search_memory call to a particular collection.`,
-        inputSchema: { type: "object", properties: {} },
-        annotations: {
-          title: "List Collections",
-          readOnlyHint: true,
-          destructiveHint: false,
-          idempotentHint: true,
-          openWorldHint: false,
-        },
-      },
-      {
-        name: "get_mcp_info",
-        description:
-          "Report the MCP protocol era and negotiated protocol version used by this connection. Use this when the user asks which MCP version ChatGPT is using.",
-        inputSchema: { type: "object", properties: {} },
-        annotations: {
-          title: "Get MCP Info",
-          readOnlyHint: true,
-          destructiveHint: false,
-          idempotentHint: true,
-          openWorldHint: false,
-        },
-      },
-      {
-        name: "list_tasks",
-        description: `List task rows across agents — one per session — for coordination ("what needs attention"), not session debugging. Each row's summary is a bounded preview (~${TASK_SUMMARY_PREVIEW_MAX} chars, flagged with summaryTruncated); use get_task for a task's full summary and artifacts.`,
-        inputSchema: {
-          type: "object",
-          properties: {
-            view: {
-              type: "string",
-              enum: ["active", "all"],
-              description:
-                '"active" returns only non-terminal tasks (queued, running, blocked, needs-human); omit to include terminal ones too.',
-            },
-          },
-        },
-        annotations: {
-          title: "List Tasks",
-          readOnlyHint: true,
-          destructiveHint: false,
-          idempotentHint: true,
-          openWorldHint: false,
-        },
-        _meta: buildAppCallableMeta(WIDGET_ENABLED),
-      },
-      {
-        name: "get_task",
-        description: `Immediate snapshot of one task — NEVER waits, unlike check_task. Returns whatever state exists right now (including status="running"), for diagnostics, manual reads, or UI refresh. This is also the read path for a task's COMPLETE summary and artifacts; list_tasks only carries a truncated preview.
-
-At detail levels that include it, \`updates\` is a bounded recent-activity window, not the full accumulated log — pass \`knownLogCount\` to get only newer entries. \`summary\`/\`artifacts\` are never bounded by the cursor: once terminal they are always complete.`,
-        inputSchema: {
-          type: "object",
-          properties: {
-            taskId: {
-              type: "string",
-              description:
-                "Task identifier. Same value as jobId — either name resolves the same task.",
-            },
-            detail: {
-              type: "string",
-              enum: [
-                "core",
-                "summary",
-                "updates",
-                "artifacts",
-                "diagnostics",
-                "prompt",
-                "full",
-                "fullWithDiagnostics",
-              ],
-              description:
-                "Detail preset; omit for summary. core=identifiers, status, and polling metadata only; summary=core+summary; updates=core+`updates` (recent activity) with logCursor/logEventCount; artifacts=core+artifacts; diagnostics=core+`diagnostics` (error, errorInfo, recovery, continuationState); prompt=the originally submitted task/context, which no other preset ever returns; full=core+summary+updates+artifacts; fullWithDiagnostics=full+diagnostics.",
-            },
-            knownLogCount: {
-              type: "number",
-              description:
-                "The previous response's logCursor, passed back UNCHANGED — an opaque resume token, never a count of entries you received. Omit for the initial recent-activity window.",
-            },
-          },
-          required: ["taskId"],
-        },
-        annotations: {
-          title: "Get Task",
-          readOnlyHint: true,
-          destructiveHint: false,
-          idempotentHint: true,
-          openWorldHint: false,
-        },
-        _meta: buildAppCallableMeta(WIDGET_ENABLED),
-      },
-      {
-        name: "get_session",
-        description: `Inspect one session for debugging ("what exactly happened?").`,
-        inputSchema: {
-          type: "object",
-          properties: {
-            sessionId: { type: "string", description: "Session key to inspect." },
-            mode: {
-              type: "string",
-              enum: ["snapshot", "events", "tail", "tasks"],
-              description:
-                '"snapshot" (default) = the session\'s current state, no events. "events" = one bounded slice from `after`. "tail" = the same slice plus a `nextAfter` cursor for paging FORWARD through the log (oldest-first, not last-N-lines); page again with after=nextAfter until fewer than `limit` events come back. "tasks" = every task ever run under this session, newest first, in list_tasks\' row shape (summaries are truncated previews there).',
-            },
-            limit: {
-              type: "number",
-              description: "Max events per page for events/tail modes. Default 50, max 200.",
-            },
-            after: {
-              type: "number",
-              description:
-                "Zero-based event offset to read from; for tail mode pass the previous response's nextAfter. Unrelated to check_task/get_task's logCursor — different cursor space.",
-            },
-            agent: { ...agentProp, description: "Usually inferred from sessionId." },
-          },
-          required: ["sessionId"],
-        },
-        annotations: {
-          title: "Get Session",
-          readOnlyHint: true,
-          destructiveHint: false,
-          idempotentHint: true,
-          openWorldHint: false,
-        },
-        _meta: buildAppCallableMeta(WIDGET_ENABLED),
-      },
-    ];
-  }
-
-  hono.get("/", (c) => c.text("OK"));
-  hono.get("/health", (c) => c.json({ ok: true }));
+  // ── Credentials ───────────────────────────────────────────────────────────
 
   const PUBLIC_MCP_PASS = process.env.PUBLIC_MCP_PASS ?? "";
 
   /**
-   * Personal tokens: MCP_USER_TOKENS="Jake:tok1,Mohsen:tok2,...". A personal
+   * Personal tokens: MCP_USER_TOKENS="Name:tok1,Other:tok2,...". A personal
    * token both authenticates the request and identifies the person — identity
    * derives from the credential, not from a spoofable query param — so the
-   * server can stamp `[Message from: <name>]` on every dispatched task and a
-   * single person's token can be revoked without rotating everyone.
+   * server can stamp the sender on every dispatched task and a single
+   * person's token can be revoked without rotating everyone.
    *
    * PUBLIC_MCP_PASS (the legacy shared pass) keeps working but resolves to an
    * anonymous identity; those connections get a nudge to switch to a personal
    * token so agents know who they're working with.
    *
-   * MCP_USER_TOKENS_FILE can point at a runtime-editable JSON file for adding or
-   * revoking tokens without restarting the MCP process. Supported JSON shapes:
-   *   { "Jake": "tok1", "Mohsen": "tok2" }
-   *   { "tokens": { "Jake": "tok1", "Mohsen": "tok2" } }
-   *   [{ "name": "Jake", "token": "tok1" }]
+   * MCP_USER_TOKENS_FILE can point at a runtime-editable JSON file for adding
+   * or revoking tokens without restarting the process. Supported shapes:
+   *   { "Name": "tok1", "Other": "tok2" }
+   *   { "tokens": { "Name": "tok1" } }
+   *   [{ "name": "Name", "token": "tok1" }]
    */
   const MCP_USER_TOKENS_FILE = process.env.MCP_USER_TOKENS_FILE?.trim();
 
@@ -779,10 +364,6 @@ At detail levels that include it, \`updates\` is a bounded recent-activity windo
     return merged;
   }
 
-  const GET_TOKEN_HINT =
-    "this connection uses the shared legacy token, so tasks arrive unattributed. " +
-    "Tell the user to ask Jake for their personal ClawConnect token — it stamps their name on every task so agents know who they're working with.";
-
   /**
    * Resolve the caller's identity from the supplied credential (?pass=<v> or
    * Authorization: Bearer <v>). Returns:
@@ -791,12 +372,9 @@ At detail levels that include it, \`updates\` is a bounded recent-activity windo
    *   { user: null }                    — no auth configured at all (open mode)
    *   null                              — credential missing or wrong → 403
    */
-  type Identity = { user: string | null; legacy?: boolean };
-  type ToolResponse = CallToolResult & { structuredContent?: Record<string, unknown> };
-
-  function resolveIdentity(url: URL, req: import("node:http").IncomingMessage): Identity | null {
+  function resolveIdentity(url: URL, req: IncomingMessage): Identity | null {
     const userTokens = getUserTokens();
-    if (!PUBLIC_MCP_PASS && userTokens.size === 0) return { user: null }; // no gate configured (legacy open mode)
+    if (!PUBLIC_MCP_PASS && userTokens.size === 0) return { user: null }; // no gate configured
     const fromQuery = url.searchParams.get("pass");
     const auth = req.headers.authorization ?? (req.headers["authorization"] as string | undefined);
     const fromHeader = auth?.match(/^Bearer\s+(.+)$/i)?.[1]?.trim();
@@ -820,288 +398,92 @@ At detail levels that include it, \`updates\` is a bounded recent-activity windo
     };
   }
 
-  async function invokeTool(
-    name: string,
-    args: Record<string, unknown>,
-    scope: Scope,
-    identity: Identity,
-    signal?: AbortSignal,
-  ): Promise<ToolResponse | undefined> {
-    if (name === "run_task") {
-      const requestedAgent =
-        typeof args.agent === "string" && args.agent ? args.agent : scope.defaultId;
-      if (!scope.allowedIds.includes(requestedAgent)) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Agent "${requestedAgent}" is not available on this connection. Allowed: ${scope.allowedIds.join(", ")}.`,
-            },
-          ],
-          isError: true,
-        };
-      }
-      try {
-        const result = runTask(pool, {
-          task: typeof args.task === "string" ? args.task : "",
-          agent: requestedAgent,
-          context: typeof args.context === "string" ? args.context : undefined,
-          sessionKey: typeof args.sessionKey === "string" ? args.sessionKey : undefined,
-          senderName:
-            identity.user ?? (typeof args.senderName === "string" ? args.senderName : undefined),
-        });
-        const structuredContent = buildRunTaskStructuredContent(result);
-        return {
-          content: [
-            {
-              type: "text",
-              text:
-                JSON.stringify({
-                  ...structuredContent,
-                  message: "Task submitted. Use check_task to poll for progress.",
-                }) + (identity.legacy ? `\n\nNote: ${GET_TOKEN_HINT}` : ""),
-            },
-          ],
-          structuredContent,
-        };
-      } catch (err) {
-        return {
-          content: [{ type: "text", text: `Failed to submit: ${(err as Error).message}` }],
-          isError: true,
-        };
-      }
-    }
+  // ── Model-facing text (UI-client flavour) ─────────────────────────────────
 
-    if (name === "check_task") {
-      const requestedAgent = typeof args.agent === "string" && args.agent ? args.agent : undefined;
-      if (requestedAgent && !scope.allowedIds.includes(requestedAgent)) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Agent "${requestedAgent}" is not available on this connection. Allowed: ${scope.allowedIds.join(", ")}.`,
-            },
-          ],
-          isError: true,
-        };
-      }
-      const result = await checkTask(pool, {
-        jobId: typeof args.jobId === "string" ? args.jobId : undefined,
-        sessionKey: typeof args.sessionKey === "string" ? args.sessionKey : undefined,
-        agent: requestedAgent,
-        knownLogCount: Number(args.knownLogCount) || 0,
-        mode: (args.mode as CheckMode) ?? "wait",
-        waitMs: args.waitMs !== undefined ? Number(args.waitMs) : undefined,
-        signal,
-      });
-      if (!result.found) {
-        const message = args.sessionKey
-          ? "Task state not found for that session. The server may have restarted."
-          : "Job not found. The server may have restarted.";
-        return {
-          content: [{ type: "text", text: message }],
-          structuredContent: { status: "error", error: message },
-          isError: true,
-        };
-      }
-      if (result.snapshot.agent && !scope.allowedIds.includes(result.snapshot.agent)) {
-        return {
-          content: [{ type: "text", text: "Job not found." }],
-          structuredContent: { status: "error", error: "Job not found." },
-          isError: true,
-        };
-      }
-      return {
-        content: [{ type: "text", text: checkTaskText(result.snapshot, result.isTerminal) }],
-        structuredContent: buildCheckTaskStructuredContent(result),
-        ...(result.isError ? { isError: true } : {}),
-      };
-    }
+  /**
+   * ChatGPT renders a progress card, so its text stays one line while a task
+   * runs and becomes the summary when it finishes — the opposite of the stdio
+   * transport, whose agentic client wants the whole polling payload. Both read
+   * the SAME structuredContent; only this rendering differs.
+   */
+  const CHATGPT_TEXT: Record<string, (sc: unknown) => string | undefined> = {
+    check_task: (sc) => {
+      if (!sc || typeof sc !== "object") return undefined;
+      const { isTerminal, ...snapshot } = sc as Record<string, unknown>;
+      if (typeof isTerminal !== "boolean") return undefined;
+      return checkTaskText(snapshot as unknown as JobSnapshot, isTerminal);
+    },
+    list_sessions: (sc) => {
+      const sessions = (sc as { sessions?: ContinuationState[] } | undefined)?.sessions;
+      if (!sessions) return undefined;
+      return sessions.length === 0
+        ? "No sessions known to this connector yet."
+        : sessions
+            .map((s) => `${s.agent ?? "?"}: ${s.sessionKey.slice(-12)} (${s.lastJobId.slice(0, 8)})`)
+            .join("\n");
+    },
+  };
 
-    if (name === "list_sessions") {
-      const sessions = listSessions(pool).filter(
-        (s) => !s.agent || scope.allowedIds.includes(s.agent),
-      );
-      const summary =
-        sessions.length === 0
-          ? "No sessions known to this connector yet."
-          : sessions
-              .map(
-                (s) => `${s.agent ?? "?"}: ${s.sessionKey.slice(-12)} (${s.lastJobId.slice(0, 8)})`,
-              )
-              .join("\n");
-      return {
-        content: [{ type: "text", text: summary }],
-        structuredContent: { sessions, configuredAgents: scope.allowedIds },
-      };
-    }
+  /** Widget-facing _meta, by capability. run_task mounts the card; the rest are only app-callable. */
+  const TOOL_META: Record<string, Record<string, unknown>> = {
+    run_task: {
+      ...buildMountMeta(WIDGET_ENABLED, WIDGET_URI),
+      "openai/toolInvocation/invoking": "Sending task to OpenClaw agent...",
+    },
+    get_task: buildAppCallableMeta(WIDGET_ENABLED),
+    list_tasks: buildAppCallableMeta(WIDGET_ENABLED),
+    get_session: buildAppCallableMeta(WIDGET_ENABLED),
+  };
 
-    if (name === "list_agents") {
-      const agents = scope.allowedIds
-        .map((id) => AGENTS_BY_ID.get(id))
-        .filter((agent): agent is AgentEntry => Boolean(agent))
-        .map(agentDescriptor);
-      return {
-        content: [{ type: "text", text: JSON.stringify({ default: scope.defaultId, agents }) }],
-        structuredContent: { default: scope.defaultId, agents },
-      };
-    }
-
-    const scopedAgents = scope.allowedIds
-      .map((id) => AGENTS_BY_ID.get(id))
-      .filter((agent): agent is AgentEntry => Boolean(agent));
-    if (name === "search_memory") {
-      const result = await searchMemory(scopedAgents, {
-        query: typeof args.query === "string" ? args.query : "",
-        limit: args.limit !== undefined ? Number(args.limit) : undefined,
-        collections: Array.isArray(args.collections) ? (args.collections as string[]) : undefined,
-        intent: typeof args.intent === "string" ? args.intent : undefined,
-      });
-      return {
-        content: [{ type: "text", text: JSON.stringify(result) }],
-        structuredContent: { ...result },
-      };
-    }
-    if (name === "get_memory") {
-      const result = await getMemory(scopedAgents, typeof args.file === "string" ? args.file : "");
-      return {
-        content: [{ type: "text", text: JSON.stringify(result) }],
-        structuredContent: { ...result },
-        ...(result.found ? {} : { isError: true }),
-      };
-    }
-    if (name === "list_collections") {
-      const collections = listCollections(scopedAgents);
-      return {
-        content: [{ type: "text", text: JSON.stringify({ collections }) }],
-        structuredContent: { collections },
-      };
-    }
-    if (name === "list_tasks") {
-      const scoped = listTasks(pool).filter(
-        (task) => !task.agent || scope.allowedIds.includes(task.agent),
-      );
-      const tasks =
-        args.view === "active" ? scoped.filter((task) => ACTIVE_STATUSES.has(task.status)) : scoped;
-      return {
-        content: [{ type: "text", text: JSON.stringify({ tasks }) }],
-        structuredContent: { tasks },
-      };
-    }
-
-    if (name === "get_task") {
-      const taskId = typeof args.taskId === "string" ? args.taskId : "";
-      const detail = typeof args.detail === "string" ? args.detail : undefined;
-      const result = getTask(pool, {
-        jobId: taskId,
-        knownLogCount:
-          args.knownLogCount !== undefined ? Number(args.knownLogCount) || 0 : undefined,
-      });
-      if (
-        !result.found ||
-        (result.snapshot.agent && !scope.allowedIds.includes(result.snapshot.agent))
-      ) {
-        return {
-          content: [{ type: "text", text: "Task not found. The server may have restarted." }],
-          structuredContent: { taskId, status: "error", error: "Task not found." },
-          isError: true,
-        };
-      }
-      if (detail === "prompt") {
-        const promptResult = getTaskPrompt(pool, { jobId: taskId });
-        if (!promptResult.found)
-          return { content: [{ type: "text", text: "Task not found." }], isError: true };
-        const payload = { taskId, prompt: promptResult.prompt };
-        return {
-          content: [{ type: "text", text: JSON.stringify(payload) }],
-          structuredContent: payload,
-        };
-      }
-      const payload = buildGetTaskStructuredContent(result, detail as TaskDetail | undefined);
-      return {
-        content: [{ type: "text", text: JSON.stringify(payload) }],
-        structuredContent: payload,
-        ...(result.isError ? { isError: true } : {}),
-      };
-    }
-
-    if (name === "get_session") {
-      const sessionId = typeof args.sessionId === "string" ? args.sessionId : "";
-      const agent = typeof args.agent === "string" && args.agent ? args.agent : undefined;
-      if (agent && !scope.allowedIds.includes(agent)) {
-        return {
-          content: [
-            { type: "text", text: `Agent "${agent}" is not available on this connection.` },
-          ],
-          isError: true,
-        };
-      }
-      const result = getSession(pool, {
-        sessionId,
-        mode: typeof args.mode === "string" ? (args.mode as any) : undefined,
-        limit: args.limit !== undefined ? Number(args.limit) : undefined,
-        after: args.after !== undefined ? Number(args.after) : undefined,
-        agent,
-      });
-      if (!result.found || (result.agent && !scope.allowedIds.includes(result.agent))) {
-        return {
-          content: [{ type: "text", text: "Session not found." }],
-          structuredContent: { sessionId, found: false },
-          isError: true,
-        };
-      }
-      return {
-        content: [{ type: "text", text: JSON.stringify(result) }],
-        structuredContent: result,
-      };
-    }
-
-    return undefined;
-  }
+  // ── The one server factory, serving both eras ─────────────────────────────
 
   function createHttpMcpServer(ctx: McpRequestContext): McpServer {
-    const requestUrl = ctx.requestInfo
-      ? new URL(ctx.requestInfo.url)
-      : new URL("http://localhost/mcp");
+    const requestUrl = ctx.requestInfo ? new URL(ctx.requestInfo.url) : new URL("http://localhost/mcp");
     const scope = resolveScope(requestUrl);
     const identity = (ctx.authInfo?.extra?.identity as Identity | undefined) ?? { user: null };
-    const negotiatedProtocolVersion =
-      ctx.requestInfo?.headers.get("MCP-Protocol-Version") ?? MODERN_PROTOCOL_VERSION;
     const extensions = buildExtensionsCapability(WIDGET_ENABLED);
+
     const server = new McpServer(
       {
         name: identity.user ? `${scope.serverName} (${identity.user})` : scope.serverName,
         version: "0.1.0",
       },
       {
-        capabilities: { resources: {}, ...(extensions ? { extensions: extensions as any } : {}) },
+        capabilities: { resources: {}, ...(extensions ? { extensions: extensions as never } : {}) },
         instructions:
           "Use run_task to delegate work, then check_task until continuePolling is false.",
       },
     );
 
-    for (const tool of buildTools(scope.allowedIds, scope.defaultId, identity)) {
-      server.registerTool(
-        tool.name,
-        {
-          description: tool.description,
-          inputSchema: fromJsonSchema<Record<string, unknown>>(tool.inputSchema as any),
-          ...(tool.outputSchema ? { outputSchema: fromJsonSchema(tool.outputSchema as any) } : {}),
-          annotations: tool.annotations,
-          _meta: tool._meta,
-        },
-        async (args, ctx) => {
-          if (tool.name === "get_mcp_info")
-            return protocolInfo("modern", negotiatedProtocolVersion);
-          const result = await invokeTool(tool.name, args, scope, identity, ctx.mcpReq.signal);
-          return (
-            result ?? {
-              content: [{ type: "text", text: `Unknown tool: ${tool.name}` }],
-              isError: true,
-            }
-          );
-        },
-      );
+    const capabilities = buildCapabilities({
+      pool,
+      registry,
+      scope,
+      identity,
+      // "poll" so a live progress card advances on any new activity, rather
+      // than only when the whole turn finishes.
+      defaultCheckMode: "poll",
+      protocol: () => ({
+        // The SDK's own classification of this serving unit — not a guess.
+        era: ctx.era,
+        // 2025-era clients MUST send this header after initialize, so when it
+        // is there it is the negotiated revision. When it is not, we say
+        // nothing rather than substituting a constant.
+        ...(ctx.era === "modern"
+          ? { version: "2026-07-28" }
+          : (() => {
+              const header = ctx.requestInfo?.headers.get("MCP-Protocol-Version") ?? undefined;
+              return header ? { version: header } : {};
+            })()),
+      }),
+    });
+
+    for (const capability of capabilities) {
+      const meta = TOOL_META[capability.name];
+      registerCapability(server, capability, {
+        ...(meta && Object.keys(meta).length > 0 ? { meta } : {}),
+        renderText: CHATGPT_TEXT[capability.name],
+      });
     }
 
     if (WIDGET_ENABLED) {
@@ -1120,10 +502,16 @@ At detail levels that include it, \`updates\` is a bounded recent-activity windo
     return server;
   }
 
-  const modernMcpHandler = createMcpHandler(createHttpMcpServer, {
-    legacy: "reject",
-    onerror: (error) => console.error("[mcp] modern HTTP serving error:", error),
+  // `legacy` is left at its default of 'stateless', so 2025-era requests are
+  // answered from a fresh instance of the same factory. That is what lets the
+  // hand-rolled legacy router be deleted without dropping the clients still
+  // negotiating that era.
+  const mcpHandler = createMcpHandler(createHttpMcpServer, {
+    onerror: (error) => console.error("[mcp] serving error:", error),
   });
+
+  hono.get("/", (c) => c.text("OK"));
+  hono.get("/health", (c) => c.json({ ok: true }));
 
   async function requestListener(req: IncomingMessage, res: ServerResponse) {
     if (req.url?.startsWith("/mcp")) {
@@ -1137,7 +525,8 @@ At detail levels that include it, \`updates\` is a bounded recent-activity windo
 
       const reqUrl = new URL(req.url, `http://${req.headers.host ?? "localhost"}`);
 
-      // Auth gate — reject /mcp requests without a valid personal token or the legacy shared pass.
+      // Auth gate — reject /mcp requests without a valid personal token or the
+      // legacy shared pass, before anything reaches the SDK.
       const identity = resolveIdentity(reqUrl, req);
       if (!identity) {
         res.writeHead(403, { "Content-Type": "application/json" });
@@ -1154,18 +543,7 @@ At detail levels that include it, \`updates\` is a bounded recent-activity windo
         return;
       }
 
-      // Streamable HTTP clients (Cursor, MCP SDK) open a GET on /mcp for the
-      // optional server→client SSE stream, and DELETE to end a session. We
-      // don't offer either — the spec says answer 405 (clients MUST tolerate
-      // it). Anything else (the old 400 Parse error) fails the client's
-      // transport state machine and kills the whole connection.
-      if (req.method !== "POST") {
-        res.writeHead(405, { Allow: "POST, OPTIONS" });
-        res.end();
-        return;
-      }
-
-      if (!isJsonContentType(req.headers["content-type"])) {
+      if (req.method === "POST" && !isJsonContentType(req.headers["content-type"])) {
         res.writeHead(415, { "Content-Type": "application/json" });
         res.end(
           JSON.stringify({
@@ -1177,402 +555,20 @@ At detail levels that include it, \`updates\` is a bounded recent-activity windo
         return;
       }
 
-      const scope = resolveScope(reqUrl);
       const requestAbort = new AbortController();
       req.once("aborted", () => requestAbort.abort());
       res.once("close", () => requestAbort.abort());
       const webRequest = await toWebRequest(req, undefined, { signal: requestAbort.signal });
 
-      // A per-request protocol envelope is the 2026-07-28 era claim. Route
-      // those requests to the SDK v2 entry; claim-less initialize-era traffic
-      // stays on the verified legacy router below until legacy clients retire.
-      const legacyRequest = await isLegacyRequest(webRequest);
-      if (!legacyRequest) {
-        console.log(
-          `[mcp] ${req.method} era=modern protocol=${String(req.headers["mcp-protocol-version"] ?? MODERN_PROTOCOL_VERSION)} method=${String(req.headers["mcp-method"] ?? "unknown")}`,
-        );
-        const webResponse = await modernMcpHandler.fetch(webRequest, {
-          authInfo: authInfoFor(identity),
-        });
-        const headers = Object.fromEntries(webResponse.headers.entries());
-        res.writeHead(webResponse.status, { ...corsHeaders(req), ...headers });
-        if (webResponse.body) {
-          for await (const chunk of webResponse.body) res.write(chunk);
-        }
-        res.end();
-        return;
+      console.log(`[mcp] ${req.method} method=${String(req.headers["mcp-method"] ?? "unknown")}`);
+
+      const webResponse = await mcpHandler.fetch(webRequest, { authInfo: authInfoFor(identity) });
+      const headers = Object.fromEntries(webResponse.headers.entries());
+      res.writeHead(webResponse.status, { ...corsHeaders(req), ...headers });
+      if (webResponse.body) {
+        for await (const chunk of webResponse.body) res.write(chunk);
       }
-
-      const raw = await webRequest.text();
-
-      let msg: { jsonrpc: string; id?: unknown; method: string; params?: Record<string, unknown> };
-      try {
-        msg = JSON.parse(raw);
-      } catch {
-        res.writeHead(400, { "Content-Type": "application/json" });
-        res.end(
-          JSON.stringify({
-            jsonrpc: "2.0",
-            id: null,
-            error: { code: -32700, message: "Parse error" },
-          }),
-        );
-        return;
-      }
-
-      const isNotification = msg.id === undefined;
-
-      const respond = (result: unknown, status = 200) => {
-        res.writeHead(status, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ jsonrpc: "2.0", id: msg.id ?? null, result }));
-      };
-
-      const respondError = (code: number, message: string, httpStatus = 200) => {
-        res.writeHead(httpStatus, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ jsonrpc: "2.0", id: msg.id ?? null, error: { code, message } }));
-      };
-
-      console.log(
-        `[mcp] ${req.method} era=legacy protocol=${LEGACY_PROTOCOL_VERSION} method=${msg.method}`,
-      );
-
-      if (msg.method === "initialize") {
-        const requestedProtocolVersion = (msg.params as { protocolVersion?: unknown } | undefined)
-          ?.protocolVersion;
-        const extensions = buildExtensionsCapability(WIDGET_ENABLED);
-        respond({
-          protocolVersion: negotiateProtocolVersion(requestedProtocolVersion),
-          capabilities: {
-            tools: {},
-            resources: {},
-            ...(extensions ? { extensions } : {}),
-          },
-          serverInfo: {
-            name: identity.user ? `${scope.serverName} (${identity.user})` : scope.serverName,
-            version: "0.1.0",
-          },
-          instructions:
-            "Use run_task to delegate work, then check_task until continuePolling is false.",
-        });
-      } else if (isNotification) {
-        res.writeHead(202);
-        res.end();
-      } else if (msg.method === "tools/list") {
-        respond({ tools: buildTools(scope.allowedIds, scope.defaultId, identity) });
-      } else if (msg.method === "resources/list") {
-        respond({
-          resources: WIDGET_ENABLED
-            ? [
-                {
-                  uri: WIDGET_URI,
-                  name: "ClawConnect Task Center",
-                  mimeType: UI_RESOURCE_MIME_TYPE,
-                },
-              ]
-            : [],
-        });
-      } else if (msg.method === "resources/read") {
-        const uri = (msg.params as { uri?: string } | undefined)?.uri;
-        if (!WIDGET_ENABLED || uri !== WIDGET_URI) {
-          respondError(-32602, `Unknown resource: ${uri}`);
-        } else {
-          const html = loadWidgetHtml();
-          if (html === undefined) {
-            respondError(
-              -32603,
-              "Widget resource failed to load — run_task/check_task are unaffected.",
-            );
-          } else {
-            respond({
-              contents: [{ uri: WIDGET_URI, mimeType: UI_RESOURCE_MIME_TYPE, text: html }],
-            });
-          }
-        }
-      } else if (msg.method === "tools/call") {
-        const { name, arguments: args } = msg.params as {
-          name: string;
-          arguments: Record<string, string>;
-        };
-
-        if (name === "get_mcp_info") {
-          respond(protocolInfo("legacy", LEGACY_PROTOCOL_VERSION));
-        } else if (name === "run_task") {
-          const requestedAgent =
-            typeof args.agent === "string" && args.agent ? args.agent : scope.defaultId;
-          if (!scope.allowedIds.includes(requestedAgent)) {
-            respond({
-              content: [
-                {
-                  type: "text",
-                  text: `Agent "${requestedAgent}" is not available on this connection. Allowed: ${scope.allowedIds.join(", ")}.`,
-                },
-              ],
-              isError: true,
-            });
-            console.log(`[mcp] -> ${res.statusCode}`);
-            return;
-          }
-          try {
-            const result = runTask(pool, {
-              task: args.task,
-              agent: requestedAgent,
-              context: args.context,
-              sessionKey: args.sessionKey,
-              // The token's identity is ground truth; a model-supplied senderName
-              // only fills in when the connection is anonymous (legacy/open).
-              senderName:
-                identity.user ??
-                (typeof args.senderName === "string" ? args.senderName : undefined),
-            });
-            console.log(
-              `[mcp] submitted job ${result.jobId} on agent ${result.agent} session ${result.sessionKey} sender=${identity.user ?? args.senderName ?? "unknown"}${identity.legacy ? " (legacy token)" : ""}`,
-            );
-            const structuredContent = buildRunTaskStructuredContent(result);
-            respond({
-              content: [
-                {
-                  type: "text",
-                  text:
-                    JSON.stringify({
-                      ...structuredContent,
-                      message: "Task submitted. Use check_task to poll for progress.",
-                    }) + (identity.legacy ? `\n\nNote: ${GET_TOKEN_HINT}` : ""),
-                },
-              ],
-              structuredContent,
-            });
-          } catch (err) {
-            respond({
-              content: [{ type: "text", text: `Failed to submit: ${(err as Error).message}` }],
-              isError: true,
-            });
-          }
-        } else if (name === "check_task") {
-          const requestedAgent =
-            typeof args.agent === "string" && args.agent ? args.agent : undefined;
-          if (requestedAgent && !scope.allowedIds.includes(requestedAgent)) {
-            respond({
-              content: [
-                {
-                  type: "text",
-                  text: `Agent "${requestedAgent}" is not available on this connection. Allowed: ${scope.allowedIds.join(", ")}.`,
-                },
-              ],
-              isError: true,
-            });
-            console.log(`[mcp] -> ${res.statusCode}`);
-            return;
-          }
-          const mode = (args.mode as CheckMode) ?? "wait";
-          const result = await checkTask(pool, {
-            jobId: typeof args.jobId === "string" ? args.jobId : undefined,
-            sessionKey: typeof args.sessionKey === "string" ? args.sessionKey : undefined,
-            agent: requestedAgent,
-            knownLogCount: Number(args.knownLogCount) || 0,
-            mode,
-            waitMs: args.waitMs !== undefined ? Number(args.waitMs) : undefined,
-            signal: requestAbort.signal,
-          });
-
-          if (!result.found) {
-            const notFoundMsg = args.sessionKey
-              ? "Task state not found for that session. The server may have restarted."
-              : "Job not found. The server may have restarted.";
-            respond({
-              content: [{ type: "text", text: notFoundMsg }],
-              structuredContent: {
-                jobId: args.jobId,
-                sessionKey: args.sessionKey,
-                status: "error",
-                error: notFoundMsg,
-              },
-              isError: true,
-            });
-          } else if (result.snapshot.agent && !scope.allowedIds.includes(result.snapshot.agent)) {
-            // Don't leak results from agents outside this connection's scope.
-            respond({
-              content: [{ type: "text", text: "Job not found." }],
-              structuredContent: {
-                jobId: args.jobId,
-                sessionKey: args.sessionKey,
-                status: "error",
-                error: "Job not found.",
-              },
-              isError: true,
-            });
-          } else {
-            const { snapshot, isTerminal, isError } = result;
-            respond({
-              content: [{ type: "text", text: checkTaskText(snapshot, isTerminal) }],
-              structuredContent: buildCheckTaskStructuredContent(result),
-              ...(isError ? { isError: true } : {}),
-            });
-          }
-        } else if (name === "list_sessions") {
-          const all = listSessions(pool);
-          const sessions = all.filter((s) => !s.agent || scope.allowedIds.includes(s.agent));
-          const summary =
-            sessions.length === 0
-              ? "No sessions known to this connector yet."
-              : sessions
-                  .map(
-                    (s) =>
-                      `${s.agent ?? "?"}: ${s.sessionKey.slice(-12)} (${s.lastJobId.slice(0, 8)})`,
-                  )
-                  .join("\n");
-          respond({
-            content: [{ type: "text", text: summary }],
-            structuredContent: { sessions, configuredAgents: scope.allowedIds },
-          });
-        } else if (name === "list_agents") {
-          const agents = scope.allowedIds
-            .map((id) => AGENTS_BY_ID.get(id))
-            .filter((a): a is AgentEntry => Boolean(a))
-            .map(agentDescriptor);
-          respond({
-            content: [{ type: "text", text: JSON.stringify({ default: scope.defaultId, agents }) }],
-            structuredContent: { default: scope.defaultId, agents },
-          });
-        } else if (name === "search_memory") {
-          const scopedAgents = scope.allowedIds
-            .map((id) => AGENTS_BY_ID.get(id))
-            .filter((a): a is AgentEntry => Boolean(a));
-          const query = typeof args.query === "string" ? args.query : "";
-          const result = await searchMemory(scopedAgents, {
-            query,
-            limit: args.limit !== undefined ? Number(args.limit) : undefined,
-            collections: Array.isArray(args.collections)
-              ? (args.collections as unknown as string[])
-              : undefined,
-            intent: typeof args.intent === "string" ? args.intent : undefined,
-          });
-          respond({
-            content: [{ type: "text", text: JSON.stringify(result) }],
-            structuredContent: result,
-          });
-        } else if (name === "get_memory") {
-          const scopedAgents = scope.allowedIds
-            .map((id) => AGENTS_BY_ID.get(id))
-            .filter((a): a is AgentEntry => Boolean(a));
-          const file = typeof args.file === "string" ? args.file : "";
-          const result = await getMemory(scopedAgents, file);
-          respond({
-            content: [{ type: "text", text: JSON.stringify(result) }],
-            structuredContent: result,
-            ...(result.found ? {} : { isError: true }),
-          });
-        } else if (name === "list_collections") {
-          const scopedAgents = scope.allowedIds
-            .map((id) => AGENTS_BY_ID.get(id))
-            .filter((a): a is AgentEntry => Boolean(a));
-          const collections = listCollections(scopedAgents);
-          respond({
-            content: [{ type: "text", text: JSON.stringify({ collections }) }],
-            structuredContent: { collections },
-          });
-        } else if (name === "list_tasks") {
-          const tasks = listTasks(pool);
-          const scoped = tasks.filter((t) => !t.agent || scope.allowedIds.includes(t.agent));
-          const view = typeof args.view === "string" ? args.view : undefined;
-          const filtered =
-            view === "active" ? scoped.filter((t) => ACTIVE_STATUSES.has(t.status)) : scoped;
-          respond({
-            content: [{ type: "text", text: JSON.stringify({ tasks: filtered }) }],
-            structuredContent: { tasks: filtered },
-          });
-        } else if (name === "get_task") {
-          // get_task NEVER waits (contract decision 6) — getTask() is an
-          // immediate, synchronous read, unlike check_task's checkTask().
-          const taskId = typeof args.taskId === "string" ? args.taskId : "";
-          const detail = typeof args.detail === "string" ? args.detail : undefined;
-          const knownLogCount =
-            args.knownLogCount !== undefined ? Number(args.knownLogCount) || 0 : undefined;
-          const result = getTask(pool, { jobId: taskId, knownLogCount });
-
-          if (!result.found) {
-            respond({
-              content: [{ type: "text", text: "Task not found. The server may have restarted." }],
-              structuredContent: { taskId, status: "error", error: "Task not found." },
-              isError: true,
-            });
-          } else if (result.snapshot.agent && !scope.allowedIds.includes(result.snapshot.agent)) {
-            respond({
-              content: [{ type: "text", text: "Task not found." }],
-              structuredContent: { taskId, status: "error", error: "Task not found." },
-              isError: true,
-            });
-          } else if (detail === "prompt") {
-            // Same per-agent scope authorization as every other field — already
-            // enforced above before this branch runs.
-            const promptResult = getTaskPrompt(pool, { jobId: taskId });
-            if (!promptResult.found) {
-              respond({ content: [{ type: "text", text: "Task not found." }], isError: true });
-            } else {
-              const payload = { taskId, prompt: promptResult.prompt };
-              respond({
-                content: [{ type: "text", text: JSON.stringify(payload) }],
-                structuredContent: payload,
-              });
-            }
-          } else {
-            const payload = buildGetTaskStructuredContent(result, detail as TaskDetail | undefined);
-            respond({
-              content: [{ type: "text", text: JSON.stringify(payload) }],
-              structuredContent: payload,
-              ...(result.isError ? { isError: true } : {}),
-            });
-          }
-        } else if (name === "get_session") {
-          const sessionId = typeof args.sessionId === "string" ? args.sessionId : "";
-          const sessionMode = typeof args.mode === "string" ? args.mode : undefined;
-          const limit = args.limit !== undefined ? Number(args.limit) : undefined;
-          const after = args.after !== undefined ? Number(args.after) : undefined;
-          const sessionAgent =
-            typeof args.agent === "string" && args.agent ? args.agent : undefined;
-
-          if (sessionAgent && !scope.allowedIds.includes(sessionAgent)) {
-            respond({
-              content: [
-                {
-                  type: "text",
-                  text: `Agent "${sessionAgent}" is not available on this connection.`,
-                },
-              ],
-              isError: true,
-            });
-          } else {
-            const result = getSession(pool, {
-              sessionId,
-              mode: sessionMode as any,
-              limit,
-              after,
-              agent: sessionAgent,
-            });
-            if (!result.found) {
-              respond({
-                content: [{ type: "text", text: "Session not found." }],
-                structuredContent: { sessionId, found: false },
-                isError: true,
-              });
-            } else if (result.agent && !scope.allowedIds.includes(result.agent)) {
-              respond({
-                content: [{ type: "text", text: "Session not found." }],
-                isError: true,
-              });
-            } else {
-              respond({
-                content: [{ type: "text", text: JSON.stringify(result) }],
-                structuredContent: result,
-              });
-            }
-          }
-        } else {
-          respondError(-32601, `Unknown tool: ${name}`);
-        }
-      } else {
-        respondError(-32601, `Method not found: ${msg.method}`);
-      }
-
+      res.end();
       console.log(`[mcp] -> ${res.statusCode}`);
       return;
     }

@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  negotiateProtocolVersion,
   buildExtensionsCapability,
   buildMountMeta,
   buildAppCallableMeta,
@@ -8,19 +7,6 @@ import {
   UI_RESOURCE_MIME_TYPE,
   UI_RESOURCE_URI_META_KEY,
 } from "./ui-meta.js";
-
-describe("negotiateProtocolVersion", () => {
-  it("echoes a supported requested version instead of hardcoding one", () => {
-    expect(negotiateProtocolVersion("2025-06-18")).toBe("2025-06-18");
-    expect(negotiateProtocolVersion("2024-11-05")).toBe("2024-11-05");
-  });
-
-  it("falls back to the MCP-Apps-capable floor for an unrecognized or missing version", () => {
-    expect(negotiateProtocolVersion("1999-01-01")).toBe("2025-06-18");
-    expect(negotiateProtocolVersion(undefined)).toBe("2025-06-18");
-    expect(negotiateProtocolVersion(42)).toBe("2025-06-18");
-  });
-});
 
 describe("missing UI metadata fallback — widget disabled means no _meta/capability at all", () => {
   it("buildExtensionsCapability is undefined when the widget is disabled", () => {

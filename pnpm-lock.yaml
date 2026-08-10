@@ -39,6 +39,9 @@ importers:
 
   .:
     devDependencies:
+      '@modelcontextprotocol/sdk':
+        specifier: 'catalog:'
+        version: 1.29.0(zod@4.3.6)
       '@typescript/native-preview':
         specifier: 'catalog:'
         version: 7.0.0-dev.20260601.1
@@ -54,6 +57,9 @@ importers:
       '@clawconnect/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@clawconnect/mcp':
+        specifier: workspace:*
+        version: link:../../packages/mcp
       '@hono/node-server':
         specifier: ^1.19.12
         version: 1.19.12(hono@4.12.10)
@@ -63,9 +69,6 @@ importers:
       '@modelcontextprotocol/node':
         specifier: 'catalog:'
         version: 2.0.0(@modelcontextprotocol/server@2.0.0)(hono@4.12.10)
-      '@modelcontextprotocol/sdk':
-        specifier: 1.29.0
-        version: 1.29.0(zod@4.3.6)
       '@modelcontextprotocol/server':
         specifier: 'catalog:'
         version: 2.0.0

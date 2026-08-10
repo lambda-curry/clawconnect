@@ -18,6 +18,7 @@
     "dev:mcp": "vp run mcp#dev"
   },
   "devDependencies": {
+    "@modelcontextprotocol/sdk": "catalog:",
     "@typescript/native-preview": "catalog:",
     "vite-plus": "catalog:",
     "vitest": "catalog:"

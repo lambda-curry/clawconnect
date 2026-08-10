@@ -16,22 +16,6 @@ export const UI_RESOURCE_MIME_TYPE = "text/html;profile=mcp-app";
 /** Legacy flat alias for _meta.ui.resourceUri — hosts must check both per the SDK's own compatibility note. */
 export const UI_RESOURCE_URI_META_KEY = "ui/resourceUri";
 
-const SUPPORTED_PROTOCOL_VERSIONS = ["2025-06-18", "2024-11-05"];
-const PREFERRED_PROTOCOL_VERSION = "2025-06-18";
-
-/**
- * Echo the client's requested protocolVersion when it's one this server
- * supports, instead of hardcoding a single value. The prior hardcode of
- * "2024-11-05" meant no host could ever be offered the MCP Apps extension
- * (its floor is 2025-06-18) — a real bug independent of whether the widget
- * is enabled at all.
- */
-export function negotiateProtocolVersion(requested: unknown): string {
-  return typeof requested === "string" && SUPPORTED_PROTOCOL_VERSIONS.includes(requested)
-    ? requested
-    : PREFERRED_PROTOCOL_VERSION;
-}
-
 export function buildExtensionsCapability(widgetEnabled: boolean): Record<string, unknown> | undefined {
   if (!widgetEnabled) return undefined;
   return { [UI_EXTENSION_ID]: { mimeTypes: [UI_RESOURCE_MIME_TYPE] } };

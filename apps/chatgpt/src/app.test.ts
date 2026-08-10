@@ -74,13 +74,52 @@ async function startTestApp(
 }
 
 let rpcId = 0;
-async function rpc(url: string, method: string, params?: Record<string, unknown>) {
+
+/**
+ * A complete initialize params object. The SDK validates these; the
+ * hand-rolled router it replaced accepted a bare protocolVersion, so the old
+ * fixtures under-specified what a real client actually sends.
+ */
+const INIT_PARAMS = (protocolVersion: string) => ({
+  protocolVersion,
+  capabilities: {},
+  clientInfo: { name: "test-client", version: "0.0.0" },
+});
+/**
+ * A 2025-era streamable-HTTP client, behaving as the spec requires rather
+ * than as our old hand-rolled router happened to tolerate: it advertises both
+ * response types and accepts either framing back. The previous helper sent
+ * only `Content-Type: application/json` and assumed a JSON body, which worked
+ * only because the hand-rolled router never enforced `Accept` and never
+ * streamed. Testing against a lenient fixture is how a transport change like
+ * this stays invisible until a real client hits it.
+ */
+async function rpc(
+  url: string,
+  method: string,
+  params?: Record<string, unknown>,
+  extraHeaders?: Record<string, string>,
+) {
   const res = await fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json, text/event-stream",
+      ...extraHeaders,
+    },
     body: JSON.stringify({ jsonrpc: "2.0", id: ++rpcId, method, params }),
   });
-  return res.json() as Promise<{ result?: any; error?: { code: number; message: string } }>;
+  const body = await res.text();
+  if (!body) return {} as { result?: any; error?: { code: number; message: string } };
+  if (res.headers.get("content-type")?.includes("text/event-stream")) {
+    // One JSON-RPC response per `data:` line; the last one is this request's.
+    const payloads = body
+      .split(/\r?\n/)
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => JSON.parse(line.slice(5).trim()));
+    return payloads[payloads.length - 1];
+  }
+  return JSON.parse(body) as { result?: any; error?: { code: number; message: string } };
 }
 
 async function modernClient(
@@ -172,7 +211,7 @@ describe("unmounted core independence — run_task/get_task work identically reg
 describe("missing UI metadata fallback — widget disabled means the surface looks exactly like a generic MCP server", () => {
   it("resources/list is empty and initialize advertises no extensions capability", async () => {
     const { url } = await startTestApp({ widgetEnabled: false });
-    const initResult = await rpc(url, "initialize", { protocolVersion: "2025-06-18" });
+    const initResult = await rpc(url, "initialize", INIT_PARAMS("2025-06-18"));
     expect(initResult.result.capabilities).not.toHaveProperty("extensions");
 
     const listResult = await rpc(url, "resources/list");
@@ -208,7 +247,7 @@ describe("widget enabled with a real resource", () => {
     const widgetHtmlPath = writeFixtureWidget("<html><body>fixture widget</body></html>");
     const { url } = await startTestApp({ widgetEnabled: true, widgetHtmlPath });
 
-    const initResult = await rpc(url, "initialize", { protocolVersion: "2025-06-18" });
+    const initResult = await rpc(url, "initialize", INIT_PARAMS("2025-06-18"));
     expect(initResult.result.capabilities.extensions).toEqual({
       "io.modelcontextprotocol/ui": { mimeTypes: ["text/html;profile=mcp-app"] },
     });
@@ -269,14 +308,18 @@ describe("widget enabled with a real resource", () => {
 describe("protocolVersion negotiation over real HTTP", () => {
   it("echoes a supported requested version", async () => {
     const { url } = await startTestApp({ widgetEnabled: false });
-    const result = await rpc(url, "initialize", { protocolVersion: "2024-11-05" });
+    const result = await rpc(url, "initialize", INIT_PARAMS("2024-11-05"));
     expect(result.result.protocolVersion).toBe("2024-11-05");
   });
 
-  it("falls back to the MCP-Apps floor for an unrecognized version", async () => {
+  it("falls back to a supported revision for an unrecognized version", async () => {
     const { url } = await startTestApp({ widgetEnabled: false });
-    const result = await rpc(url, "initialize", { protocolVersion: "1999-01-01" });
-    expect(result.result.protocolVersion).toBe("2025-06-18");
+    const result = await rpc(url, "initialize", INIT_PARAMS("1999-01-01"));
+    // The SDK owns negotiation now, and picks its own newest legacy revision
+    // rather than the MCP-Apps floor our hand-maintained list named. What
+    // matters to us is that an unknown request still lands on a revision this
+    // server actually speaks, instead of echoing something nobody supports.
+    expect(result.result.protocolVersion).toBe("2025-11-25");
   });
 });
 
@@ -314,17 +357,26 @@ describe("MCP 2026-07-28 over the SDK v2 handler", () => {
   it("lets ChatGPT report the protocol version for either HTTP era", async () => {
     const { url } = await startTestApp({ widgetEnabled: false });
     const modern = await modernClient(url);
-    const modernInfo = await modern.callTool({ name: "get_mcp_info", arguments: {} });
+    const modernInfo = await modern.callTool({ name: "get_connection_info", arguments: {} });
     expect(modernInfo.structuredContent).toMatchObject({
       protocolEra: "modern",
       protocolVersion: "2026-07-28",
     });
 
     const legacyInfo = await rpc(url, "tools/call", {
-      name: "get_mcp_info",
+      name: "get_connection_info",
       arguments: {},
     });
-    expect(legacyInfo.result.structuredContent).toMatchObject({
+    expect(legacyInfo.result.structuredContent).toMatchObject({ protocolEra: "legacy" });
+    // No MCP-Protocol-Version header was sent, so there is no negotiated
+    // revision to report and the manifest omits it rather than substituting
+    // a constant — the defect that let this tool contradict its own handshake.
+    expect(legacyInfo.result.structuredContent).not.toHaveProperty("protocolVersion");
+
+    const declared = await rpc(url, "tools/call", { name: "get_connection_info", arguments: {} }, {
+      "MCP-Protocol-Version": "2025-06-18",
+    });
+    expect(declared.result.structuredContent).toMatchObject({
       protocolEra: "legacy",
       protocolVersion: "2025-06-18",
     });
