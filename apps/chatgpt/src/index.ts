@@ -15,9 +15,28 @@ process.on("uncaughtException", (err) => {
   console.error("[connector] uncaughtException (kept alive):", err);
 });
 
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { loadAgentRegistry, loadAgentSessionRuntimes } from "@clawconnect/core";
 import type { AgentRegistry } from "@clawconnect/core";
 import { createApp } from "./app.js";
+
+// Build identity, written next to this file by scripts/stamp-build.mjs at
+// build time (see get_connection_info). An explicit CLAWCONNECT_BUILD_SHA
+// still wins, for deployments that build elsewhere and ship the artifact.
+if (!process.env.CLAWCONNECT_BUILD_SHA) {
+  try {
+    const sha = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), "build-sha.txt"),
+      "utf8",
+    ).trim();
+    if (sha) process.env.CLAWCONNECT_BUILD_SHA = sha;
+  } catch {
+    // No stamp (running from source, or an artifact built without git) —
+    // get_connection_info reports "unknown", which is the honest answer.
+  }
+}
 
 // Try the shared multi-agent registry (~/.clawconnect/agents.json) first.
 // Fall back to env-only single-agent so existing deployments keep working.
