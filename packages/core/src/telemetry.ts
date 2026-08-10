@@ -11,7 +11,7 @@
  */
 export type TelemetryEvent = {
   ts: number;
-  tool: "run_task" | "check_task" | "get_task" | "list_tasks";
+  tool: "run_task" | "check_task" | "get_task" | "list_tasks" | "cancel_task";
   jobId?: string;
   taskId?: string;
   sessionKey?: string;

@@ -360,11 +360,11 @@ Pass a sessionKey from a previous task to continue the same thread.`,
       name: "cancel_task",
       title: "Cancel Task",
       mutates: true,
-      description: `Stop a running task. Sends a stop to the agent working on it, which aborts the turn in progress.
+      description: `Stop a running task. Requests an upstream abort for the turn in progress.
 
 Only affects the one task you name — it does not touch other tasks, other sessions, or anything the agent already finished and wrote down. Work already completed before the stop lands is not undone.
 
-Best effort, and it reports what it ASKED for, not what happened: the stop takes a few seconds to land upstream. Call get_task afterwards to see whether the task actually reached status "cancelled". A task that has already finished is left alone and reported as already terminal.`,
+Best effort, and it reports what it ASKED for, not what happened: the upstream abort is confirmed asynchronously. Call get_task afterwards to see whether the task reached status "cancelled" or became a terminal cancellation error. A task that has already finished is left alone and reported as already terminal.`,
       inputSchema: {
         type: "object",
         properties: {
@@ -417,7 +417,7 @@ Best effort, and it reports what it ASKED for, not what happened: the stop takes
         }
         return {
           structuredContent: { ...result, requested: true },
-          text: `Stop sent. It takes a few seconds to land — check get_task for status "cancelled" to confirm it stopped.`,
+          text: `Stop requested. Check get_task for the terminal cancellation result.`,
         };
       },
     },

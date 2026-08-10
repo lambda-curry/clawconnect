@@ -551,6 +551,30 @@ export class OpenClawGateway {
   }
 
   /**
+   * Abort the run currently owned by a session. This is deliberately a
+   * control-plane RPC rather than a second `chat.send("stop")`: a stop
+   * message has its own stream lifecycle and can outlive the connector job
+   * that asked for it, which is exactly how recovery-era cancellations used
+   * to disappear.
+   *
+   * Passing the runId scopes the abort to this job. Older gateways accept the
+   * session key alone, so the fallback remains available for jobs reloaded
+   * from a pre-runId store record.
+   */
+  async abort(
+    sessionKey: string,
+    runId?: string,
+  ): Promise<{ ok: boolean; aborted: boolean; runIds?: string[] }> {
+    const params: Record<string, unknown> = { sessionKey };
+    if (runId) params.runId = runId;
+    return (await this.sendRpc("chat.abort", params, 15_000)) as {
+      ok: boolean;
+      aborted: boolean;
+      runIds?: string[];
+    };
+  }
+
+  /**
    * One `chat.history` read, reduced to the two things every caller needs:
    * whether the transcript moved (`snapshotKey`) and what the agent's last
    * visible answer is (`trailingText`). Returns null when the read failed —

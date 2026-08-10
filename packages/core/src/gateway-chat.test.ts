@@ -282,6 +282,32 @@ describe("OpenClawGateway.chat — run correlation across the send boundary", ()
   });
 });
 
+describe("OpenClawGateway.abort — run-scoped cancellation", () => {
+  it("uses chat.abort instead of dispatching a second chat.send", async () => {
+    const gateway = await harness((frame, socket) => {
+      expect(frame.method).toBe("chat.abort");
+      expect(frame.params).toEqual({
+        sessionKey: "agent:main:main:thread:test",
+        runId: "run-to-cancel",
+      });
+      socket.send(
+        JSON.stringify({
+          type: "res",
+          id: frame.id,
+          ok: true,
+          payload: { ok: true, aborted: true, runIds: ["run-to-cancel"] },
+        }),
+      );
+    });
+
+    await expect(gateway.abort("agent:main:main:thread:test", "run-to-cancel")).resolves.toEqual({
+      ok: true,
+      aborted: true,
+      runIds: ["run-to-cancel"],
+    });
+  });
+});
+
 describe("OpenClawGateway reconnect — a failed attempt must re-arm", () => {
   it("reconnects on a later retry after the first reconnect attempt fails", async () => {
     // Regression for the dead end this replaced: scheduleReconnect cleared its

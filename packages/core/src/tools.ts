@@ -354,10 +354,10 @@ export function getTaskPrompt(
 /**
  * cancel_task: ask the agent to stop the turn a job is running.
  *
- * Deliberately reports what was REQUESTED, not what was achieved. The stop
- * lands as an upstream abort a few seconds later and the job settles itself
- * (see SessionManager.requestCancel); claiming the work had stopped at the
- * moment of asking would be a promise this layer cannot keep.
+ * Deliberately reports what was REQUESTED, not what was achieved. The bounded
+ * upstream abort runs asynchronously and the job settles itself (see
+ * SessionManager.requestCancel); claiming the work had stopped at the moment
+ * of asking would be a promise this layer cannot keep.
  */
 export async function cancelTask(
   pool: GatewayPool,

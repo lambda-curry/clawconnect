@@ -1504,19 +1504,7 @@ export class SessionManager {
           // Someone asked for this. The upstream abort arrives here looking
           // exactly like a failure, so the request is what distinguishes them.
           if (this.cancelRequested.delete(jobId)) {
-            this.setOutcome(job, "cancelled", undefined, undefined, {
-              resultSource: "parent",
-              terminalReason: "cancelled-by-request",
-            });
-            this.sessions.set(sessionKey, {
-              sessionKey,
-              lastJobId: jobId,
-              lastSummary: "Cancelled before it finished.",
-              artifacts,
-              recommendedNextStep: "Send a new task if you still want this done.",
-            });
-            this.persistActiveJobs();
-            logDebug(`[job ${jobId}] cancelled by request`);
+            this.finishCancellation(job, true);
             return;
           }
           this.setOutcome(job, "error", undefined, message, {
@@ -1543,18 +1531,13 @@ export class SessionManager {
   /**
    * Ask the agent to stop the turn this job is running.
    *
-   * "stop" is sent as an ordinary message, which OpenClaw consumes as an
-   * interrupt rather than as a new turn — verified against a live agent: the
-   * in-flight run is aborted within a few seconds and the stop itself never
-   * returns a runId, so it creates no second job. That is why this bypasses
-   * submitTask's session-busy guard entirely: the guard exists to stop a
-   * DUPLICATE dispatch, and a stop is the one message whose whole purpose is
-   * to arrive while the session is busy.
-   *
-   * Best-effort by construction. The job is not marked terminal here — it is
-   * marked when the abort actually lands (see cancelRequested), so a stop that
-   * upstream ignores leaves the task honestly still running rather than
-   * reporting a cancellation that did not happen.
+   * `chat.abort` is a control-plane RPC, not a second `chat.send("stop")`.
+   * The latter creates a separate stream whose rejection can be disconnected
+   * from this job once its original stream has entered transcript recovery.
+   * `chat.abort` returns the upstream fact we need: whether a run was actually
+   * aborted. Its 15s RPC bound is also the lifecycle bound for an unreachable
+   * upstream: the job becomes an actionable terminal error instead of living
+   * in `running` forever.
    */
   async requestCancel(
     jobId?: string,
@@ -1565,19 +1548,30 @@ export class SessionManager {
     if (job.status !== "running") {
       return { found: true, alreadyTerminal: true, status: job.status, jobId: job.jobId };
     }
+    // The public tool is idempotent. Do not send a second abort while the
+    // first bounded RPC is still in flight; duplicate stop requests were part
+    // of the observed wedge and add no new evidence.
+    if (this.cancelRequested.has(job.jobId)) {
+      return { found: true, alreadyTerminal: false, status: job.status, jobId: job.jobId };
+    }
     this.cancelRequested.add(job.jobId);
     pushLog(job, { ts: Date.now(), type: "lifecycle", text: "Stop requested by the caller." });
     job.lastEventAt = Date.now();
-    // Fire-and-forget: this send is an interrupt and never resolves with a
-    // turn of its own, so awaiting it would block the caller for the full
-    // timeout on the happy path.
+    // Fire-and-forget: the public tool reports that the request was accepted;
+    // the job transition is written when the bounded upstream RPC answers.
     void this.gateway
-      .chat(job.sessionKey, "stop", 15_000)
-      .catch((err: unknown) =>
-        logDebug(
-          `[job ${job.jobId}] stop message settled: ${err instanceof Error ? err.message : String(err)}`,
-        ),
-      );
+      .abort(job.sessionKey, job.parentRunId)
+      .then((result) => {
+        if (job.status !== "running") return;
+        this.finishCancellation(job, result.aborted);
+      })
+      .catch((err: unknown) => {
+        if (job.status !== "running") return;
+        const message =
+          `Cancellation request failed before OpenClaw confirmed the stop: ` +
+          `${err instanceof Error ? err.message : String(err)}`;
+        this.finishCancellation(job, false, message);
+      });
     return { found: true, alreadyTerminal: false, status: job.status, jobId: job.jobId };
   }
 
@@ -1651,6 +1645,59 @@ export class SessionManager {
     if (!state) return;
     clearTimeout(state.timer);
     this.reconcilers.delete(jobId);
+  }
+
+  /**
+   * Apply the one terminal transition that a confirmed upstream abort needs.
+   * This is separate from the live chat rejection path because cancellation
+   * can be requested after that promise has already handed the job to late
+   * transcript recovery.
+   */
+  private finishCancellation(job: Job, upstreamAborted: boolean, failure?: string): void {
+    if (job.status !== "running") return;
+    this.cancelRequested.delete(job.jobId);
+    this.clearReconciler(job.jobId);
+    job.lastEventAt = Date.now();
+    if (upstreamAborted) {
+      this.setOutcome(job, "cancelled", undefined, undefined, {
+        resultSource: "parent",
+        terminalReason: "cancelled-by-request",
+      });
+      this.sessions.set(job.sessionKey, {
+        sessionKey: job.sessionKey,
+        lastJobId: job.jobId,
+        lastSummary: "Cancelled before it finished.",
+        artifacts: job.artifacts,
+        recommendedNextStep: "Send a new task if you still want this done.",
+      });
+      this.persistActiveJobs();
+      logDebug(`[job ${job.jobId}] cancellation confirmed upstream`);
+      return;
+    }
+
+    const message =
+      failure ??
+      `Cancellation was requested, but OpenClaw reported no active run for session ${job.sessionKey}.`;
+    this.setOutcome(job, "error", undefined, message, {
+      resultSource: "parent",
+      terminalReason: "cancellation-not-confirmed",
+      errorInfo: {
+        category: "timeout",
+        message,
+        suggestedRecovery:
+          "Inspect the upstream session before retrying. The connector is terminal, but the upstream run could not be confirmed stopped.",
+      },
+    });
+    this.sessions.set(job.sessionKey, {
+      sessionKey: job.sessionKey,
+      lastJobId: job.jobId,
+      lastSummary: message,
+      artifacts: job.artifacts,
+      recommendedNextStep:
+        "Inspect the upstream session before sending another task on this session.",
+    });
+    this.persistActiveJobs();
+    logDebug(`[job ${job.jobId}] cancellation not confirmed: ${message}`);
   }
 
   /**

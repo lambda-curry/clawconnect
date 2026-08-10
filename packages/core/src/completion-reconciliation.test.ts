@@ -63,14 +63,17 @@ function fakeGateway(
   opts: {
     observations?: (RunObservation | (() => Promise<RunObservation>))[];
     pollTranscriptForFinalText?: () => Promise<string | undefined>;
+    abort?: (sessionKey: string, runId?: string) => Promise<{ ok: boolean; aborted: boolean }>;
   } = {},
 ) {
   const calls: {
     sessionKey: string;
+    message: string;
     onEvent?: (e: GatewayEvent) => void;
     resolve: (v: string) => void;
     reject: (e: Error) => void;
   }[] = [];
+  const abortCalls: { sessionKey: string; runId?: string }[] = [];
   const reconcileCalls: string[] = [];
   const reconcileRunIds: (string | undefined)[] = [];
   let observationIndex = 0;
@@ -78,7 +81,7 @@ function fakeGateway(
   const gateway = {
     chat(
       sessionKey: string,
-      _message: string,
+      message: string,
       _timeoutMs: number,
       onEvent?: (e: GatewayEvent) => void,
       onRunId?: (runId: string) => void,
@@ -90,8 +93,12 @@ function fakeGateway(
       // Never settles on its own: every fixture here is about a run whose
       // terminal event never reaches the connector.
       return new Promise<string>((resolve, reject) => {
-        calls.push({ sessionKey, onEvent, resolve, reject });
+        calls.push({ sessionKey, message, onEvent, resolve, reject });
       });
+    },
+    abort(sessionKey: string, runId?: string) {
+      abortCalls.push({ sessionKey, runId });
+      return opts.abort?.(sessionKey, runId) ?? Promise.resolve({ ok: true, aborted: true });
     },
     async reconcileRun(sessionKey: string, options?: { runId?: string }): Promise<RunObservation> {
       reconcileCalls.push(sessionKey);
@@ -109,6 +116,7 @@ function fakeGateway(
 
   return {
     gateway,
+    abortCalls,
     reconcileCalls,
     reconcileRunIds,
     emit: (e: GatewayEvent, call = 0) => calls[call]?.onEvent?.(e),
@@ -171,6 +179,77 @@ describe("completion reconciliation — the normal path is untouched", () => {
     }
 
     expect(ctrl.reconcileCalls).toHaveLength(0);
+  });
+});
+
+describe("task cancellation — upstream and recovery share one terminal path", () => {
+  it("aborts a normal running task and releases the session for reuse", async () => {
+    vi.useFakeTimers();
+    const ctrl = fakeGateway({ abort: async () => ({ ok: true, aborted: true }) });
+    const sessions = new SessionManager(ctrl.gateway);
+    const job = sessions.submitTask({ task: "cancel this", sessionKey: "agent:main:main:thread:cancel" });
+
+    await sessions.requestCancel(job.jobId);
+    await sessions.requestCancel(job.jobId);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(ctrl.abortCalls).toEqual([
+      { sessionKey: job.sessionKey, runId: `run-for-${job.sessionKey.slice(-8)}` },
+    ]);
+    expect(sessions.getJob(job.jobId)).toMatchObject({
+      status: "cancelled",
+      terminalReason: "cancelled-by-request",
+    });
+    expect(sessions.buildSnapshot(sessions.getJob(job.jobId)!)).toMatchObject({
+      status: "cancelled",
+      continuePolling: false,
+      nextAction: null,
+    });
+    expect(sessions.submitTask({ task: "reuse after cancel", sessionKey: job.sessionKey }).status).toBe("running");
+  });
+
+  it("cancels a job already inside no-live-final-text recovery", async () => {
+    vi.useFakeTimers();
+    const recoveryGate = deferred<string | undefined>();
+    const ctrl = fakeGateway({
+      pollTranscriptForFinalText: () => recoveryGate.promise,
+      abort: async () => ({ ok: true, aborted: true }),
+    });
+    const sessions = new SessionManager(ctrl.gateway);
+    const job = sessions.submitTask({ task: "recover then cancel" });
+
+    ctrl.finishChat(SENTINEL);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sessions.getJob(job.jobId)?.recovery?.reason).toBe("no_live_final_text");
+
+    await sessions.requestCancel(job.jobId);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sessions.getJob(job.jobId)).toMatchObject({
+      status: "cancelled",
+      terminalReason: "cancelled-by-request",
+    });
+
+    // The in-flight recovery read may resolve after cancellation, but it must
+    // observe the terminal state and never reopen or overwrite the job.
+    recoveryGate.resolve(undefined);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sessions.getJob(job.jobId)?.status).toBe("cancelled");
+  });
+
+  it("terminalizes an unconfirmed upstream cancellation instead of wedging running forever", async () => {
+    vi.useFakeTimers();
+    const ctrl = fakeGateway({ abort: async () => ({ ok: true, aborted: false }) });
+    const sessions = new SessionManager(ctrl.gateway);
+    const job = sessions.submitTask({ task: "upstream disappeared" });
+
+    await sessions.requestCancel(job.jobId);
+    await vi.advanceTimersByTimeAsync(0);
+
+    const terminal = sessions.getJob(job.jobId)!;
+    expect(terminal.status).toBe("error");
+    expect(terminal.terminalReason).toBe("cancellation-not-confirmed");
+    expect(terminal.error).toMatch(/no active run/);
+    expect(sessions.buildSnapshot(terminal).continuePolling).toBe(false);
   });
 });
 
