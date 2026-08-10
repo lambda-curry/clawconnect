@@ -5,7 +5,14 @@ import { afterAll, describe, expect, it } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
+import {
+  Client as ModernClient,
+  InMemoryTransport as ModernInMemoryTransport,
+  StreamableHTTPClientTransport,
+} from "@modelcontextprotocol/client";
+import { createMcpHandler } from "@modelcontextprotocol/server";
 import { createMcpServer, defaultFormatCheckTask } from "./server.ts";
+import { serveClawConnectStdio } from "./stdio.ts";
 import { AgentSessionRuntimeRegistry } from "@clawconnect/core";
 import type { AgentRegistry, CheckTaskResult, FleetAdapter, JobSnapshot } from "@clawconnect/core";
 
@@ -71,12 +78,107 @@ async function connectedClient() {
   return client;
 }
 
+async function connectedModernClient() {
+  const handler = createMcpHandler(() => createMcpServer({ registry: fakeRegistry() }).server);
+  const transport = new StreamableHTTPClientTransport(new URL("http://test.local/mcp"), {
+    fetch: (input, init) => handler.fetch(new Request(input, init)),
+  });
+  const client = new ModernClient(
+    { name: "modern-test-client", version: "0.0.0" },
+    { capabilities: {}, versionNegotiation: { mode: { pin: "2026-07-28" } } },
+  );
+  await client.connect(transport);
+  return { client, handler };
+}
+
+describe("generic MCP 2026-07-28 handler-fetch coverage", () => {
+  it("serves tools/list through the modern per-request envelope path", async () => {
+    const { client, handler } = await connectedModernClient();
+    expect(client.getProtocolEra()).toBe("modern");
+    const { tools } = await client.listTools();
+    expect(tools.map((tool) => tool.name)).toEqual(
+      expect.arrayContaining(["run_task", "check_task", "get_task", "list_tasks"]),
+    );
+    const info = await client.callTool({ name: "get_mcp_info", arguments: {} });
+    expect(info.structuredContent).toMatchObject({
+      protocolEra: "modern",
+      protocolVersion: "2026-07-28",
+    });
+    await client.close();
+    await handler.close();
+  });
+
+  it("returns structured validation errors for malformed modern calls", async () => {
+    const { client, handler } = await connectedModernClient();
+    const result = await client.callTool({ name: "get_task", arguments: {} });
+    expect(result.isError).toBe(true);
+    expect(result.content[0]).toMatchObject({ type: "text" });
+    await client.close();
+    await handler.close();
+  });
+});
+
+describe("shipped dual-era stdio router", () => {
+  it("selects modern server/discover and keeps one server instance for later calls", async () => {
+    const [clientTransport, serverTransport] = ModernInMemoryTransport.createLinkedPair();
+    const handle = serveClawConnectStdio(
+      { registry: fakeRegistry() },
+      { transport: serverTransport },
+    );
+    const client = new ModernClient(
+      { name: "modern-stdio-test", version: "0.0.0" },
+      { capabilities: {}, versionNegotiation: { mode: { pin: "2026-07-28" } } },
+    );
+    await client.connect(clientTransport);
+    expect(client.getProtocolEra()).toBe("modern");
+    const tools = await client.listTools();
+    expect(tools.tools.map((tool) => tool.name)).toContain("run_task");
+    const run = await client.callTool({
+      name: "run_task",
+      arguments: { task: "prove the stdio server owns task state" },
+    });
+    const taskId = (run.structuredContent as { taskId: string }).taskId;
+    const found = await client.callTool({ name: "get_task", arguments: { taskId } });
+    expect(found.structuredContent).toMatchObject({ taskId });
+    await client.close();
+    await handle.close();
+  });
+
+  it("explicitly serves a legacy initialize opening", async () => {
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const handle = serveClawConnectStdio(
+      { registry: fakeRegistry() },
+      { transport: serverTransport },
+    );
+    const client = new Client(
+      { name: "legacy-stdio-test", version: "0.0.0" },
+      { capabilities: {} },
+    );
+    await client.connect(clientTransport);
+    const tools = await client.listTools();
+    expect(tools.tools.map((tool) => tool.name)).toContain("run_task");
+    await client.close();
+    await handle.close();
+  });
+});
+
 describe("generic MCP tools/list contract", () => {
+  it("reports the legacy protocol selected by initialize-era clients", async () => {
+    const client = await connectedClient();
+    const info = await client.callTool({ name: "get_mcp_info", arguments: {} });
+    expect(info.structuredContent).toMatchObject({
+      protocolEra: "legacy",
+      protocolVersion: "2025-06-18",
+    });
+  });
+
   it("exposes the unversioned core surface — run_task/check_task/get_task/list_tasks, no _v2 names anywhere", async () => {
     const client = await connectedClient();
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name);
-    expect(names).toEqual(expect.arrayContaining(["run_task", "check_task", "get_task", "list_tasks"]));
+    expect(names).toEqual(
+      expect.arrayContaining(["run_task", "check_task", "get_task", "list_tasks"]),
+    );
     expect(names.some((n) => /_v\d/i.test(n))).toBe(false);
   });
 
@@ -93,7 +195,9 @@ describe("generic MCP tools/list contract", () => {
     const client = await connectedClient();
     const { tools } = await client.listTools();
     const checkTask = tools.find((t) => t.name === "check_task")!;
-    expect(Object.keys(checkTask.inputSchema.properties ?? {})).toEqual(expect.arrayContaining(["waitMs", "mode"]));
+    expect(Object.keys(checkTask.inputSchema.properties ?? {})).toEqual(
+      expect.arrayContaining(["waitMs", "mode"]),
+    );
 
     const getTask = tools.find((t) => t.name === "get_task")!;
     expect(getTask.inputSchema.properties).not.toHaveProperty("mode");
@@ -115,21 +219,30 @@ describe("generic MCP tools/list contract", () => {
 describe("generic MCP tools/call contract — read-only tools against an empty pool", () => {
   it("check_task on an unknown jobId returns a not-found error, not a crash", async () => {
     const client = await connectedClient();
-    const result = await client.callTool({ name: "check_task", arguments: { jobId: "does-not-exist" } });
+    const result = await client.callTool({
+      name: "check_task",
+      arguments: { jobId: "does-not-exist" },
+    });
     expect(result.isError).toBe(true);
   });
 
   it("get_task on an unknown taskId returns a not-found error, and never blocks (immediate)", async () => {
     const client = await connectedClient();
     const start = Date.now();
-    const result = await client.callTool({ name: "get_task", arguments: { taskId: "does-not-exist" } });
+    const result = await client.callTool({
+      name: "get_task",
+      arguments: { taskId: "does-not-exist" },
+    });
     expect(result.isError).toBe(true);
     expect(Date.now() - start).toBeLessThan(2_000);
   });
 
-  it("get_task detail=\"prompt\" on an unknown taskId returns a not-found error, not a leak/crash", async () => {
+  it('get_task detail="prompt" on an unknown taskId returns a not-found error, not a leak/crash', async () => {
     const client = await connectedClient();
-    const result = await client.callTool({ name: "get_task", arguments: { taskId: "does-not-exist", detail: "prompt" } });
+    const result = await client.callTool({
+      name: "get_task",
+      arguments: { taskId: "does-not-exist", detail: "prompt" },
+    });
     expect(result.isError).toBe(true);
   });
 
@@ -153,7 +266,11 @@ describe("Claude / Claude Code — extra-field and _meta tolerance", () => {
     const client = await connectedClient();
     const result = await client.callTool({
       name: "get_task",
-      arguments: { taskId: "does-not-exist", unexpectedField: "some client sends this", nested: { a: 1 } },
+      arguments: {
+        taskId: "does-not-exist",
+        unexpectedField: "some client sends this",
+        nested: { a: 1 },
+      },
     });
     // Zod object schemas strip unknown keys by default rather than throwing —
     // this must resolve to the normal not-found response, not a validation error.
@@ -169,7 +286,10 @@ describe("Claude / Claude Code — extra-field and _meta tolerance", () => {
         params: {
           name: "list_tasks",
           arguments: {},
-          _meta: { progressToken: "abc123", "io.modelcontextprotocol/related-task": { taskId: "unrelated" } },
+          _meta: {
+            progressToken: "abc123",
+            "io.modelcontextprotocol/related-task": { taskId: "unrelated" },
+          },
         },
       },
       CallToolResultSchema,
@@ -197,7 +317,9 @@ describe("tool description contract", () => {
     const checkTask = tools.get("check_task")!;
     expect(checkTask.description).toMatch(/logCursor/);
     expect(checkTask.description).toMatch(/verbatim/i);
-    const knownLogCount = (checkTask.inputSchema.properties as Record<string, { description?: string }>).knownLogCount;
+    const knownLogCount = (
+      checkTask.inputSchema.properties as Record<string, { description?: string }>
+    ).knownLogCount;
     expect(knownLogCount.description).toMatch(/logCursor/);
     expect(knownLogCount.description).toMatch(/never/i);
   });
@@ -219,7 +341,9 @@ describe("tool description contract", () => {
 
   it("get_task's detail preset describes the fields each level actually returns", async () => {
     const tools = await toolsByName();
-    const detail = (tools.get("get_task")!.inputSchema.properties as Record<string, { description?: string }>).detail;
+    const detail = (
+      tools.get("get_task")!.inputSchema.properties as Record<string, { description?: string }>
+    ).detail;
     // `updates` is the field name the payload uses; "logs" was the stale one.
     expect(detail.description).toMatch(/updates=core\+`updates`/);
     expect(detail.description).not.toMatch(/updates=\+logs/);
@@ -229,11 +353,15 @@ describe("tool description contract", () => {
 
   it("get_session describes tail as forward pagination and documents the tasks mode", async () => {
     const tools = await toolsByName();
-    const mode = (tools.get("get_session")!.inputSchema.properties as Record<string, { description?: string }>).mode;
+    const mode = (
+      tools.get("get_session")!.inputSchema.properties as Record<string, { description?: string }>
+    ).mode;
     expect(mode.description).toMatch(/FORWARD/);
     expect(mode.description).toMatch(/nextAfter/);
     expect(mode.description).toMatch(/"tasks"/);
-    const after = (tools.get("get_session")!.inputSchema.properties as Record<string, { description?: string }>).after;
+    const after = (
+      tools.get("get_session")!.inputSchema.properties as Record<string, { description?: string }>
+    ).after;
     expect(after.description).toMatch(/logCursor/);
   });
 
@@ -247,7 +375,8 @@ describe("tool description contract", () => {
   it("only run_task's agent parameter carries routing prose — the inferred-agent tools don't repeat it", async () => {
     const tools = await toolsByName();
     const agentDesc = (name: string) =>
-      (tools.get(name)!.inputSchema.properties as Record<string, { description?: string }>).agent?.description ?? "";
+      (tools.get(name)!.inputSchema.properties as Record<string, { description?: string }>).agent
+        ?.description ?? "";
     expect(agentDesc("run_task")).toMatch(/list_agents/);
     for (const name of ["check_task", "get_session"]) {
       expect(agentDesc(name)).toMatch(/inferred/i);
@@ -302,7 +431,14 @@ describe("check_task model-facing text carries the resume cursor", () => {
 
   it("the late-recovery hint carries the cursor too", () => {
     const response = defaultFormatCheckTask(
-      runningResult({ recovery: { reason: "no_live_final_text", startedAt: Date.now(), idleTimeoutMs: 1, hardCapMs: 2 } }),
+      runningResult({
+        recovery: {
+          reason: "no_live_final_text",
+          startedAt: Date.now(),
+          idleTimeoutMs: 1,
+          hardCapMs: 2,
+        },
+      }),
     );
     const payload = JSON.parse(response.content[0].text) as Record<string, unknown>;
     expect(String(payload.hint)).toContain("knownLogCount=17");
@@ -332,14 +468,19 @@ describe("check_task model-facing text carries the resume cursor", () => {
       const payload = JSON.parse(response.content[0].text) as Record<string, unknown>;
       const hint = String(payload.hint);
       expect(hint, state).toContain("example-runtime/thr-abc123");
-      expect(hint, state).toContain(state === "needs_permission" ? "waiting for permission" : "waiting for input");
+      expect(hint, state).toContain(
+        state === "needs_permission" ? "waiting for permission" : "waiting for input",
+      );
       expect(hint, state).toContain("Polling cannot advance it");
       expect(hint, state).not.toContain("Task is actively running");
       // The resume cursor still has to survive: the caller does poll again,
       // after answering.
       expect(hint, state).toContain("knownLogCount=17");
       expect(String(payload.blockedDelegation), state).toContain("thr-abc123");
-      expect(payload.delegatedSession, state).toMatchObject({ handle: "thr-abc123", status: state });
+      expect(payload.delegatedSession, state).toMatchObject({
+        handle: "thr-abc123",
+        status: state,
+      });
       // Still a non-terminal running response — the block does not end the job.
       expect(payload.status, state).toBe("running");
       expect(payload.continuePolling, state).toBe(true);
@@ -365,7 +506,10 @@ describe("check_task model-facing text carries the resume cursor", () => {
   });
 
   it("leaves an ordinary running payload byte-for-byte as it was", () => {
-    const payload = JSON.parse(defaultFormatCheckTask(runningResult()).content[0].text) as Record<string, unknown>;
+    const payload = JSON.parse(defaultFormatCheckTask(runningResult()).content[0].text) as Record<
+      string,
+      unknown
+    >;
     expect(String(payload.hint)).toBe(
       "Task is actively running (this is a non-terminal timeout, not an error). Call check_task again with the same jobId to continue waiting; pass knownLogCount=17 to resume the log window.",
     );
@@ -428,7 +572,9 @@ describe("a terminal turn whose delegated session is waiting on a human", () => 
   });
 
   it("leaves an ordinary terminal payload byte-for-byte as it was", () => {
-    const plain = JSON.parse(defaultFormatCheckTask(terminalResult({ summary: "the answer" })).content[0].text);
+    const plain = JSON.parse(
+      defaultFormatCheckTask(terminalResult({ summary: "the answer" })).content[0].text,
+    );
     expect(plain).not.toHaveProperty("blockedDelegation");
     expect(plain).not.toHaveProperty("delegatedSession");
     expect(plain.summary).toBe("the answer");
@@ -473,14 +619,22 @@ describe("production entrypoint wiring — FleetAdapter", () => {
    */
   it("createMcpServer passes a host's agent-session runtime registry through to every agent", () => {
     const runtimes = new AgentSessionRuntimeRegistry();
-    runtimes.register({ id: "example-runtime", provider: "anthropic-claude-code", inspect: async () => ({ state: "running" }) });
+    runtimes.register({
+      id: "example-runtime",
+      provider: "anthropic-claude-code",
+      inspect: async () => ({ state: "running" }),
+    });
     const { pool } = createMcpServer({ registry: fakeRegistry(), agentSessionRuntimes: runtimes });
-    expect(pool.forAgent("test-agent").sessions.hasAgentSessionRuntime("example-runtime")).toBe(true);
+    expect(pool.forAgent("test-agent").sessions.hasAgentSessionRuntime("example-runtime")).toBe(
+      true,
+    );
   });
 
   it("createMcpServer leaves claude-fleet the only reachable runtime when no registry is supplied", () => {
     const { pool } = createMcpServer({ registry: fakeRegistry() });
-    expect(pool.forAgent("test-agent").sessions.hasAgentSessionRuntime("example-runtime")).toBe(false);
+    expect(pool.forAgent("test-agent").sessions.hasAgentSessionRuntime("example-runtime")).toBe(
+      false,
+    );
   });
 
   /**
@@ -507,7 +661,9 @@ describe("production entrypoint wiring — FleetAdapter", () => {
   it("stays fully in-memory when no directory is configured, exactly as before", () => {
     const dir = seededFleetStore();
     const { pool } = createMcpServer({ registry: fakeRegistry() });
-    expect(pool.forAgent("test-agent").sessions.getAgentSessionAttachment("sess-1")).toBeUndefined();
+    expect(
+      pool.forAgent("test-agent").sessions.getAgentSessionAttachment("sess-1"),
+    ).toBeUndefined();
     expect(readdirSync(dir)).toEqual(["test-agent.attachments.json"]);
   });
 });

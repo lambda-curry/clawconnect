@@ -1,4 +1,8 @@
-import { blockedDelegation, isDelegateBlockedTerminalReason, type BlockedDelegation } from "./agent-session.ts";
+import {
+  blockedDelegation,
+  isDelegateBlockedTerminalReason,
+  type BlockedDelegation,
+} from "./agent-session.ts";
 import { GatewayPool } from "./gateway-pool.ts";
 import { recordTelemetry } from "./telemetry.ts";
 import type {
@@ -106,13 +110,17 @@ export const TASK_SUMMARY_PREVIEW_MAX = 500;
  */
 export const TASK_BLOCKED_NOTICE_MAX = 500;
 
-function previewSummary(summary: string | undefined): Pick<TaskSummary, "summary" | "summaryTruncated"> {
+function previewSummary(
+  summary: string | undefined,
+): Pick<TaskSummary, "summary" | "summaryTruncated"> {
   if (summary === undefined) return {};
   if (summary.length <= TASK_SUMMARY_PREVIEW_MAX) return { summary };
   return { summary: `${summary.slice(0, TASK_SUMMARY_PREVIEW_MAX - 1)}…`, summaryTruncated: true };
 }
 
-function previewBlockedDelegation(blocked: BlockedDelegation | undefined): BlockedDelegation | undefined {
+function previewBlockedDelegation(
+  blocked: BlockedDelegation | undefined,
+): BlockedDelegation | undefined {
   if (!blocked || blocked.notice.length <= TASK_BLOCKED_NOTICE_MAX) return blocked;
   return { ...blocked, notice: `${blocked.notice.slice(0, TASK_BLOCKED_NOTICE_MAX - 1)}…` };
 }
@@ -124,7 +132,11 @@ function previewBlockedDelegation(blocked: BlockedDelegation | undefined): Block
  * whether it has anything to say about THIS row is decided by
  * blockedDelegation's delegated-turn check, not by the caller.
  */
-function toTaskSummary(job: Job, agentId: string, attachment?: AgentSessionAttachment): TaskSummary {
+function toTaskSummary(
+  job: Job,
+  agentId: string,
+  attachment?: AgentSessionAttachment,
+): TaskSummary {
   const blocked = previewBlockedDelegation(
     blockedDelegation({ jobId: job.jobId, status: job.status, agentSession: attachment }),
   );
@@ -154,7 +166,13 @@ export function listTasks(pool: GatewayPool): TaskSummary[] {
       if (!job) continue;
       // Reads the ONE attachment this session already has — the same
       // per-session lookup get_session does, never a scan across sessions.
-      items.push(toTaskSummary(job, entry.agent.id, entry.sessions.getAgentSessionAttachment(session.sessionKey)));
+      items.push(
+        toTaskSummary(
+          job,
+          entry.agent.id,
+          entry.sessions.getAgentSessionAttachment(session.sessionKey),
+        ),
+      );
     }
   }
   recordTelemetry({ tool: "list_tasks", taskCount: items.length, durationMs: Date.now() - start });
@@ -166,7 +184,10 @@ function notFound(): CheckTaskResult {
 }
 
 /** Shared entry-resolution logic for checkTask/getTask/getTaskPrompt. */
-function resolvePoolEntry(pool: GatewayPool, opts: { jobId?: string; sessionKey?: string; agent?: string }) {
+function resolvePoolEntry(
+  pool: GatewayPool,
+  opts: { jobId?: string; sessionKey?: string; agent?: string },
+) {
   let entry = opts.agent ? pool.forAgent(opts.agent) : undefined;
   if (!entry && opts.jobId) entry = pool.forJob(opts.jobId);
   if (!entry && opts.sessionKey) entry = pool.forSession(opts.sessionKey);
@@ -192,7 +213,14 @@ export async function checkTask(pool: GatewayPool, opts: CheckTaskOpts): Promise
   const start = Date.now();
   const entry = resolvePoolEntry(pool, opts);
   if (!entry) {
-    recordTelemetry({ tool: "check_task", jobId: opts.jobId, sessionKey: opts.sessionKey, requestedWaitMs: opts.waitMs, status: "not_found", durationMs: Date.now() - start });
+    recordTelemetry({
+      tool: "check_task",
+      jobId: opts.jobId,
+      sessionKey: opts.sessionKey,
+      requestedWaitMs: opts.waitMs,
+      status: "not_found",
+      durationMs: Date.now() - start,
+    });
     return notFound();
   }
 
@@ -202,9 +230,18 @@ export async function checkTask(pool: GatewayPool, opts: CheckTaskOpts): Promise
     opts.sessionKey,
     opts.mode ?? "poll",
     opts.waitMs,
+    opts.signal,
   );
   if (!job) {
-    recordTelemetry({ tool: "check_task", jobId: opts.jobId, sessionKey: opts.sessionKey, agent: entry.agent.id, requestedWaitMs: opts.waitMs, status: "not_found", durationMs: Date.now() - start });
+    recordTelemetry({
+      tool: "check_task",
+      jobId: opts.jobId,
+      sessionKey: opts.sessionKey,
+      agent: entry.agent.id,
+      requestedWaitMs: opts.waitMs,
+      status: "not_found",
+      durationMs: Date.now() - start,
+    });
     return notFound();
   }
 
@@ -247,12 +284,25 @@ export function getTask(
   const start = Date.now();
   const entry = resolvePoolEntry(pool, opts);
   if (!entry) {
-    recordTelemetry({ tool: "get_task", jobId: opts.jobId, sessionKey: opts.sessionKey, status: "not_found", durationMs: Date.now() - start });
+    recordTelemetry({
+      tool: "get_task",
+      jobId: opts.jobId,
+      sessionKey: opts.sessionKey,
+      status: "not_found",
+      durationMs: Date.now() - start,
+    });
     return notFound();
   }
   const job = entry.sessions.resolveJob(opts.jobId, opts.sessionKey);
   if (!job) {
-    recordTelemetry({ tool: "get_task", jobId: opts.jobId, sessionKey: opts.sessionKey, agent: entry.agent.id, status: "not_found", durationMs: Date.now() - start });
+    recordTelemetry({
+      tool: "get_task",
+      jobId: opts.jobId,
+      sessionKey: opts.sessionKey,
+      agent: entry.agent.id,
+      status: "not_found",
+      durationMs: Date.now() - start,
+    });
     return notFound();
   }
 
@@ -328,7 +378,13 @@ export function listSessions(pool: GatewayPool): ContinuationState[] {
  */
 export function getSession(
   pool: GatewayPool,
-  opts: { sessionId: string; mode?: SessionInspectMode; limit?: number; after?: number; agent?: string },
+  opts: {
+    sessionId: string;
+    mode?: SessionInspectMode;
+    limit?: number;
+    after?: number;
+    agent?: string;
+  },
 ): SessionInspectResult {
   let entry = opts.agent ? pool.forAgent(opts.agent) : pool.forSession(opts.sessionId);
   if (!entry) {

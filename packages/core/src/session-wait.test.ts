@@ -8,13 +8,20 @@ import type { OpenClawGateway } from "./gateway.ts";
  * WebSocket. Matches the wait/get_task fake-clock test matrix in
  * docs/architecture/2026-07-27-multi-client-compatibility.md §7.
  */
-function fakeGateway(chatImpl: (sessionKey: string, message: string, timeoutMs: number) => Promise<string>) {
+function fakeGateway(
+  chatImpl: (sessionKey: string, message: string, timeoutMs: number) => Promise<string>,
+) {
   return {
     chat: chatImpl,
     close: () => {},
     // Quiet-watchdog surface: "upstream is still advancing", so a job these
     // fixtures leave running stays running instead of being reconciled.
-    reconcileRun: async () => ({ ok: true, changed: true, trailingText: "", snapshotKey: "active" }),
+    reconcileRun: async () => ({
+      ok: true,
+      changed: true,
+      trailingText: "",
+      snapshotKey: "active",
+    }),
   } as unknown as OpenClawGateway;
 }
 
@@ -58,6 +65,25 @@ describe("SessionManager.waitForJob — check_task wait semantics", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("abandons an aborted wait without cancelling the delegated task", async () => {
+    const sessions = new SessionManager(neverResolvingGateway());
+    const job = sessions.submitTask({ task: "keep working after the caller disconnects" });
+    const controller = new AbortController();
+    const waitPromise = sessions.waitForJob(
+      job.jobId,
+      0,
+      undefined,
+      "wait",
+      120_000,
+      controller.signal,
+    );
+
+    controller.abort();
+    const result = await waitPromise;
+    expect(result?.status).toBe("running");
+    expect(sessions.getJob(job.jobId)?.status).toBe("running");
   });
 
   it("clamps an invalid (negative/NaN/huge) waitMs instead of erroring", async () => {
@@ -114,11 +140,17 @@ describe("SessionManager.waitForJob — check_task wait semantics", () => {
       // A wait-mode call already blocked for its full window, so it's safe
       // to call again right away — no artificial backoff outside recovery.
       expect(snapshot.retryAfterMs).toBe(0);
-      expect(snapshot.nextAction).toEqual({ tool: "check_task", args: { jobId: job.jobId, sessionKey: job.sessionKey } });
+      expect(snapshot.nextAction).toEqual({
+        tool: "check_task",
+        args: { jobId: job.jobId, sessionKey: job.sessionKey },
+      });
 
       // Re-polling the same job is safe and does not spawn a second job —
       // submitting a new task on the same (still-running) session is refused.
-      const resubmit = sessions.submitTask({ task: "do the thing again", sessionKey: job.sessionKey });
+      const resubmit = sessions.submitTask({
+        task: "do the thing again",
+        sessionKey: job.sessionKey,
+      });
       expect(resubmit.jobId).not.toBe(job.jobId);
       expect(resubmit.status).toBe("error");
       expect(resubmit.errorInfo?.message).toBe("session busy");
@@ -136,7 +168,12 @@ describe("SessionManager.waitForJob — check_task wait semantics", () => {
     // "running" (the caller keeps polling normally) but internally watching
     // the transcript on its own ~10s server-side cadence — see
     // recoverLateFinalText in session.ts.
-    liveJob.recovery = { reason: "no_live_final_text", startedAt: Date.now(), idleTimeoutMs: 300_000, hardCapMs: 5_400_000 };
+    liveJob.recovery = {
+      reason: "no_live_final_text",
+      startedAt: Date.now(),
+      idleTimeoutMs: 300_000,
+      hardCapMs: 5_400_000,
+    };
 
     const snapshot = sessions.buildSnapshot(liveJob);
     expect(snapshot.status).toBe("running");
@@ -182,16 +219,24 @@ describe("get_task-equivalent immediate reads never wait", () => {
 describe("prompt storage", () => {
   it("stores the original task/context/senderName on the job, retrievable but not part of the snapshot", async () => {
     const sessions = new SessionManager(neverResolvingGateway());
-    const job = sessions.submitTask({ task: "investigate the bug", context: "seen in prod", senderName: "Jake" });
+    const job = sessions.submitTask({
+      task: "investigate the bug",
+      context: "seen in prod",
+      senderName: "Jake",
+    });
 
-    expect(job.prompt).toEqual({ task: "investigate the bug", context: "seen in prod", senderName: "Jake" });
+    expect(job.prompt).toEqual({
+      task: "investigate the bug",
+      context: "seen in prod",
+      senderName: "Jake",
+    });
 
     const snapshot = sessions.buildSnapshot(job);
     expect(snapshot).not.toHaveProperty("prompt");
   });
 });
 
-describe("getJobHistory — backs get_session(mode:\"tasks\"), the UI's expandable task history", () => {
+describe('getJobHistory — backs get_session(mode:"tasks"), the UI\'s expandable task history', () => {
   it("returns every real job submitted under a session, newest first", async () => {
     const sessions = new SessionManager(fakeGateway(async () => "first answer"));
     const first = sessions.submitTask({ task: "first ask" });
@@ -216,7 +261,10 @@ describe("getJobHistory — backs get_session(mode:\"tasks\"), the UI's expandab
   it("never includes a busy-rejected submission in the history — only real dispatched work", () => {
     const sessions = new SessionManager(neverResolvingGateway());
     const first = sessions.submitTask({ task: "first ask" });
-    const rejected = sessions.submitTask({ task: "second ask, while first still running", sessionKey: first.sessionKey });
+    const rejected = sessions.submitTask({
+      task: "second ask, while first still running",
+      sessionKey: first.sessionKey,
+    });
     expect(rejected.errorInfo?.message).toBe("session busy");
 
     const history = sessions.getJobHistory(first.sessionKey);

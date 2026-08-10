@@ -22,7 +22,11 @@ import {
   type AgentSessionRuntimeRegistry,
   type AgentSessionStatus,
 } from "./agent-session.ts";
-import { CLAUDE_FLEET_RUNTIME_ID, fleetAdapterRuntime, type FleetAdapter } from "./fleet-adapter.ts";
+import {
+  CLAUDE_FLEET_RUNTIME_ID,
+  fleetAdapterRuntime,
+  type FleetAdapter,
+} from "./fleet-adapter.ts";
 import type { AttachmentStore } from "./attachment-store.ts";
 import { parseSessionHandoff } from "./session-handoff.ts";
 import { OpenClawGateway, type RunObservation } from "./gateway.ts";
@@ -99,7 +103,9 @@ const RECONCILE_SAMPLE_INTERVAL_MS = readEnvMs("CLAWCONNECT_RECONCILE_SAMPLE_INT
 export const ATTACHMENT_RESULT_SUMMARY_MAX = 2_000;
 
 function capResultText(text: string): string {
-  return text.length > ATTACHMENT_RESULT_SUMMARY_MAX ? `${text.slice(0, ATTACHMENT_RESULT_SUMMARY_MAX - 1)}…` : text;
+  return text.length > ATTACHMENT_RESULT_SUMMARY_MAX
+    ? `${text.slice(0, ATTACHMENT_RESULT_SUMMARY_MAX - 1)}…`
+    : text;
 }
 
 /**
@@ -118,13 +124,29 @@ function attachmentOutputRef(record: AgentSessionAttachment): string {
  * log-projection.ts). seq is 1-based and equal to the post-push array
  * length; monotonic for the life of the job regardless of how long it runs.
  */
-function pushLog(job: Pick<Job, "logs">, entry: { ts: number; type: string; text: string; isError?: boolean }): void {
+function pushLog(
+  job: Pick<Job, "logs">,
+  entry: { ts: number; type: string; text: string; isError?: boolean },
+): void {
   job.logs.push({ ...entry, seq: job.logs.length + 1 });
 }
 
 function resolveWaitMs(requested: number | undefined): number {
   if (requested === undefined || !Number.isFinite(requested)) return DEFAULT_WAIT_MS;
   return Math.min(Math.max(requested, MIN_WAIT_MS), MAX_WAIT_MS);
+}
+
+function waitForPollInterval(signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, 500);
+    signal?.addEventListener("abort", done, { once: true });
+  });
 }
 
 /**
@@ -164,10 +186,16 @@ function upstreamStillActiveGuidance(
   };
 }
 
-function buildNextAction(job: { jobId: string; sessionKey: string; status: JobStatus }): NextAction {
+function buildNextAction(job: {
+  jobId: string;
+  sessionKey: string;
+  status: JobStatus;
+}): NextAction {
   // args keys are check_task's own parameter names (jobId, not the taskId
   // alias) so the object is directly callable — see NextAction in types.ts.
-  return job.status === "running" ? { tool: "check_task", args: { jobId: job.jobId, sessionKey: job.sessionKey } } : null;
+  return job.status === "running"
+    ? { tool: "check_task", args: { jobId: job.jobId, sessionKey: job.sessionKey } }
+    : null;
 }
 
 const LEGACY_CHATGPT_SESSION_PREFIX = "agent:chatgpt:";
@@ -248,13 +276,19 @@ function sanitizeAttachmentState(raw: SessionAttachmentState): SessionAttachment
   const attachments: Record<string, AgentSessionAttachment> = {};
   if (rawAttachments && typeof rawAttachments === "object") {
     for (const [id, record] of Object.entries(rawAttachments)) {
-      if (record && typeof record === "object" && typeof (record as AgentSessionAttachment).id === "string") {
+      if (
+        record &&
+        typeof record === "object" &&
+        typeof (record as AgentSessionAttachment).id === "string"
+      ) {
         attachments[id] = record as AgentSessionAttachment;
       }
     }
   }
   const currentAttachmentId =
-    raw?.currentAttachmentId && attachments[raw.currentAttachmentId] ? raw.currentAttachmentId : undefined;
+    raw?.currentAttachmentId && attachments[raw.currentAttachmentId]
+      ? raw.currentAttachmentId
+      : undefined;
   return { sessionKey: raw.sessionKey, currentAttachmentId, attachments };
 }
 
@@ -388,7 +422,9 @@ export class SessionManager {
       const history = this.jobHistoryBySession.get(pj.sessionKey) ?? [];
       history.push(pj.jobId);
       this.jobHistoryBySession.set(pj.sessionKey, history);
-      logDebug(`[job ${pj.jobId.slice(0, 8)}] reloaded from job store, reattaching via transcript recovery`);
+      logDebug(
+        `[job ${pj.jobId.slice(0, 8)}] reloaded from job store, reattaching via transcript recovery`,
+      );
       this.recoverLateFinalText(job, pj.sessionKey, pj.jobId, artifacts);
     }
   }
@@ -416,7 +452,8 @@ export class SessionManager {
       // the highest token, and re-issuing it would let a stale write land.
       for (const record of Object.values(sanitized.attachments)) {
         const token = record.observationToken;
-        if (typeof token === "number" && Number.isFinite(token) && token > highWater) highWater = token;
+        if (typeof token === "number" && Number.isFinite(token) && token > highWater)
+          highWater = token;
       }
     }
     this.observationSeq = highWater;
@@ -533,15 +570,23 @@ export class SessionManager {
    * applyAgentSessionStatus). Returns undefined only when there is nothing
    * attached — there is no branch here that looks at any other session.
    */
-  async runAgentSessionOp(sessionKey: string, request: AgentSessionRequest): Promise<AgentSessionStatus | undefined> {
+  async runAgentSessionOp(
+    sessionKey: string,
+    request: AgentSessionRequest,
+  ): Promise<AgentSessionStatus | undefined> {
     const record = this.getAgentSessionAttachment(sessionKey);
     if (!record) return undefined;
     const token = ++this.observationSeq;
     const attachmentId = record.id;
     const delegatedTurnId = record.delegatedTurnId;
-    const status = await dispatchAgentSession(this.resolveRuntime(record), this.agentSessionRef(record), request, {
-      now: Date.now(),
-    });
+    const status = await dispatchAgentSession(
+      this.resolveRuntime(record),
+      this.agentSessionRef(record),
+      request,
+      {
+        now: Date.now(),
+      },
+    );
     this.applyAgentSessionStatus(sessionKey, attachmentId, delegatedTurnId, token, status);
     return status;
   }
@@ -591,8 +636,10 @@ export class SessionManager {
     // uninformative initial "starting" — and only that, evaluated against the
     // FRESH record, so a status the host reported while the probe was in flight
     // is never clobbered by a bare liveness bit.
-    const reported = status.state === "unavailable" || status.state === "unknown" ? undefined : status.state;
-    const promoted = !reported && status.alive === true && fresh.status === "starting" ? "running" : undefined;
+    const reported =
+      status.state === "unavailable" || status.state === "unknown" ? undefined : status.state;
+    const promoted =
+      !reported && status.alive === true && fresh.status === "starting" ? "running" : undefined;
     const nextStatus = reported ?? promoted;
     const observedAt = status.lastEventAt ?? status.termination?.at ?? now;
 
@@ -671,7 +718,9 @@ export class SessionManager {
     directive: Extract<AgentSessionDirective, { op: "attach" | "replace" }>,
   ): AgentSessionAttachment {
     const state = this.attachments.get(sessionKey) ?? { sessionKey, attachments: {} };
-    const previous = state.currentAttachmentId ? state.attachments?.[state.currentAttachmentId] : undefined;
+    const previous = state.currentAttachmentId
+      ? state.attachments?.[state.currentAttachmentId]
+      : undefined;
     const runtime = directive.runtime ?? CLAUDE_FLEET_RUNTIME_ID;
 
     // An "attach" naming the session that is ALREADY current is a
@@ -682,7 +731,12 @@ export class SessionManager {
     // one entry per turn, so it folds into a refresh instead. An explicit
     // "replace" always mints, because it is a stated lineage decision and
     // carries its own reason.
-    if (directive.op === "attach" && previous && previous.runtime === runtime && previous.handle === directive.handle) {
+    if (
+      directive.op === "attach" &&
+      previous &&
+      previous.runtime === runtime &&
+      previous.handle === directive.handle
+    ) {
       return this.refreshCurrentAttachment(sessionKey, jobId, previous, directive);
     }
 
@@ -713,7 +767,11 @@ export class SessionManager {
       };
     }
 
-    this.attachments.set(sessionKey, { sessionKey, currentAttachmentId: record.id, attachments: nextAttachments });
+    this.attachments.set(sessionKey, {
+      sessionKey,
+      currentAttachmentId: record.id,
+      attachments: nextAttachments,
+    });
     this.persistAttachments();
     logDebug(
       `[attachment] session ${sessionKey.slice(-12)} ${directive.op}ed ${record.handle} (${record.id.slice(0, 8)})` +
@@ -754,7 +812,9 @@ export class SessionManager {
       // Same reasoning as applyDirectiveObservation's explicit-status write: a
       // re-stated marker is the newest thing anyone has told us about this
       // session, so an older read still in flight must not land on top of it.
-      ...(directive.status ? { status: directive.status, observationToken: ++this.observationSeq } : {}),
+      ...(directive.status
+        ? { status: directive.status, observationToken: ++this.observationSeq }
+        : {}),
     });
     logDebug(
       `[agent-session] session ${sessionKey.slice(-12)} re-stated ${current.runtime}/${current.handle} (${current.id.slice(0, 8)}), delegated to job ${jobId.slice(0, 8)}`,
@@ -783,7 +843,10 @@ export class SessionManager {
    */
   private redelegationReset(current: AgentSessionAttachment): Partial<AgentSessionAttachment> {
     const terminal =
-      current.status === "completed" || current.status === "idle" || current.status === "dead" || current.status === "failed";
+      current.status === "completed" ||
+      current.status === "idle" ||
+      current.status === "dead" ||
+      current.status === "failed";
     return {
       lastResult: undefined,
       termination: undefined,
@@ -796,7 +859,9 @@ export class SessionManager {
 
   private detachAttachment(sessionKey: string, reason: string): AgentSessionAttachment | undefined {
     const state = this.attachments.get(sessionKey);
-    const current = state?.currentAttachmentId ? state.attachments?.[state.currentAttachmentId] : undefined;
+    const current = state?.currentAttachmentId
+      ? state.attachments?.[state.currentAttachmentId]
+      : undefined;
     if (!state || !current) return undefined;
     const detached: AgentSessionAttachment = { ...current, status: "detached", reason };
     this.attachments.set(sessionKey, {
@@ -805,16 +870,25 @@ export class SessionManager {
       attachments: { ...(state.attachments ?? {}), [detached.id]: detached },
     });
     this.persistAttachments();
-    logDebug(`[attachment] session ${sessionKey.slice(-12)} detached ${detached.handle}: ${reason}`);
+    logDebug(
+      `[attachment] session ${sessionKey.slice(-12)} detached ${detached.handle}: ${reason}`,
+    );
     return detached;
   }
 
-  private writeAttachment(sessionKey: string, attachmentId: string, patch: Partial<AgentSessionAttachment>): void {
+  private writeAttachment(
+    sessionKey: string,
+    attachmentId: string,
+    patch: Partial<AgentSessionAttachment>,
+  ): void {
     const state = this.attachments.get(sessionKey);
     const current = state?.attachments?.[attachmentId];
     if (!state || !current) return;
     const updated: AgentSessionAttachment = { ...current, ...patch };
-    this.attachments.set(sessionKey, { ...state, attachments: { ...(state.attachments ?? {}), [attachmentId]: updated } });
+    this.attachments.set(sessionKey, {
+      ...state,
+      attachments: { ...(state.attachments ?? {}), [attachmentId]: updated },
+    });
     this.persistAttachments();
   }
 
@@ -830,7 +904,10 @@ export class SessionManager {
    * result from resurrecting or corrupting a now-historical
    * (detached/superseded) lineage record.
    */
-  private getCurrentAttachmentIfUnchanged(sessionKey: string, attachmentId: string): AgentSessionAttachment | undefined {
+  private getCurrentAttachmentIfUnchanged(
+    sessionKey: string,
+    attachmentId: string,
+  ): AgentSessionAttachment | undefined {
     const state = this.attachments.get(sessionKey);
     if (state?.currentAttachmentId !== attachmentId) return undefined;
     return state.attachments?.[attachmentId];
@@ -890,7 +967,8 @@ export class SessionManager {
     // be a false positive against a Job-outcome write it was never meant to
     // catch — `patch` is a AgentSessionAttachment fragment, not a Job.
     const statusStated = directive.status !== undefined;
-    const delegationChanged = directive.op === "continue" && jobId !== undefined && jobId !== current.delegatedTurnId;
+    const delegationChanged =
+      directive.op === "continue" && jobId !== undefined && jobId !== current.delegatedTurnId;
     if (statusStated || delegationChanged) {
       this.writeAttachment(sessionKey, current.id, {
         // Same rule as a re-stated marker: a `continue` from a LATER turn is a
@@ -910,7 +988,9 @@ export class SessionManager {
         // beforehand. An identical value written again is invisible in the
         // record apart from the token and freshness mark — which is the whole
         // point of writing it.
-        ...(statusStated ? { status: directive.status, observationToken: ++this.observationSeq } : {}),
+        ...(statusStated
+          ? { status: directive.status, observationToken: ++this.observationSeq }
+          : {}),
         ...(delegationChanged ? { delegatedTurnId: jobId } : {}),
         lastObservedAt: Date.now(),
       });
@@ -941,7 +1021,11 @@ export class SessionManager {
    * delegation slot, and must not silently invalidate whatever turn
    * currently legitimately owns it.
    */
-  private applyAgentSessionDirective(sessionKey: string, jobId: string, directive: AgentSessionDirective): void {
+  private applyAgentSessionDirective(
+    sessionKey: string,
+    jobId: string,
+    directive: AgentSessionDirective,
+  ): void {
     switch (directive.op) {
       case "attach":
       case "replace":
@@ -1026,7 +1110,9 @@ export class SessionManager {
       // withAgentSessionTimeout): this read runs on the path that decides a
       // job's terminal status, and an adapter that never answers must not be
       // able to hold a job in `running` forever.
-      const handoff = await withAgentSessionTimeout((signal) => this.fleetAdapter!.readTerminalHandoff(record, signal));
+      const handoff = await withAgentSessionTimeout((signal) =>
+        this.fleetAdapter!.readTerminalHandoff(record, signal),
+      );
       if (!handoff?.text) return undefined;
       return {
         status: normalizeAgentSessionObservation(
@@ -1111,7 +1197,9 @@ export class SessionManager {
     // it skips a transcript entry with no parseable timestamp.
     const resultAt = status.lastEventAt ?? status.termination?.at;
     if (resultAt === undefined) {
-      logDebug(`[agent-session] ignoring undatable result from ${current.runtime}/${current.handle}`);
+      logDebug(
+        `[agent-session] ignoring undatable result from ${current.runtime}/${current.handle}`,
+      );
       return undefined;
     }
     if (resultAt < job.startedAt) {
@@ -1125,7 +1213,8 @@ export class SessionManager {
     // again, while the runtime call is in flight. The write-back is the one
     // place that decides whether this answer is still allowed to be durable —
     // and if it isn't, it isn't allowed to complete the job either.
-    if (!this.applyAgentSessionStatus(job.sessionKey, attachmentId, delegatedTurnId, token, status)) return undefined;
+    if (!this.applyAgentSessionStatus(job.sessionKey, attachmentId, delegatedTurnId, token, status))
+      return undefined;
     return { summary: status.finalResponse, attachmentId, resultSource: source };
   }
 
@@ -1156,7 +1245,8 @@ export class SessionManager {
     // burn a delegation slot that belongs to the job actually running.
     const parsedDirective = parseSessionHandoff(input.context);
     const strippedContext = parsedDirective ? parsedDirective.strippedText : input.context;
-    const effectiveInput: TaskInput = strippedContext === input.context ? input : { ...input, context: strippedContext };
+    const effectiveInput: TaskInput =
+      strippedContext === input.context ? input : { ...input, context: strippedContext };
 
     // buildSubmitMessage prepends the `message`-tool veto preamble, the
     // sender identity, and optional context block in the canonical order
@@ -1191,7 +1281,11 @@ export class SessionManager {
         logs: [],
         artifacts: emptyArtifacts(),
         pollCount: 0,
-        prompt: { task: effectiveInput.task, context: effectiveInput.context, senderName: effectiveInput.senderName },
+        prompt: {
+          task: effectiveInput.task,
+          context: effectiveInput.context,
+          senderName: effectiveInput.senderName,
+        },
       };
       this.jobs.set(busyJobId, busyJob);
       logDebug(
@@ -1202,7 +1296,8 @@ export class SessionManager {
 
     const jobId = randomUUID();
     // Apply the directive now that we know it correlates to a REAL turn.
-    if (parsedDirective) this.applyAgentSessionDirective(sessionKey, jobId, parsedDirective.directive);
+    if (parsedDirective)
+      this.applyAgentSessionDirective(sessionKey, jobId, parsedDirective.directive);
     const artifacts = emptyArtifacts();
     const now = Date.now();
     const hasInitialLog = !input.sessionKey || migratedFromLegacy;
@@ -1216,12 +1311,24 @@ export class SessionManager {
       logs: [],
       artifacts,
       pollCount: 0,
-      prompt: { task: effectiveInput.task, context: effectiveInput.context, senderName: effectiveInput.senderName },
+      prompt: {
+        task: effectiveInput.task,
+        context: effectiveInput.context,
+        senderName: effectiveInput.senderName,
+      },
     };
     if (!input.sessionKey) {
-      pushLog(job, { ts: now, type: "lifecycle", text: `Started new thread session: ${sessionKey}` });
+      pushLog(job, {
+        ts: now,
+        type: "lifecycle",
+        text: `Started new thread session: ${sessionKey}`,
+      });
     } else if (migratedFromLegacy) {
-      pushLog(job, { ts: now, type: "lifecycle", text: `Migrated legacy ChatGPT session to new thread: ${sessionKey}` });
+      pushLog(job, {
+        ts: now,
+        type: "lifecycle",
+        text: `Migrated legacy ChatGPT session to new thread: ${sessionKey}`,
+      });
     }
     this.jobs.set(jobId, job);
     this.latestJobBySession.set(sessionKey, jobId);
@@ -1293,7 +1400,10 @@ export class SessionManager {
               // — including one this file itself produced via an attached session
               // recovery — so resultSource is reset to "parent" here
               // unconditionally.
-              this.setOutcome(job, "completed", reply, undefined, { resultSource: "parent", terminalReason: "live-final-late" });
+              this.setOutcome(job, "completed", reply, undefined, {
+                resultSource: "parent",
+                terminalReason: "live-final-late",
+              });
               extractPatternsFromSummary(artifacts, reply);
               // Reconciliation freed this session, so a newer job may already
               // own it — this reply is minutes stale by construction. Upgrade
@@ -1328,7 +1438,10 @@ export class SessionManager {
             this.recoverLateFinalText(job, sessionKey, jobId, artifacts);
             return;
           }
-          this.setOutcome(job, "completed", reply, undefined, { resultSource: "parent", terminalReason: "live-final" });
+          this.setOutcome(job, "completed", reply, undefined, {
+            resultSource: "parent",
+            terminalReason: "live-final",
+          });
           extractPatternsFromSummary(artifacts, reply);
           this.sessions.set(sessionKey, {
             sessionKey,
@@ -1367,11 +1480,20 @@ export class SessionManager {
             // from the parent's own impatience. Every other chat()
             // rejection — error/aborted/RPC/connection — is an upstream
             // verdict and stays terminal below.
-            this.recoverLateFinalText(job, sessionKey, jobId, artifacts, "parent_observation_timeout");
+            this.recoverLateFinalText(
+              job,
+              sessionKey,
+              jobId,
+              artifacts,
+              "parent_observation_timeout",
+            );
             return;
           }
           const message = err instanceof Error ? err.message : String(err);
-          this.setOutcome(job, "error", undefined, message, { resultSource: "parent", terminalReason: "chat-error" });
+          this.setOutcome(job, "error", undefined, message, {
+            resultSource: "parent",
+            terminalReason: "chat-error",
+          });
           this.sessions.set(sessionKey, {
             sessionKey,
             lastJobId: jobId,
@@ -1544,7 +1666,13 @@ export class SessionManager {
       logDebug(
         `[job ${job.jobId}] reconcile threw: ${err instanceof Error ? err.message : String(err)}`,
       );
-      observation = { ok: false, changed: false, trailingText: "", snapshotKey: "", upstream: "unknown" };
+      observation = {
+        ok: false,
+        changed: false,
+        trailingText: "",
+        snapshotKey: "",
+        upstream: "unknown",
+      };
     }
 
     // The job may have changed hands while we were sampling. Two distinct
@@ -1670,10 +1798,17 @@ export class SessionManager {
     this.clearReconciler(job.jobId);
     this.provisionalOutcomes.add(job.jobId);
     job.lastEventAt = Date.now();
-    this.setOutcome(job, status, status === "completed" ? summary : NO_SUMMARY_SENTINEL, undefined, {
-      resultSource: "parent",
-      terminalReason: status === "completed" ? "reconciled-transcript-match" : "reconciled-no-text",
-    });
+    this.setOutcome(
+      job,
+      status,
+      status === "completed" ? summary : NO_SUMMARY_SENTINEL,
+      undefined,
+      {
+        resultSource: "parent",
+        terminalReason:
+          status === "completed" ? "reconciled-transcript-match" : "reconciled-no-text",
+      },
+    );
     if (status === "completed") extractPatternsFromSummary(job.artifacts, summary);
     pushLog(job, {
       ts: Date.now(),
@@ -1871,7 +2006,11 @@ export class SessionManager {
           // failed sample), so `checkedAt` measures the evidence, not the
           // attempt — a stretch of failed reads correctly ages this out
           // instead of refreshing a verdict nobody re-confirmed.
-          job.liveness = { checkedAt: sample.checkedAt, upstream: sample.upstream, producing: sample.changed };
+          job.liveness = {
+            checkedAt: sample.checkedAt,
+            upstream: sample.upstream,
+            producing: sample.changed,
+          };
         },
       });
       if (job.status !== "running") return;
@@ -1969,7 +2108,9 @@ export class SessionManager {
         recommendedNextStep: deriveNextStep(artifacts, job.status),
       });
       this.persistActiveJobs();
-      logDebug(`[job ${jobId}] recovered via the attached session (${attached.summary.length} chars)`);
+      logDebug(
+        `[job ${jobId}] recovered via the attached session (${attached.summary.length} chars)`,
+      );
       return;
     }
     // There IS one thing left to say when the delegate is waiting on a
@@ -2049,7 +2190,9 @@ export class SessionManager {
         recommendedNextStep: guidance.nextStep,
       });
       this.persistActiveJobs();
-      logDebug(`[job ${jobId}] late-recovery hit the hard cap with upstream still active — error, not a quiet finish`);
+      logDebug(
+        `[job ${jobId}] late-recovery hit the hard cap with upstream still active — error, not a quiet finish`,
+      );
       return;
     }
 
@@ -2213,11 +2356,16 @@ export class SessionManager {
               terminalReason: delegateBlockedTerminalReason(blocked.status as AgentSessionState),
             });
             pushLog(job, { ts: Date.now(), type: "recovery", text: notice });
-            logDebug(`[job ${job.jobId}] lazy-recheck: delegate is ${blocked.status} — turn is blocked, not finished`);
+            logDebug(
+              `[job ${job.jobId}] lazy-recheck: delegate is ${blocked.status} — turn is blocked, not finished`,
+            );
           }
           return;
         }
-        if (this.latestJobBySession.get(job.sessionKey) === job.jobId && (job.outcomeVersion ?? 0) === outcomeAtStart) {
+        if (
+          this.latestJobBySession.get(job.sessionKey) === job.jobId &&
+          (job.outcomeVersion ?? 0) === outcomeAtStart
+        ) {
           this.provisionalOutcomes.add(job.jobId);
           job.lastEventAt = Date.now();
           this.setOutcome(job, "completed", attached.summary, undefined, {
@@ -2237,7 +2385,9 @@ export class SessionManager {
             artifacts: job.artifacts,
             recommendedNextStep: deriveNextStep(job.artifacts, "completed"),
           });
-          logDebug(`[job ${job.jobId}] lazy-recheck: recovered via the attached session (${attached.summary.length} chars)`);
+          logDebug(
+            `[job ${job.jobId}] lazy-recheck: recovered via the attached session (${attached.summary.length} chars)`,
+          );
         }
       }
       return;
@@ -2249,7 +2399,9 @@ export class SessionManager {
     // PERMANENT: chat() settling retires the provisional flag, so nothing
     // replaces the summary again and no later poll re-reads it.
     if ((job.outcomeVersion ?? 0) !== outcomeAtStart) {
-      logDebug(`[job ${job.jobId}] lazy-recheck superseded while reading — discarding the stale read`);
+      logDebug(
+        `[job ${job.jobId}] lazy-recheck superseded while reading — discarding the stale read`,
+      );
       return;
     }
     // Did this read actually heal anything? Either it brought text the job
@@ -2268,7 +2420,10 @@ export class SessionManager {
     // A real parent-transcript read always wins over a provisional attached-session
     // result, so resultSource is reset to "parent" here unconditionally —
     // same rule as the live-final-late branch in submitTask.
-    this.setOutcome(job, "completed", recovered, undefined, { resultSource: "parent", terminalReason: "lazy-recheck-transcript" });
+    this.setOutcome(job, "completed", recovered, undefined, {
+      resultSource: "parent",
+      terminalReason: "lazy-recheck-transcript",
+    });
     extractPatternsFromSummary(job.artifacts, recovered);
     this.sessions.set(job.sessionKey, {
       sessionKey: job.sessionKey,
@@ -2380,6 +2535,7 @@ export class SessionManager {
     sessionKey?: string,
     mode: CheckMode = "poll",
     waitMs?: number,
+    signal?: AbortSignal,
   ): Promise<Job | undefined> {
     const job = this.resolveJob(jobId, sessionKey);
     if (!job) {
@@ -2421,15 +2577,20 @@ export class SessionManager {
     // a lifecycle/recovery entry — an actual state transition, not cosmetic —
     // always wakes immediately, undebounced. See COSMETIC_POLL_DEBOUNCE_MS.
     let cosmeticActivitySince: number | undefined;
-    while (Date.now() < deadline && job.status === "running") {
-      await new Promise((r) => setTimeout(r, 500));
+    while (Date.now() < deadline && job.status === "running" && !signal?.aborted) {
+      await waitForPollInterval(signal);
+      if (signal?.aborted) break;
       // In "poll" mode: return early on new logs (live progress for widgets)
       // In "wait" mode: only return on terminal state or timeout (fewer round-trips for agentic use)
       if (mode === "poll" && job.logs.length > knownLogCount) {
         const freshEntries = job.logs.slice(knownLogCount);
-        const hasLifecycleTransition = freshEntries.some((e) => e.type === "lifecycle" || e.type === "recovery");
+        const hasLifecycleTransition = freshEntries.some(
+          (e) => e.type === "lifecycle" || e.type === "recovery",
+        );
         if (hasLifecycleTransition) {
-          logDebug(`[waitForJob] job ${job.jobId.slice(0, 8)} lifecycle activity — waking immediately`);
+          logDebug(
+            `[waitForJob] job ${job.jobId.slice(0, 8)} lifecycle activity — waking immediately`,
+          );
           return job;
         }
         if (cosmeticActivitySince === undefined) cosmeticActivitySince = Date.now();
@@ -2442,7 +2603,7 @@ export class SessionManager {
       }
     }
     logDebug(
-      `[waitForJob] job ${job.jobId.slice(0, 8)} ${mode} timeout (logs=${job.logs.length}, status=${job.status})`,
+      `[waitForJob] job ${job.jobId.slice(0, 8)} ${signal?.aborted ? "request aborted" : `${mode} timeout`} (logs=${job.logs.length}, status=${job.status})`,
     );
     return job;
   }

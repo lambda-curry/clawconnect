@@ -33,10 +33,12 @@
   },
   "dependencies": {
     "@clawconnect/core": "workspace:*",
-    "@modelcontextprotocol/sdk": "1.29.0",
+    "@modelcontextprotocol/server": "catalog:",
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@modelcontextprotocol/client": "catalog:",
+    "@modelcontextprotocol/sdk": "catalog:",
     "@types/node": "catalog:",
     "typescript": "catalog:",
     "vite-plus": "catalog:",

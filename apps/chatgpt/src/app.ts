@@ -4,6 +4,15 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Hono } from "hono";
 import {
+  createMcpHandler,
+  fromJsonSchema,
+  isJsonContentType,
+  isLegacyRequest,
+  McpServer,
+} from "@modelcontextprotocol/server";
+import type { AuthInfo, CallToolResult, McpRequestContext } from "@modelcontextprotocol/server";
+import { toWebRequest } from "@modelcontextprotocol/node";
+import {
   GatewayPool,
   LocalTmuxFleetAdapter,
   runTask,
@@ -115,7 +124,9 @@ export function checkTaskText(snapshot: JobSnapshot, isTerminal: boolean): strin
   const blocked = blockedDelegation(snapshot);
   const resume = `Poll again with knownLogCount=${snapshot.logCursor}.`;
   if (blocked) return `${blocked.notice} ${resume}`;
-  return snapshot.recovery ? `Recovering late transcript final text. ${resume}` : `Still running. ${resume}`;
+  return snapshot.recovery
+    ? `Recovering late transcript final text. ${resume}`
+    : `Still running. ${resume}`;
 }
 
 /**
@@ -139,7 +150,9 @@ export function createApp(registry: AgentRegistry, opts: CreateAppOptions = {}):
     } catch (err) {
       // Missing/broken widget resource must never take down the connector —
       // run_task/check_task correctness does not depend on this file existing.
-      console.error(`[chatgpt-app] failed to load widget resource from ${widgetHtmlPath}: ${(err as Error).message}`);
+      console.error(
+        `[chatgpt-app] failed to load widget resource from ${widgetHtmlPath}: ${(err as Error).message}`,
+      );
       cachedWidgetHtml = undefined;
     }
     return cachedWidgetHtml;
@@ -160,12 +173,32 @@ export function createApp(registry: AgentRegistry, opts: CreateAppOptions = {}):
   pool.warmAll();
   const AGENT_IDS = registry.agents.map((a) => a.id);
 
-  const CORS_HEADERS = {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Mcp-Session-Id",
-    "Access-Control-Expose-Headers": "Mcp-Session-Id",
-  };
+  const BASE_ALLOWED_REQUEST_HEADERS = [
+    "Content-Type",
+    "Authorization",
+    "Mcp-Session-Id",
+    "MCP-Protocol-Version",
+    "Mcp-Method",
+    "Mcp-Name",
+  ];
+  const ALLOWED_PREFLIGHT_HEADER =
+    /^(?:content-type|authorization|mcp-session-id|mcp-protocol-version|mcp-method|mcp-name|mcp-param-[a-z0-9_-]+)$/i;
+
+  function corsHeaders(req: IncomingMessage): Record<string, string> {
+    const requestedHeaders = String(req.headers["access-control-request-headers"] ?? "")
+      .split(",")
+      .map((header) => header.trim())
+      .filter((header) => ALLOWED_PREFLIGHT_HEADER.test(header));
+
+    return {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
+      "Access-Control-Allow-Headers": [
+        ...new Set([...BASE_ALLOWED_REQUEST_HEADERS, ...requestedHeaders]),
+      ].join(", "),
+      "Access-Control-Expose-Headers": "Mcp-Session-Id, MCP-Protocol-Version, Mcp-Method, Mcp-Name",
+    };
+  }
 
   /**
    * Per-request agent scope. A connection can narrow which agents it sees with:
@@ -184,6 +217,21 @@ export function createApp(registry: AgentRegistry, opts: CreateAppOptions = {}):
    * distinguishable. Otherwise it's the generic "ClawConnect".
    */
   const DEFAULT_SERVER_NAME = "ClawConnect";
+  const LEGACY_PROTOCOL_VERSION = "2025-06-18";
+  const MODERN_PROTOCOL_VERSION = "2026-07-28";
+
+  function protocolInfo(protocolEra: "legacy" | "modern", protocolVersion: string) {
+    const payload = {
+      protocolEra,
+      protocolVersion,
+      serverName: DEFAULT_SERVER_NAME,
+      serverVersion: "0.1.0",
+    };
+    return {
+      content: [{ type: "text" as const, text: JSON.stringify(payload) }],
+      structuredContent: payload,
+    };
+  }
 
   interface Scope {
     allowedIds: string[];
@@ -192,10 +240,16 @@ export function createApp(registry: AgentRegistry, opts: CreateAppOptions = {}):
   }
 
   function resolveScope(url: URL): Scope {
-    const csv = (vals: string[]) => vals.flatMap((v) => v.split(",")).map((v) => v.trim()).filter(Boolean);
+    const csv = (vals: string[]) =>
+      vals
+        .flatMap((v) => v.split(","))
+        .map((v) => v.trim())
+        .filter(Boolean);
 
     const groupNames = csv(url.searchParams.getAll("group"));
-    const explicitAgents = csv(url.searchParams.getAll("agents").concat(url.searchParams.getAll("agent")));
+    const explicitAgents = csv(
+      url.searchParams.getAll("agents").concat(url.searchParams.getAll("agent")),
+    );
 
     const matchedGroups = groupNames.filter((g) => registry.groups[g]);
     const serverName =
@@ -211,7 +265,9 @@ export function createApp(registry: AgentRegistry, opts: CreateAppOptions = {}):
     for (const g of groupNames) {
       const members = registry.groups[g];
       if (!members) {
-        console.warn(`[mcp] unknown group "${g}" — ignored (known groups: ${Object.keys(registry.groups).join(", ") || "none"})`);
+        console.warn(
+          `[mcp] unknown group "${g}" — ignored (known groups: ${Object.keys(registry.groups).join(", ") || "none"})`,
+        );
         continue;
       }
       for (const id of members) if (!wanted.includes(id)) wanted.push(id);
@@ -220,7 +276,9 @@ export function createApp(registry: AgentRegistry, opts: CreateAppOptions = {}):
 
     const allowed = wanted.filter((id) => AGENT_IDS.includes(id));
     if (allowed.length === 0) {
-      console.warn(`[mcp] scope (groups=${JSON.stringify(groupNames)}, agents=${JSON.stringify(explicitAgents)}) resolved to no known agents — falling back to all`);
+      console.warn(
+        `[mcp] scope (groups=${JSON.stringify(groupNames)}, agents=${JSON.stringify(explicitAgents)}) resolved to no known agents — falling back to all`,
+      );
       return { allowedIds: AGENT_IDS, defaultId: registry.default, serverName };
     }
     const defaultId = allowed.includes(registry.default) ? registry.default : allowed[0];
@@ -238,7 +296,11 @@ export function createApp(registry: AgentRegistry, opts: CreateAppOptions = {}):
   const AGENTS_BY_ID = new Map<string, AgentEntry>(registry.agents.map((a) => [a.id, a]));
 
   function blurbsFor(ids: string[]): string {
-    return ids.map((id) => agentBlurb(AGENTS_BY_ID.get(id) ?? { id, url: "", password: "", openclawAgentId: "" })).join("; ");
+    return ids
+      .map((id) =>
+        agentBlurb(AGENTS_BY_ID.get(id) ?? { id, url: "", password: "", openclawAgentId: "" }),
+      )
+      .join("; ");
   }
 
   function buildTools(allowedIds: string[], defaultId: string, identity: Identity) {
@@ -277,7 +339,8 @@ Pass sessionKey from a previous result to continue the same thread.`,
             context: { type: "string", description: "Optional context for the task" },
             sessionKey: {
               type: "string",
-              description: "Session key from a previous call to continue the same thread. Omit to start a new thread.",
+              description:
+                "Session key from a previous call to continue the same thread. Omit to start a new thread.",
             },
             senderName: senderNameProp,
           },
@@ -349,7 +412,8 @@ completed_no_summary and error are terminal — report them. Rarely, a long tool
             jobId: { type: "string", description: "The jobId returned by run_task." },
             sessionKey: {
               type: "string",
-              description: "The sessionKey from run_task — resolves the session's latest job. Alternative to jobId, and how a status check reattaches after a refresh.",
+              description:
+                "The sessionKey from run_task — resolves the session's latest job. Alternative to jobId, and how a status check reattaches after a refresh.",
             },
             agent: {
               ...agentProp,
@@ -357,16 +421,19 @@ completed_no_summary and error are terminal — report them. Rarely, a long tool
             },
             knownLogCount: {
               type: "number",
-              description: "The previous response's logCursor, passed back UNCHANGED — an opaque resume token, never a count you compute from the entries you received. Omit or 0 for the initial window. The server returns only events after it (a bounded delta, not the full log); in poll mode it also gates the early return.",
+              description:
+                "The previous response's logCursor, passed back UNCHANGED — an opaque resume token, never a count you compute from the entries you received. Omit or 0 for the initial window. The server returns only events after it (a bounded delta, not the full log); in poll mode it also gates the early return.",
             },
             mode: {
               type: "string",
               enum: ["poll", "wait"],
-              description: '"wait" (default) blocks up to waitMs, returning early only on a terminal status; a timeout return is non-terminal, just call again. "poll" returns on any new log activity — for live progress UIs.',
+              description:
+                '"wait" (default) blocks up to waitMs, returning early only on a terminal status; a timeout return is non-terminal, just call again. "poll" returns on any new log activity — for live progress UIs.',
             },
             waitMs: {
               type: "number",
-              description: "Max time to block, in ms. Default 45000; clamped to [1000, 120000] rather than erroring.",
+              description:
+                "Max time to block, in ms. Default 45000; clamped to [1000, 120000] rather than erroring.",
             },
           },
         },
@@ -413,13 +480,23 @@ completed_no_summary and error are terminal — report them. Rarely, a long tool
             collections: {
               type: "array",
               items: { type: "string" },
-              description: "Restrict to these collection names. Omit to search all collections the connection can reach. Use list_collections to discover them.",
+              description:
+                "Restrict to these collection names. Omit to search all collections the connection can reach. Use list_collections to discover them.",
             },
-            intent: { type: "string", description: "One-line description of why you're searching — telemetry only." },
+            intent: {
+              type: "string",
+              description: "One-line description of why you're searching — telemetry only.",
+            },
           },
           required: ["query"],
         },
-        annotations: { title: "Search Memory", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+        annotations: {
+          title: "Search Memory",
+          readOnlyHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: false,
+        },
       },
       {
         name: "get_memory",
@@ -427,17 +504,45 @@ completed_no_summary and error are terminal — report them. Rarely, a long tool
         inputSchema: {
           type: "object",
           properties: {
-            file: { type: "string", description: "qmd://collection/<id>.md path from a search_memory hit" },
+            file: {
+              type: "string",
+              description: "qmd://collection/<id>.md path from a search_memory hit",
+            },
           },
           required: ["file"],
         },
-        annotations: { title: "Get Memory", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+        annotations: {
+          title: "Get Memory",
+          readOnlyHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: false,
+        },
       },
       {
         name: "list_collections",
         description: `List the QMD memory collections this connection can search. Each entry shows which agents grant access. Useful when you want to scope a search_memory call to a particular collection.`,
         inputSchema: { type: "object", properties: {} },
-        annotations: { title: "List Collections", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+        annotations: {
+          title: "List Collections",
+          readOnlyHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: false,
+        },
+      },
+      {
+        name: "get_mcp_info",
+        description:
+          "Report the MCP protocol era and negotiated protocol version used by this connection. Use this when the user asks which MCP version ChatGPT is using.",
+        inputSchema: { type: "object", properties: {} },
+        annotations: {
+          title: "Get MCP Info",
+          readOnlyHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: false,
+        },
       },
       {
         name: "list_tasks",
@@ -448,11 +553,18 @@ completed_no_summary and error are terminal — report them. Rarely, a long tool
             view: {
               type: "string",
               enum: ["active", "all"],
-              description: '"active" returns only non-terminal tasks (queued, running, blocked, needs-human); omit to include terminal ones too.',
+              description:
+                '"active" returns only non-terminal tasks (queued, running, blocked, needs-human); omit to include terminal ones too.',
             },
           },
         },
-        annotations: { title: "List Tasks", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+        annotations: {
+          title: "List Tasks",
+          readOnlyHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: false,
+        },
         _meta: buildAppCallableMeta(WIDGET_ENABLED),
       },
       {
@@ -463,21 +575,41 @@ At detail levels that include it, \`updates\` is a bounded recent-activity windo
         inputSchema: {
           type: "object",
           properties: {
-            taskId: { type: "string", description: "Task identifier. Same value as jobId — either name resolves the same task." },
+            taskId: {
+              type: "string",
+              description:
+                "Task identifier. Same value as jobId — either name resolves the same task.",
+            },
             detail: {
               type: "string",
-              enum: ["core", "summary", "updates", "artifacts", "diagnostics", "prompt", "full", "fullWithDiagnostics"],
+              enum: [
+                "core",
+                "summary",
+                "updates",
+                "artifacts",
+                "diagnostics",
+                "prompt",
+                "full",
+                "fullWithDiagnostics",
+              ],
               description:
-                'Detail preset; omit for summary. core=identifiers, status, and polling metadata only; summary=core+summary; updates=core+`updates` (recent activity) with logCursor/logEventCount; artifacts=core+artifacts; diagnostics=core+`diagnostics` (error, errorInfo, recovery, continuationState); prompt=the originally submitted task/context, which no other preset ever returns; full=core+summary+updates+artifacts; fullWithDiagnostics=full+diagnostics.',
+                "Detail preset; omit for summary. core=identifiers, status, and polling metadata only; summary=core+summary; updates=core+`updates` (recent activity) with logCursor/logEventCount; artifacts=core+artifacts; diagnostics=core+`diagnostics` (error, errorInfo, recovery, continuationState); prompt=the originally submitted task/context, which no other preset ever returns; full=core+summary+updates+artifacts; fullWithDiagnostics=full+diagnostics.",
             },
             knownLogCount: {
               type: "number",
-              description: "The previous response's logCursor, passed back UNCHANGED — an opaque resume token, never a count of entries you received. Omit for the initial recent-activity window.",
+              description:
+                "The previous response's logCursor, passed back UNCHANGED — an opaque resume token, never a count of entries you received. Omit for the initial recent-activity window.",
             },
           },
           required: ["taskId"],
         },
-        annotations: { title: "Get Task", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+        annotations: {
+          title: "Get Task",
+          readOnlyHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: false,
+        },
         _meta: buildAppCallableMeta(WIDGET_ENABLED),
       },
       {
@@ -490,15 +622,29 @@ At detail levels that include it, \`updates\` is a bounded recent-activity windo
             mode: {
               type: "string",
               enum: ["snapshot", "events", "tail", "tasks"],
-              description: '"snapshot" (default) = the session\'s current state, no events. "events" = one bounded slice from `after`. "tail" = the same slice plus a `nextAfter` cursor for paging FORWARD through the log (oldest-first, not last-N-lines); page again with after=nextAfter until fewer than `limit` events come back. "tasks" = every task ever run under this session, newest first, in list_tasks\' row shape (summaries are truncated previews there).',
+              description:
+                '"snapshot" (default) = the session\'s current state, no events. "events" = one bounded slice from `after`. "tail" = the same slice plus a `nextAfter` cursor for paging FORWARD through the log (oldest-first, not last-N-lines); page again with after=nextAfter until fewer than `limit` events come back. "tasks" = every task ever run under this session, newest first, in list_tasks\' row shape (summaries are truncated previews there).',
             },
-            limit: { type: "number", description: "Max events per page for events/tail modes. Default 50, max 200." },
-            after: { type: "number", description: "Zero-based event offset to read from; for tail mode pass the previous response's nextAfter. Unrelated to check_task/get_task's logCursor — different cursor space." },
+            limit: {
+              type: "number",
+              description: "Max events per page for events/tail modes. Default 50, max 200.",
+            },
+            after: {
+              type: "number",
+              description:
+                "Zero-based event offset to read from; for tail mode pass the previous response's nextAfter. Unrelated to check_task/get_task's logCursor — different cursor space.",
+            },
             agent: { ...agentProp, description: "Usually inferred from sessionId." },
           },
           required: ["sessionId"],
         },
-        annotations: { title: "Get Session", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+        annotations: {
+          title: "Get Session",
+          readOnlyHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: false,
+        },
         _meta: buildAppCallableMeta(WIDGET_ENABLED),
       },
     ];
@@ -533,7 +679,9 @@ At detail levels that include it, \`updates\` is a bounded recent-activity windo
     const cleanToken = token.trim();
     if (!cleanName || !cleanToken) return;
     if (target.has(cleanToken)) {
-      console.warn(`[mcp] ${source}: duplicate token for "${cleanName}" collides with "${target.get(cleanToken)}" — skipped`);
+      console.warn(
+        `[mcp] ${source}: duplicate token for "${cleanName}" collides with "${target.get(cleanToken)}" — skipped`,
+      );
       return;
     }
     target.set(cleanToken, cleanName);
@@ -548,7 +696,9 @@ At detail levels that include it, \`updates\` is a bounded recent-activity windo
       const name = sep > 0 ? trimmed.slice(0, sep).trim() : "";
       const token = sep > 0 ? trimmed.slice(sep + 1).trim() : "";
       if (!name || !token) {
-        console.warn(`[mcp] ${source} entry "${trimmed.slice(0, 16)}..." is not "Name:token" — skipped`);
+        console.warn(
+          `[mcp] ${source} entry "${trimmed.slice(0, 16)}..." is not "Name:token" — skipped`,
+        );
         continue;
       }
       addToken(tokens, name, token, source);
@@ -563,15 +713,17 @@ At detail levels that include it, \`updates\` is a bounded recent-activity windo
       for (const entry of parsed) {
         if (!entry || typeof entry !== "object") continue;
         const { name, token } = entry as Record<string, unknown>;
-        if (typeof name === "string" && typeof token === "string") addToken(tokens, name, token, source);
+        if (typeof name === "string" && typeof token === "string")
+          addToken(tokens, name, token, source);
       }
       return tokens;
     }
     if (!parsed || typeof parsed !== "object") return tokens;
     const obj = parsed as Record<string, unknown>;
-    const record = obj.tokens && typeof obj.tokens === "object" && !Array.isArray(obj.tokens)
-      ? (obj.tokens as Record<string, unknown>)
-      : obj;
+    const record =
+      obj.tokens && typeof obj.tokens === "object" && !Array.isArray(obj.tokens)
+        ? (obj.tokens as Record<string, unknown>)
+        : obj;
     for (const [name, token] of Object.entries(record)) {
       if (typeof token === "string") addToken(tokens, name, token, source);
     }
@@ -580,7 +732,9 @@ At detail levels that include it, \`updates\` is a bounded recent-activity windo
 
   const ENV_USER_TOKENS = parseTokenCsv(process.env.MCP_USER_TOKENS, "MCP_USER_TOKENS");
   if (ENV_USER_TOKENS.size > 0) {
-    console.log(`[mcp] env personal tokens loaded for: ${[...ENV_USER_TOKENS.values()].join(", ")}`);
+    console.log(
+      `[mcp] env personal tokens loaded for: ${[...ENV_USER_TOKENS.values()].join(", ")}`,
+    );
   }
   if (MCP_USER_TOKENS_FILE) {
     console.log(`[mcp] runtime token file enabled: ${MCP_USER_TOKENS_FILE}`);
@@ -602,18 +756,26 @@ At detail levels that include it, \`updates\` is a bounded recent-activity windo
       }
       const mtimeMs = statSync(MCP_USER_TOKENS_FILE).mtimeMs;
       if (fileTokenMtimeMs === mtimeMs) return fileTokenCache;
-      fileTokenCache = parseTokenJson(readFileSync(MCP_USER_TOKENS_FILE, "utf8"), MCP_USER_TOKENS_FILE);
+      fileTokenCache = parseTokenJson(
+        readFileSync(MCP_USER_TOKENS_FILE, "utf8"),
+        MCP_USER_TOKENS_FILE,
+      );
       fileTokenMtimeMs = mtimeMs;
-      console.log(`[mcp] runtime personal tokens loaded for: ${[...fileTokenCache.values()].join(", ") || "(none)"}`);
+      console.log(
+        `[mcp] runtime personal tokens loaded for: ${[...fileTokenCache.values()].join(", ") || "(none)"}`,
+      );
     } catch (err) {
-      console.warn(`[mcp] failed to read token file ${MCP_USER_TOKENS_FILE}: ${(err as Error).message}`);
+      console.warn(
+        `[mcp] failed to read token file ${MCP_USER_TOKENS_FILE}: ${(err as Error).message}`,
+      );
     }
     return fileTokenCache;
   }
 
   function getUserTokens(): Map<string, string> {
     const merged = new Map(ENV_USER_TOKENS);
-    for (const [token, name] of loadFileTokens()) addToken(merged, name, token, MCP_USER_TOKENS_FILE ?? "token file");
+    for (const [token, name] of loadFileTokens())
+      addToken(merged, name, token, MCP_USER_TOKENS_FILE ?? "token file");
     return merged;
   }
 
@@ -630,6 +792,7 @@ At detail levels that include it, \`updates\` is a bounded recent-activity windo
    *   null                              — credential missing or wrong → 403
    */
   type Identity = { user: string | null; legacy?: boolean };
+  type ToolResponse = CallToolResult & { structuredContent?: Record<string, unknown> };
 
   function resolveIdentity(url: URL, req: import("node:http").IncomingMessage): Identity | null {
     const userTokens = getUserTokens();
@@ -646,15 +809,331 @@ At detail levels that include it, \`updates\` is a bounded recent-activity windo
     return null;
   }
 
+  function authInfoFor(identity: Identity): AuthInfo {
+    return {
+      // Authentication is complete before the SDK entry runs. Do not copy a
+      // caller's bearer secret into handler context.
+      token: "validated-by-clawconnect",
+      clientId: identity.user ?? (identity.legacy ? "legacy-shared-token" : "anonymous"),
+      scopes: [],
+      extra: { identity },
+    };
+  }
+
+  async function invokeTool(
+    name: string,
+    args: Record<string, unknown>,
+    scope: Scope,
+    identity: Identity,
+    signal?: AbortSignal,
+  ): Promise<ToolResponse | undefined> {
+    if (name === "run_task") {
+      const requestedAgent =
+        typeof args.agent === "string" && args.agent ? args.agent : scope.defaultId;
+      if (!scope.allowedIds.includes(requestedAgent)) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Agent "${requestedAgent}" is not available on this connection. Allowed: ${scope.allowedIds.join(", ")}.`,
+            },
+          ],
+          isError: true,
+        };
+      }
+      try {
+        const result = runTask(pool, {
+          task: typeof args.task === "string" ? args.task : "",
+          agent: requestedAgent,
+          context: typeof args.context === "string" ? args.context : undefined,
+          sessionKey: typeof args.sessionKey === "string" ? args.sessionKey : undefined,
+          senderName:
+            identity.user ?? (typeof args.senderName === "string" ? args.senderName : undefined),
+        });
+        const structuredContent = buildRunTaskStructuredContent(result);
+        return {
+          content: [
+            {
+              type: "text",
+              text:
+                JSON.stringify({
+                  ...structuredContent,
+                  message: "Task submitted. Use check_task to poll for progress.",
+                }) + (identity.legacy ? `\n\nNote: ${GET_TOKEN_HINT}` : ""),
+            },
+          ],
+          structuredContent,
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text", text: `Failed to submit: ${(err as Error).message}` }],
+          isError: true,
+        };
+      }
+    }
+
+    if (name === "check_task") {
+      const requestedAgent = typeof args.agent === "string" && args.agent ? args.agent : undefined;
+      if (requestedAgent && !scope.allowedIds.includes(requestedAgent)) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Agent "${requestedAgent}" is not available on this connection. Allowed: ${scope.allowedIds.join(", ")}.`,
+            },
+          ],
+          isError: true,
+        };
+      }
+      const result = await checkTask(pool, {
+        jobId: typeof args.jobId === "string" ? args.jobId : undefined,
+        sessionKey: typeof args.sessionKey === "string" ? args.sessionKey : undefined,
+        agent: requestedAgent,
+        knownLogCount: Number(args.knownLogCount) || 0,
+        mode: (args.mode as CheckMode) ?? "wait",
+        waitMs: args.waitMs !== undefined ? Number(args.waitMs) : undefined,
+        signal,
+      });
+      if (!result.found) {
+        const message = args.sessionKey
+          ? "Task state not found for that session. The server may have restarted."
+          : "Job not found. The server may have restarted.";
+        return {
+          content: [{ type: "text", text: message }],
+          structuredContent: { status: "error", error: message },
+          isError: true,
+        };
+      }
+      if (result.snapshot.agent && !scope.allowedIds.includes(result.snapshot.agent)) {
+        return {
+          content: [{ type: "text", text: "Job not found." }],
+          structuredContent: { status: "error", error: "Job not found." },
+          isError: true,
+        };
+      }
+      return {
+        content: [{ type: "text", text: checkTaskText(result.snapshot, result.isTerminal) }],
+        structuredContent: buildCheckTaskStructuredContent(result),
+        ...(result.isError ? { isError: true } : {}),
+      };
+    }
+
+    if (name === "list_sessions") {
+      const sessions = listSessions(pool).filter(
+        (s) => !s.agent || scope.allowedIds.includes(s.agent),
+      );
+      const summary =
+        sessions.length === 0
+          ? "No sessions known to this connector yet."
+          : sessions
+              .map(
+                (s) => `${s.agent ?? "?"}: ${s.sessionKey.slice(-12)} (${s.lastJobId.slice(0, 8)})`,
+              )
+              .join("\n");
+      return {
+        content: [{ type: "text", text: summary }],
+        structuredContent: { sessions, configuredAgents: scope.allowedIds },
+      };
+    }
+
+    if (name === "list_agents") {
+      const agents = scope.allowedIds
+        .map((id) => AGENTS_BY_ID.get(id))
+        .filter((agent): agent is AgentEntry => Boolean(agent))
+        .map(agentDescriptor);
+      return {
+        content: [{ type: "text", text: JSON.stringify({ default: scope.defaultId, agents }) }],
+        structuredContent: { default: scope.defaultId, agents },
+      };
+    }
+
+    const scopedAgents = scope.allowedIds
+      .map((id) => AGENTS_BY_ID.get(id))
+      .filter((agent): agent is AgentEntry => Boolean(agent));
+    if (name === "search_memory") {
+      const result = await searchMemory(scopedAgents, {
+        query: typeof args.query === "string" ? args.query : "",
+        limit: args.limit !== undefined ? Number(args.limit) : undefined,
+        collections: Array.isArray(args.collections) ? (args.collections as string[]) : undefined,
+        intent: typeof args.intent === "string" ? args.intent : undefined,
+      });
+      return {
+        content: [{ type: "text", text: JSON.stringify(result) }],
+        structuredContent: { ...result },
+      };
+    }
+    if (name === "get_memory") {
+      const result = await getMemory(scopedAgents, typeof args.file === "string" ? args.file : "");
+      return {
+        content: [{ type: "text", text: JSON.stringify(result) }],
+        structuredContent: { ...result },
+        ...(result.found ? {} : { isError: true }),
+      };
+    }
+    if (name === "list_collections") {
+      const collections = listCollections(scopedAgents);
+      return {
+        content: [{ type: "text", text: JSON.stringify({ collections }) }],
+        structuredContent: { collections },
+      };
+    }
+    if (name === "list_tasks") {
+      const scoped = listTasks(pool).filter(
+        (task) => !task.agent || scope.allowedIds.includes(task.agent),
+      );
+      const tasks =
+        args.view === "active" ? scoped.filter((task) => ACTIVE_STATUSES.has(task.status)) : scoped;
+      return {
+        content: [{ type: "text", text: JSON.stringify({ tasks }) }],
+        structuredContent: { tasks },
+      };
+    }
+
+    if (name === "get_task") {
+      const taskId = typeof args.taskId === "string" ? args.taskId : "";
+      const detail = typeof args.detail === "string" ? args.detail : undefined;
+      const result = getTask(pool, {
+        jobId: taskId,
+        knownLogCount:
+          args.knownLogCount !== undefined ? Number(args.knownLogCount) || 0 : undefined,
+      });
+      if (
+        !result.found ||
+        (result.snapshot.agent && !scope.allowedIds.includes(result.snapshot.agent))
+      ) {
+        return {
+          content: [{ type: "text", text: "Task not found. The server may have restarted." }],
+          structuredContent: { taskId, status: "error", error: "Task not found." },
+          isError: true,
+        };
+      }
+      if (detail === "prompt") {
+        const promptResult = getTaskPrompt(pool, { jobId: taskId });
+        if (!promptResult.found)
+          return { content: [{ type: "text", text: "Task not found." }], isError: true };
+        const payload = { taskId, prompt: promptResult.prompt };
+        return {
+          content: [{ type: "text", text: JSON.stringify(payload) }],
+          structuredContent: payload,
+        };
+      }
+      const payload = buildGetTaskStructuredContent(result, detail as TaskDetail | undefined);
+      return {
+        content: [{ type: "text", text: JSON.stringify(payload) }],
+        structuredContent: payload,
+        ...(result.isError ? { isError: true } : {}),
+      };
+    }
+
+    if (name === "get_session") {
+      const sessionId = typeof args.sessionId === "string" ? args.sessionId : "";
+      const agent = typeof args.agent === "string" && args.agent ? args.agent : undefined;
+      if (agent && !scope.allowedIds.includes(agent)) {
+        return {
+          content: [
+            { type: "text", text: `Agent "${agent}" is not available on this connection.` },
+          ],
+          isError: true,
+        };
+      }
+      const result = getSession(pool, {
+        sessionId,
+        mode: typeof args.mode === "string" ? (args.mode as any) : undefined,
+        limit: args.limit !== undefined ? Number(args.limit) : undefined,
+        after: args.after !== undefined ? Number(args.after) : undefined,
+        agent,
+      });
+      if (!result.found || (result.agent && !scope.allowedIds.includes(result.agent))) {
+        return {
+          content: [{ type: "text", text: "Session not found." }],
+          structuredContent: { sessionId, found: false },
+          isError: true,
+        };
+      }
+      return {
+        content: [{ type: "text", text: JSON.stringify(result) }],
+        structuredContent: result,
+      };
+    }
+
+    return undefined;
+  }
+
+  function createHttpMcpServer(ctx: McpRequestContext): McpServer {
+    const requestUrl = ctx.requestInfo
+      ? new URL(ctx.requestInfo.url)
+      : new URL("http://localhost/mcp");
+    const scope = resolveScope(requestUrl);
+    const identity = (ctx.authInfo?.extra?.identity as Identity | undefined) ?? { user: null };
+    const negotiatedProtocolVersion =
+      ctx.requestInfo?.headers.get("MCP-Protocol-Version") ?? MODERN_PROTOCOL_VERSION;
+    const extensions = buildExtensionsCapability(WIDGET_ENABLED);
+    const server = new McpServer(
+      {
+        name: identity.user ? `${scope.serverName} (${identity.user})` : scope.serverName,
+        version: "0.1.0",
+      },
+      {
+        capabilities: { resources: {}, ...(extensions ? { extensions: extensions as any } : {}) },
+        instructions:
+          "Use run_task to delegate work, then check_task until continuePolling is false.",
+      },
+    );
+
+    for (const tool of buildTools(scope.allowedIds, scope.defaultId, identity)) {
+      server.registerTool(
+        tool.name,
+        {
+          description: tool.description,
+          inputSchema: fromJsonSchema<Record<string, unknown>>(tool.inputSchema as any),
+          ...(tool.outputSchema ? { outputSchema: fromJsonSchema(tool.outputSchema as any) } : {}),
+          annotations: tool.annotations,
+          _meta: tool._meta,
+        },
+        async (args, ctx) => {
+          if (tool.name === "get_mcp_info")
+            return protocolInfo("modern", negotiatedProtocolVersion);
+          const result = await invokeTool(tool.name, args, scope, identity, ctx.mcpReq.signal);
+          return (
+            result ?? {
+              content: [{ type: "text", text: `Unknown tool: ${tool.name}` }],
+              isError: true,
+            }
+          );
+        },
+      );
+    }
+
+    if (WIDGET_ENABLED) {
+      server.registerResource(
+        "ClawConnect Task Center",
+        WIDGET_URI,
+        { mimeType: UI_RESOURCE_MIME_TYPE },
+        async () => {
+          const html = loadWidgetHtml();
+          if (html === undefined)
+            throw new Error("Widget resource failed to load — run_task/check_task are unaffected.");
+          return { contents: [{ uri: WIDGET_URI, mimeType: UI_RESOURCE_MIME_TYPE, text: html }] };
+        },
+      );
+    }
+    return server;
+  }
+
+  const modernMcpHandler = createMcpHandler(createHttpMcpServer, {
+    legacy: "reject",
+    onerror: (error) => console.error("[mcp] modern HTTP serving error:", error),
+  });
+
   async function requestListener(req: IncomingMessage, res: ServerResponse) {
     if (req.url?.startsWith("/mcp")) {
       if (req.method === "OPTIONS") {
-        res.writeHead(204, CORS_HEADERS);
+        res.writeHead(204, corsHeaders(req));
         res.end();
         return;
       }
 
-      Object.entries(CORS_HEADERS).forEach(([k, v]) => res.setHeader(k, v));
+      Object.entries(corsHeaders(req)).forEach(([k, v]) => res.setHeader(k, v));
 
       const reqUrl = new URL(req.url, `http://${req.headers.host ?? "localhost"}`);
 
@@ -662,7 +1141,16 @@ At detail levels that include it, \`updates\` is a bounded recent-activity windo
       const identity = resolveIdentity(reqUrl, req);
       if (!identity) {
         res.writeHead(403, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32001, message: "Forbidden: token required via ?pass= or Authorization: Bearer" } }));
+        res.end(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: null,
+            error: {
+              code: -32001,
+              message: "Forbidden: token required via ?pass= or Authorization: Bearer",
+            },
+          }),
+        );
         return;
       }
 
@@ -677,18 +1165,58 @@ At detail levels that include it, \`updates\` is a bounded recent-activity windo
         return;
       }
 
-      const scope = resolveScope(reqUrl);
+      if (!isJsonContentType(req.headers["content-type"])) {
+        res.writeHead(415, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: null,
+            error: { code: -32000, message: "Unsupported Media Type: expected application/json" },
+          }),
+        );
+        return;
+      }
 
-      const chunks: Buffer[] = [];
-      for await (const chunk of req) chunks.push(chunk as Buffer);
-      const raw = Buffer.concat(chunks).toString();
+      const scope = resolveScope(reqUrl);
+      const requestAbort = new AbortController();
+      req.once("aborted", () => requestAbort.abort());
+      res.once("close", () => requestAbort.abort());
+      const webRequest = await toWebRequest(req, undefined, { signal: requestAbort.signal });
+
+      // A per-request protocol envelope is the 2026-07-28 era claim. Route
+      // those requests to the SDK v2 entry; claim-less initialize-era traffic
+      // stays on the verified legacy router below until legacy clients retire.
+      const legacyRequest = await isLegacyRequest(webRequest);
+      if (!legacyRequest) {
+        console.log(
+          `[mcp] ${req.method} era=modern protocol=${String(req.headers["mcp-protocol-version"] ?? MODERN_PROTOCOL_VERSION)} method=${String(req.headers["mcp-method"] ?? "unknown")}`,
+        );
+        const webResponse = await modernMcpHandler.fetch(webRequest, {
+          authInfo: authInfoFor(identity),
+        });
+        const headers = Object.fromEntries(webResponse.headers.entries());
+        res.writeHead(webResponse.status, { ...corsHeaders(req), ...headers });
+        if (webResponse.body) {
+          for await (const chunk of webResponse.body) res.write(chunk);
+        }
+        res.end();
+        return;
+      }
+
+      const raw = await webRequest.text();
 
       let msg: { jsonrpc: string; id?: unknown; method: string; params?: Record<string, unknown> };
       try {
         msg = JSON.parse(raw);
       } catch {
         res.writeHead(400, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } }));
+        res.end(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: null,
+            error: { code: -32700, message: "Parse error" },
+          }),
+        );
         return;
       }
 
@@ -704,10 +1232,13 @@ At detail levels that include it, \`updates\` is a bounded recent-activity windo
         res.end(JSON.stringify({ jsonrpc: "2.0", id: msg.id ?? null, error: { code, message } }));
       };
 
-      console.log(`[mcp] ${req.method} ${msg.method}`);
+      console.log(
+        `[mcp] ${req.method} era=legacy protocol=${LEGACY_PROTOCOL_VERSION} method=${msg.method}`,
+      );
 
       if (msg.method === "initialize") {
-        const requestedProtocolVersion = (msg.params as { protocolVersion?: unknown } | undefined)?.protocolVersion;
+        const requestedProtocolVersion = (msg.params as { protocolVersion?: unknown } | undefined)
+          ?.protocolVersion;
         const extensions = buildExtensionsCapability(WIDGET_ENABLED);
         respond({
           protocolVersion: negotiateProtocolVersion(requestedProtocolVersion),
@@ -720,6 +1251,8 @@ At detail levels that include it, \`updates\` is a bounded recent-activity windo
             name: identity.user ? `${scope.serverName} (${identity.user})` : scope.serverName,
             version: "0.1.0",
           },
+          instructions:
+            "Use run_task to delegate work, then check_task until continuePolling is false.",
         });
       } else if (isNotification) {
         res.writeHead(202);
@@ -729,7 +1262,13 @@ At detail levels that include it, \`updates\` is a bounded recent-activity windo
       } else if (msg.method === "resources/list") {
         respond({
           resources: WIDGET_ENABLED
-            ? [{ uri: WIDGET_URI, name: "ClawConnect Task Center", mimeType: UI_RESOURCE_MIME_TYPE }]
+            ? [
+                {
+                  uri: WIDGET_URI,
+                  name: "ClawConnect Task Center",
+                  mimeType: UI_RESOURCE_MIME_TYPE,
+                },
+              ]
             : [],
         });
       } else if (msg.method === "resources/read") {
@@ -739,19 +1278,35 @@ At detail levels that include it, \`updates\` is a bounded recent-activity windo
         } else {
           const html = loadWidgetHtml();
           if (html === undefined) {
-            respondError(-32603, "Widget resource failed to load — run_task/check_task are unaffected.");
+            respondError(
+              -32603,
+              "Widget resource failed to load — run_task/check_task are unaffected.",
+            );
           } else {
-            respond({ contents: [{ uri: WIDGET_URI, mimeType: UI_RESOURCE_MIME_TYPE, text: html }] });
+            respond({
+              contents: [{ uri: WIDGET_URI, mimeType: UI_RESOURCE_MIME_TYPE, text: html }],
+            });
           }
         }
       } else if (msg.method === "tools/call") {
-        const { name, arguments: args } = msg.params as { name: string; arguments: Record<string, string> };
+        const { name, arguments: args } = msg.params as {
+          name: string;
+          arguments: Record<string, string>;
+        };
 
-        if (name === "run_task") {
-          const requestedAgent = typeof args.agent === "string" && args.agent ? args.agent : scope.defaultId;
+        if (name === "get_mcp_info") {
+          respond(protocolInfo("legacy", LEGACY_PROTOCOL_VERSION));
+        } else if (name === "run_task") {
+          const requestedAgent =
+            typeof args.agent === "string" && args.agent ? args.agent : scope.defaultId;
           if (!scope.allowedIds.includes(requestedAgent)) {
             respond({
-              content: [{ type: "text", text: `Agent "${requestedAgent}" is not available on this connection. Allowed: ${scope.allowedIds.join(", ")}.` }],
+              content: [
+                {
+                  type: "text",
+                  text: `Agent "${requestedAgent}" is not available on this connection. Allowed: ${scope.allowedIds.join(", ")}.`,
+                },
+              ],
               isError: true,
             });
             console.log(`[mcp] -> ${res.statusCode}`);
@@ -765,16 +1320,23 @@ At detail levels that include it, \`updates\` is a bounded recent-activity windo
               sessionKey: args.sessionKey,
               // The token's identity is ground truth; a model-supplied senderName
               // only fills in when the connection is anonymous (legacy/open).
-              senderName: identity.user ?? (typeof args.senderName === "string" ? args.senderName : undefined),
+              senderName:
+                identity.user ??
+                (typeof args.senderName === "string" ? args.senderName : undefined),
             });
-            console.log(`[mcp] submitted job ${result.jobId} on agent ${result.agent} session ${result.sessionKey} sender=${identity.user ?? args.senderName ?? "unknown"}${identity.legacy ? " (legacy token)" : ""}`);
+            console.log(
+              `[mcp] submitted job ${result.jobId} on agent ${result.agent} session ${result.sessionKey} sender=${identity.user ?? args.senderName ?? "unknown"}${identity.legacy ? " (legacy token)" : ""}`,
+            );
             const structuredContent = buildRunTaskStructuredContent(result);
             respond({
               content: [
                 {
                   type: "text",
-                  text: JSON.stringify({ ...structuredContent, message: "Task submitted. Use check_task to poll for progress." }) +
-                    (identity.legacy ? `\n\nNote: ${GET_TOKEN_HINT}` : ""),
+                  text:
+                    JSON.stringify({
+                      ...structuredContent,
+                      message: "Task submitted. Use check_task to poll for progress.",
+                    }) + (identity.legacy ? `\n\nNote: ${GET_TOKEN_HINT}` : ""),
                 },
               ],
               structuredContent,
@@ -786,10 +1348,16 @@ At detail levels that include it, \`updates\` is a bounded recent-activity windo
             });
           }
         } else if (name === "check_task") {
-          const requestedAgent = typeof args.agent === "string" && args.agent ? args.agent : undefined;
+          const requestedAgent =
+            typeof args.agent === "string" && args.agent ? args.agent : undefined;
           if (requestedAgent && !scope.allowedIds.includes(requestedAgent)) {
             respond({
-              content: [{ type: "text", text: `Agent "${requestedAgent}" is not available on this connection. Allowed: ${scope.allowedIds.join(", ")}.` }],
+              content: [
+                {
+                  type: "text",
+                  text: `Agent "${requestedAgent}" is not available on this connection. Allowed: ${scope.allowedIds.join(", ")}.`,
+                },
+              ],
               isError: true,
             });
             console.log(`[mcp] -> ${res.statusCode}`);
@@ -803,6 +1371,7 @@ At detail levels that include it, \`updates\` is a bounded recent-activity windo
             knownLogCount: Number(args.knownLogCount) || 0,
             mode,
             waitMs: args.waitMs !== undefined ? Number(args.waitMs) : undefined,
+            signal: requestAbort.signal,
           });
 
           if (!result.found) {
@@ -823,7 +1392,12 @@ At detail levels that include it, \`updates\` is a bounded recent-activity windo
             // Don't leak results from agents outside this connection's scope.
             respond({
               content: [{ type: "text", text: "Job not found." }],
-              structuredContent: { jobId: args.jobId, sessionKey: args.sessionKey, status: "error", error: "Job not found." },
+              structuredContent: {
+                jobId: args.jobId,
+                sessionKey: args.sessionKey,
+                status: "error",
+                error: "Job not found.",
+              },
               isError: true,
             });
           } else {
@@ -837,9 +1411,15 @@ At detail levels that include it, \`updates\` is a bounded recent-activity windo
         } else if (name === "list_sessions") {
           const all = listSessions(pool);
           const sessions = all.filter((s) => !s.agent || scope.allowedIds.includes(s.agent));
-          const summary = sessions.length === 0
-            ? "No sessions known to this connector yet."
-            : sessions.map((s) => `${s.agent ?? "?"}: ${s.sessionKey.slice(-12)} (${s.lastJobId.slice(0, 8)})`).join("\n");
+          const summary =
+            sessions.length === 0
+              ? "No sessions known to this connector yet."
+              : sessions
+                  .map(
+                    (s) =>
+                      `${s.agent ?? "?"}: ${s.sessionKey.slice(-12)} (${s.lastJobId.slice(0, 8)})`,
+                  )
+                  .join("\n");
           respond({
             content: [{ type: "text", text: summary }],
             structuredContent: { sessions, configuredAgents: scope.allowedIds },
@@ -861,7 +1441,9 @@ At detail levels that include it, \`updates\` is a bounded recent-activity windo
           const result = await searchMemory(scopedAgents, {
             query,
             limit: args.limit !== undefined ? Number(args.limit) : undefined,
-            collections: Array.isArray(args.collections) ? (args.collections as unknown as string[]) : undefined,
+            collections: Array.isArray(args.collections)
+              ? (args.collections as unknown as string[])
+              : undefined,
             intent: typeof args.intent === "string" ? args.intent : undefined,
           });
           respond({
@@ -892,7 +1474,8 @@ At detail levels that include it, \`updates\` is a bounded recent-activity windo
           const tasks = listTasks(pool);
           const scoped = tasks.filter((t) => !t.agent || scope.allowedIds.includes(t.agent));
           const view = typeof args.view === "string" ? args.view : undefined;
-          const filtered = view === "active" ? scoped.filter((t) => ACTIVE_STATUSES.has(t.status)) : scoped;
+          const filtered =
+            view === "active" ? scoped.filter((t) => ACTIVE_STATUSES.has(t.status)) : scoped;
           respond({
             content: [{ type: "text", text: JSON.stringify({ tasks: filtered }) }],
             structuredContent: { tasks: filtered },
@@ -902,7 +1485,8 @@ At detail levels that include it, \`updates\` is a bounded recent-activity windo
           // immediate, synchronous read, unlike check_task's checkTask().
           const taskId = typeof args.taskId === "string" ? args.taskId : "";
           const detail = typeof args.detail === "string" ? args.detail : undefined;
-          const knownLogCount = args.knownLogCount !== undefined ? Number(args.knownLogCount) || 0 : undefined;
+          const knownLogCount =
+            args.knownLogCount !== undefined ? Number(args.knownLogCount) || 0 : undefined;
           const result = getTask(pool, { jobId: taskId, knownLogCount });
 
           if (!result.found) {
@@ -925,7 +1509,10 @@ At detail levels that include it, \`updates\` is a bounded recent-activity windo
               respond({ content: [{ type: "text", text: "Task not found." }], isError: true });
             } else {
               const payload = { taskId, prompt: promptResult.prompt };
-              respond({ content: [{ type: "text", text: JSON.stringify(payload) }], structuredContent: payload });
+              respond({
+                content: [{ type: "text", text: JSON.stringify(payload) }],
+                structuredContent: payload,
+              });
             }
           } else {
             const payload = buildGetTaskStructuredContent(result, detail as TaskDetail | undefined);
@@ -940,15 +1527,27 @@ At detail levels that include it, \`updates\` is a bounded recent-activity windo
           const sessionMode = typeof args.mode === "string" ? args.mode : undefined;
           const limit = args.limit !== undefined ? Number(args.limit) : undefined;
           const after = args.after !== undefined ? Number(args.after) : undefined;
-          const sessionAgent = typeof args.agent === "string" && args.agent ? args.agent : undefined;
+          const sessionAgent =
+            typeof args.agent === "string" && args.agent ? args.agent : undefined;
 
           if (sessionAgent && !scope.allowedIds.includes(sessionAgent)) {
             respond({
-              content: [{ type: "text", text: `Agent "${sessionAgent}" is not available on this connection.` }],
+              content: [
+                {
+                  type: "text",
+                  text: `Agent "${sessionAgent}" is not available on this connection.`,
+                },
+              ],
               isError: true,
             });
           } else {
-            const result = getSession(pool, { sessionId, mode: sessionMode as any, limit, after, agent: sessionAgent });
+            const result = getSession(pool, {
+              sessionId,
+              mode: sessionMode as any,
+              limit,
+              after,
+              agent: sessionAgent,
+            });
             if (!result.found) {
               respond({
                 content: [{ type: "text", text: "Session not found." }],
