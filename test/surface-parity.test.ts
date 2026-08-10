@@ -143,3 +143,24 @@ describe("structured output", () => {
     }
   });
 });
+
+describe("check_task's default wait behaviour", () => {
+  it("defaults to wait, not poll, on every transport", async () => {
+    // Regression guard. When the HTTP transport was converted to project the
+    // shared capabilities, its default was set to "poll" on the reasoning that
+    // a live progress card wants incremental updates. That was wrong twice
+    // over: both HTTP paths it replaced defaulted to "wait", and the widget's
+    // progress comes from the app-callable get_task/list_tasks rather than
+    // from check_task at all. The effect was a check_task that answers "still
+    // running" on every new log line, so a model collecting a result pays a
+    // round trip per line and a task that is seconds from finishing still
+    // reads as unfinished. It survived the unit suite and was caught by a
+    // single real run against the live connector.
+    const tools = await stdioTools();
+    const checkTask = tools.find((t) => t.name === "check_task");
+    const mode = (
+      checkTask?.inputSchema as { properties?: { mode?: { description?: string } } } | undefined
+    )?.properties?.mode?.description;
+    expect(mode).toMatch(/"wait" \(default\)/);
+  });
+});

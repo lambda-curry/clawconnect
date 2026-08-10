@@ -460,9 +460,13 @@ export function createApp(registry: AgentRegistry, opts: CreateAppOptions = {}):
       registry,
       scope,
       identity,
-      // "poll" so a live progress card advances on any new activity, rather
-      // than only when the whole turn finishes.
-      defaultCheckMode: "poll",
+      // "wait", matching every transport: check_task is the tool a MODEL uses
+      // to collect a result, and it should return when the turn is terminal.
+      // "poll" returns on any new log line, which reads as "still running" for
+      // a task that is about to finish and costs a round trip every time — the
+      // widget's live progress comes from get_task/list_tasks, which are the
+      // app-callable tools, not from check_task.
+      defaultCheckMode: "wait",
       protocol: () => ({
         // The SDK's own classification of this serving unit — not a guess.
         era: ctx.era,
