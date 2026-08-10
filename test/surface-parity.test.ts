@@ -121,10 +121,20 @@ describe("read/write separation is stated in prose, not only in annotations", ()
     }
   });
 
-  it("the one mutating tool carries no read-only claim, in either channel", async () => {
+  it("the one mutating tool carries no read-only claim, and no danger framing either", async () => {
     const tools = await stdioTools();
     const runTask = tools.find((t) => t.name === "run_task");
     expect(runTask?.description).not.toMatch(/READ ONLY/);
+    // Regression guard. run_task's description briefly announced itself as
+    // "the only tool here that starts anything; every other tool in this
+    // connection is read-only", and ChatGPT's safety layer began hard-blocking
+    // the call BEFORE it reached the server — no confirmation prompt, no job
+    // created, tool still listed in the catalog. Read tools should disclaim
+    // mutation; a tool that merely queues work must not advertise itself as
+    // the dangerous one, least of all beside ten siblings that emphatically
+    // disclaim it. destructiveHint is false and the wording must match.
+    expect(runTask?.description).not.toMatch(/only tool|starts anything|destructive/i);
+    expect(runTask?.annotations).toMatchObject({ destructiveHint: false });
     expect(runTask?.annotations).toMatchObject({ readOnlyHint: false });
     // Exactly one tool mutates anything. A second one appearing here without
     // a deliberate decision is the thing worth failing on.

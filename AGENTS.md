@@ -56,6 +56,15 @@ Conventions the surface enforces, all covered by that test:
   when a tool multiplexed reads and writes under one description. Keep the
   prefix to one sentence — the win is structural (a tool whose name,
   description, and schema tell one consistent story), not verbose prose.
+- **`run_task` gets no danger framing.** The rule is one-directional: read
+  tools disclaim mutation, and the mutating tool stays plainly factual. It
+  briefly announced itself as "the only tool here that starts anything; every
+  other tool in this connection is read-only", and ChatGPT began hard-blocking
+  it pre-execution — no confirmation prompt, no job created, tool still listed.
+  `run_task` queues work; it is not destructive (`destructiveHint: false`) and
+  must not describe itself as though it were, least of all beside ten siblings
+  that emphatically disclaim mutation. Reverting to the long-serving wording
+  is the fix. `test/surface-parity.test.ts` guards it.
 - Every tool declares an `outputSchema`: **strict on the chaining contract,
   permissive on everything else.** Fields a caller reads to decide its next
   call (`taskId`, `sessionKey`, `status`, `isTerminal`, `logCursor`,
