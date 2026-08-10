@@ -22,10 +22,10 @@ describe("missing UI metadata fallback — widget disabled means no _meta/capabi
   });
 
   it("buildMountMeta carries both the modern and legacy resourceUri keys when enabled", () => {
-    const meta = buildMountMeta(true, "ui://clawconnect/task-center-v1.html");
-    expect(meta.ui).toEqual({ resourceUri: "ui://clawconnect/task-center-v1.html", visibility: ["model", "app"] });
-    expect(meta[UI_RESOURCE_URI_META_KEY]).toBe("ui://clawconnect/task-center-v1.html");
-    expect(meta["openai/outputTemplate"]).toBe("ui://clawconnect/task-center-v1.html");
+    const meta = buildMountMeta(true, "ui://clawconnect/task-center-v2.html");
+    expect(meta.ui).toEqual({ resourceUri: "ui://clawconnect/task-center-v2.html", visibility: ["model", "app"] });
+    expect(meta[UI_RESOURCE_URI_META_KEY]).toBe("ui://clawconnect/task-center-v2.html");
+    expect(meta["openai/outputTemplate"]).toBe("ui://clawconnect/task-center-v2.html");
   });
 
   it("buildAppCallableMeta is empty when disabled, grants visibility without a resourceUri when enabled", () => {
