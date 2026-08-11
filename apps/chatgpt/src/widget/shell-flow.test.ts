@@ -425,7 +425,7 @@ describe("render cadence: lifecycle/terminal changes are immediate, cosmetic-onl
   });
 });
 
-describe("Notify ChatGPT button on needs_attention / completed / failed", () => {
+describe("Continue in ChatGPT button on needs_attention / completed / failed", () => {
   it("queues a button on transition, sends only on click, and does not re-queue the same group", async () => {
     vi.useFakeTimers();
     try {
@@ -434,14 +434,14 @@ describe("Notify ChatGPT button on needs_attention / completed / failed", () => 
       const { root } = mount(host);
       await settle();
       expect(host.followUps).toHaveLength(0);
-      expect(withClass(root, "cc-btn").filter((n) => textOf(n) === "Notify ChatGPT")).toHaveLength(0);
+      expect(withClass(root, "cc-btn").filter((n) => textOf(n) === "Continue in ChatGPT")).toHaveLength(0);
 
       host.completeTask("needs-human");
       await vi.advanceTimersByTimeAsync(3_000);
       await settle();
       // Queued for a user gesture — no auto sendFollowUpMessage.
       expect(host.followUps).toHaveLength(0);
-      const notify = withClass(root, "cc-btn").find((n) => textOf(n) === "Notify ChatGPT");
+      const notify = withClass(root, "cc-btn").find((n) => textOf(n) === "Continue in ChatGPT");
       expect(notify).toBeTruthy();
 
       click(notify!);
@@ -449,19 +449,19 @@ describe("Notify ChatGPT button on needs_attention / completed / failed", () => 
       expect(host.followUps).toHaveLength(1);
       expect(host.followUps[0]?.prompt).toContain("needs attention");
       expect(host.followUps[0]?.prompt).toContain(TASK_ID);
-      expect(withClass(root, "cc-btn").filter((n) => textOf(n) === "Notify ChatGPT")).toHaveLength(0);
+      expect(withClass(root, "cc-btn").filter((n) => textOf(n) === "Continue in ChatGPT")).toHaveLength(0);
 
       // Still needs-human on the next poll — no second button.
       await vi.advanceTimersByTimeAsync(10_000);
       await settle();
       expect(host.followUps).toHaveLength(1);
-      expect(withClass(root, "cc-btn").filter((n) => textOf(n) === "Notify ChatGPT")).toHaveLength(0);
+      expect(withClass(root, "cc-btn").filter((n) => textOf(n) === "Continue in ChatGPT")).toHaveLength(0);
 
       host.completeTask("completed");
       await vi.advanceTimersByTimeAsync(10_000);
       await settle();
       expect(host.followUps).toHaveLength(1);
-      const notifyDone = withClass(root, "cc-btn").find((n) => textOf(n) === "Notify ChatGPT");
+      const notifyDone = withClass(root, "cc-btn").find((n) => textOf(n) === "Continue in ChatGPT");
       expect(notifyDone).toBeTruthy();
       click(notifyDone!);
       await settle();
@@ -478,7 +478,7 @@ describe("Notify ChatGPT button on needs_attention / completed / failed", () => 
     const { root } = mount(host);
     await settle();
     expect(host.followUps).toHaveLength(0);
-    expect(withClass(root, "cc-btn").filter((n) => textOf(n) === "Notify ChatGPT")).toHaveLength(0);
+    expect(withClass(root, "cc-btn").filter((n) => textOf(n) === "Continue in ChatGPT")).toHaveLength(0);
   });
 });
 
