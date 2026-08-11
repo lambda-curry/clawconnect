@@ -763,7 +763,14 @@ function renderRow(row, opts = {}) {
       el("span", { class: `cc-pill cc-pill--${row.group}` }, [`${pill.icon} ${pill.label}`]),
     ]),
     el("div", { class: "cc-meta" }, [
-      `${row.latestTask.agent ?? "?"} · ${deriveActivityLabel(row.latestTask, Date.now())}`,
+      // Two different questions, both worth answering: how long this has been
+      // going (deriveRunDuration, from startedAt) and whether it is still
+      // moving (deriveActivityLabel, from lastEventAt).
+      [
+        row.latestTask.agent ?? "?",
+        deriveRunDuration(row.latestTask, Date.now()),
+        deriveActivityLabel(row.latestTask, Date.now()),
+      ].filter(Boolean).join(" · "),
     ]),
   ];
 

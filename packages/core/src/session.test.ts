@@ -1,5 +1,47 @@
 import { describe, expect, it } from "vitest";
-import { MESSAGE_TOOL_VETO_PREAMBLE, buildSubmitMessage } from "./session.ts";
+import { MESSAGE_TOOL_VETO_PREAMBLE, buildSubmitMessage, isEchoOfRecentEvent } from "./session.ts";
+import type { GatewayEvent, LogEntry } from "./types.ts";
+
+const logEntry = (type: string, text: string, seq: number): LogEntry => ({ ts: seq, type, text, seq });
+const toolEvent = (text: string): GatewayEvent => ({ type: "tool", text, toolName: text.split(":")[0], args: {} });
+
+describe("isEchoOfRecentEvent — the same tool call arriving from both sources", () => {
+  it("suppresses an identical tool row that just landed", () => {
+    const logs = [logEntry("tool", "Bash: pnpm test", 1)];
+    expect(isEchoOfRecentEvent(logs, toolEvent("Bash: pnpm test"))).toBe(true);
+  });
+
+  it("suppresses an argument-less transcript row echoing a richer live one", () => {
+    const logs = [logEntry("tool", "Bash: pnpm test", 1)];
+    expect(isEchoOfRecentEvent(logs, toolEvent("Bash: "))).toBe(true);
+  });
+
+  it("KEEPS a richer row when the argument-less one arrived first", () => {
+    // The two sources race, and this is the direction that must not lose
+    // information: dropping "Bash: pnpm test" because a bare "Bash: " won the
+    // race would leave the card unable to say what actually ran.
+    const logs = [logEntry("tool", "Bash: ", 1)];
+    expect(isEchoOfRecentEvent(logs, toolEvent("Bash: pnpm test"))).toBe(false);
+  });
+
+  it("keeps a genuinely different call of the same tool", () => {
+    const logs = [logEntry("tool", "Bash: pnpm test", 1)];
+    expect(isEchoOfRecentEvent(logs, toolEvent("Bash: git status"))).toBe(false);
+  });
+
+  it("keeps a repeat that fell outside the recent window", () => {
+    const logs = [
+      logEntry("tool", "Bash: pnpm test", 1),
+      ...Array.from({ length: 6 }, (_, i) => logEntry("tool", `Read: file-${i}`, i + 2)),
+    ];
+    expect(isEchoOfRecentEvent(logs, toolEvent("Bash: pnpm test"))).toBe(false);
+  });
+
+  it("never suppresses prose or lifecycle — only tool calls are double-sourced", () => {
+    const logs = [logEntry("assistant", "Looking at the test.", 1)];
+    expect(isEchoOfRecentEvent(logs, { type: "assistant", text: "Looking at the test." })).toBe(false);
+  });
+});
 
 describe("buildSubmitMessage", () => {
   it("prepends the message-tool veto preamble before the user task", () => {

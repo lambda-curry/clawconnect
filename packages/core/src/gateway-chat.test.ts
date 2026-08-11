@@ -219,7 +219,12 @@ describe("OpenClawGateway.chat — run correlation across the send boundary", ()
     const seen: GatewayEvent[] = [];
     const reply = await gateway.chat("agent:main:main:thread:test", "hi", 10_000, (e) => seen.push(e));
     expect(reply).toBe("the final answer");
-    expect(seen).toHaveLength(1);
+    // Both sources report the call: the live agent frame carries it the moment
+    // it starts (with its args), the durable transcript again once persisted.
+    // Reconciling the two is the CALLER's job — SessionManager collapses the
+    // echo — because only the caller can tell a resumed transcript-only run
+    // from a live one. The gateway's job is to not silently drop either.
+    expect(seen.map((e) => e.text).sort()).toEqual(["Bash: ", "Bash: pnpm test"]);
   });
 
   it("hands the runId to onRunId before replaying anything", async () => {
@@ -247,7 +252,7 @@ describe("OpenClawGateway.chat — run correlation across the send boundary", ()
     expect(seenRunIds).toEqual(["run-9"]);
     // Ordering matters: a reconciliation racing the replay must already be
     // able to name the run, so the id lands before buffered events flush.
-    expect(seenEvents).toHaveLength(1);
+    expect(seenEvents).toHaveLength(2);
   });
 
   it("rejects when the send itself fails, without stranding the caller", async () => {

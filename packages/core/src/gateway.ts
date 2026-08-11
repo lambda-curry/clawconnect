@@ -196,6 +196,26 @@ function transcriptMessageFallbackId(message: Record<string, unknown>): string {
   return `legacy:${createHash("sha256").update(JSON.stringify(message)).digest("hex")}`;
 }
 
+/**
+ * One tool call, one label — used by BOTH the live agent stream and the
+ * durable transcript. Identical text is what lets the two paths deduplicate
+ * against each other (see SessionManager's onEvent), since neither openclaw
+ * frame carries a tool-call id to correlate on.
+ */
+export function formatToolEventText(toolName: string, args: Record<string, unknown>): string {
+  const summary = args.command ?? args.file_path ?? args.pattern ?? args.query ?? "";
+  const summaryText =
+    typeof summary === "string" || typeof summary === "number" || typeof summary === "boolean"
+      ? String(summary)
+      : "";
+  return `${toolName}: ${summaryText.slice(0, 80)}`;
+}
+
+/** Longest agent prose kept on a progress event. The projection layer bounds
+ *  this again per response (EVENT_TEXT_MAX); this bound keeps an unbounded
+ *  message out of the server-side log in the first place. */
+const ASSISTANT_EVENT_TEXT_MAX = 400;
+
 /** Project one durable transcript row into the connector's progress events. */
 export function transcriptMessageEvents(message: Record<string, unknown>): GatewayEvent[] {
   const role = message.role;
@@ -203,20 +223,25 @@ export function transcriptMessageEvents(message: Record<string, unknown>): Gatew
     return message.content.flatMap((block): GatewayEvent[] => {
       if (!block || typeof block !== "object" || Array.isArray(block)) return [];
       const value = block as Record<string, unknown>;
+      if (value.type === "text") {
+        const text = typeof value.text === "string" ? value.text.trim() : "";
+        if (!text) return [];
+        return [{
+          type: "assistant",
+          text: text.length > ASSISTANT_EVENT_TEXT_MAX
+            ? `${text.slice(0, ASSISTANT_EVENT_TEXT_MAX - 1)}…`
+            : text,
+        }];
+      }
       if (value.type !== "toolCall") return [];
       const toolName = typeof value.name === "string" ? value.name : "unknown";
       const candidate = value.arguments ?? value.input;
       const args = candidate && typeof candidate === "object" && !Array.isArray(candidate)
         ? (candidate as Record<string, unknown>)
         : {};
-      const summary = args.command ?? args.file_path ?? args.pattern ?? args.query ?? "";
-      const summaryText =
-        typeof summary === "string" || typeof summary === "number" || typeof summary === "boolean"
-          ? String(summary)
-          : "";
       return [{
         type: "tool",
-        text: `${toolName}: ${summaryText.slice(0, 80)}`,
+        text: formatToolEventText(toolName, args),
         toolName,
         args,
       }];
@@ -1321,16 +1346,17 @@ export class OpenClawGateway {
           // Capture even if no onEvent subscriber — this is for the reply path.
           const captured = extractMessageToolReply(toolName, args);
           if (captured) messageToolReply = captured;
+          // The live stream sees a tool call the moment it starts; the durable
+          // transcript only carries it once the message is persisted, which is
+          // whole tool rounds later. Both are forwarded — this one for
+          // immediacy, the transcript's for the disconnected/resumed case —
+          // and the identical `text` is what the caller deduplicates on.
+          onEvent?.({ type: "tool", text: formatToolEventText(toolName, args), toolName, args });
         }
 
-          if (onEvent) {
-            if (p.stream === "lifecycle") {
-            onEvent({
-              type: "lifecycle",
-              text: formatLifecycleEventText(p.data?.phase),
-            });
-            }
-          }
+        if (p.stream === "lifecycle") {
+          onEvent?.({ type: "lifecycle", text: formatLifecycleEventText(p.data?.phase) });
+        }
       };
 
       const handleChatEvent = (payload: ChatEventPayload) => {
