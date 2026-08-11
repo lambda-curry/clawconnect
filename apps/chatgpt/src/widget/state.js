@@ -817,6 +817,34 @@ export function deriveConnectionNotice({
   return { connector, stream, text: null };
 }
 
+/**
+ * How long this task has been going, which is a different question from
+ * deriveActivityLabel's "when did it last do something" — and the one a person
+ * watching a card actually asks first. A run that is healthily emitting events
+ * every few seconds reads as "active 3s ago" forever, with nothing saying
+ * whether that has been true for forty seconds or forty minutes.
+ *
+ * Reads `startedAt`, already on every TaskSummary and every check_task/get_task
+ * snapshot (packages/core/src/types.ts, structured-content.ts), so this costs
+ * no extra read. A finished task reports its total instead: lastEventAt is the
+ * last thing that happened to it, which is where the run ended.
+ *
+ * Returns null when the row carries no startedAt rather than inventing a zero.
+ *
+ * @param {Partial<WidgetTask> | undefined} task @param {number} now
+ * @returns {string | null}
+ */
+export function deriveRunDuration(task, now) {
+  const startedAt = task?.startedAt;
+  if (typeof startedAt !== "number" || !Number.isFinite(startedAt) || startedAt <= 0) return null;
+  const terminal = isTerminalGroup(groupStatus(task.status));
+  if (!terminal) return `running ${formatElapsed(now - startedAt)}`;
+  const endedAt = typeof task.lastEventAt === "number" && task.lastEventAt > startedAt
+    ? task.lastEventAt
+    : now;
+  return `ran ${formatElapsed(endedAt - startedAt)}`;
+}
+
 /** Ties a task's group to the evidence behind it: how long ago its last real event landed, and what the server's liveness check found. */
 export function deriveActivityLabel(task, now) {
   const elapsed = now - task.lastEventAt;

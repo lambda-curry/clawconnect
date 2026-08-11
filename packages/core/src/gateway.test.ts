@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { classifyUpstreamRun, extractMessageToolReply, formatLifecycleEventText } from "./gateway.ts";
+import {
+  classifyUpstreamRun,
+  extractMessageToolReply,
+  formatLifecycleEventText,
+  transcriptMessageEvents,
+} from "./gateway.ts";
 
 describe("extractMessageToolReply", () => {
   it("returns the trimmed `message` arg for codex-style `message` tool calls", () => {
@@ -62,6 +67,63 @@ describe("formatLifecycleEventText", () => {
   it("handles missing lifecycle phase explicitly", () => {
     expect(formatLifecycleEventText(undefined)).toBe("Agent lifecycle: unknown");
     expect(formatLifecycleEventText("  ")).toBe("Agent lifecycle: unknown");
+  });
+});
+
+describe("transcriptMessageEvents", () => {
+  it("projects assistant prose, not just tool calls", () => {
+    // The reason this exists: a run that reasons and writes for minutes
+    // without touching a tool used to produce ZERO progress events, so the
+    // card sat on "Agent lifecycle: start" and was indistinguishable from a
+    // stalled task.
+    expect(
+      transcriptMessageEvents({
+        role: "assistant",
+        content: [{ type: "text", text: "  Looking at the failing test first.  " }],
+      }),
+    ).toEqual([{ type: "assistant", text: "Looking at the failing test first." }]);
+  });
+
+  it("keeps prose and tool calls in the order the message carried them", () => {
+    expect(
+      transcriptMessageEvents({
+        role: "assistant",
+        content: [
+          { type: "text", text: "Running the suite." },
+          { type: "toolCall", name: "Bash", arguments: { command: "pnpm test" } },
+        ],
+      }),
+    ).toEqual([
+      { type: "assistant", text: "Running the suite." },
+      { type: "tool", text: "Bash: pnpm test", toolName: "Bash", args: { command: "pnpm test" } },
+    ]);
+  });
+
+  it("drops empty and whitespace-only text blocks rather than emitting blank rows", () => {
+    expect(
+      transcriptMessageEvents({
+        role: "assistant",
+        content: [{ type: "text", text: "   " }, { type: "text", text: "" }],
+      }),
+    ).toEqual([]);
+  });
+
+  it("bounds a long message so one verbose turn cannot flood the log", () => {
+    const [event] = transcriptMessageEvents({
+      role: "assistant",
+      content: [{ type: "text", text: "x".repeat(1000) }],
+    });
+    expect(event.text.length).toBe(400);
+    expect(event.text.endsWith("…")).toBe(true);
+  });
+
+  it("ignores thinking blocks — reasoning is not the agent talking to the caller", () => {
+    expect(
+      transcriptMessageEvents({
+        role: "assistant",
+        content: [{ type: "thinking", thinking: "internal deliberation" }],
+      }),
+    ).toEqual([]);
   });
 });
 

@@ -9,8 +9,17 @@ import type {
 
 // ── Event types from the gateway ──────────────���──────────────────────────────
 
+/**
+ * `assistant` carries what the agent actually SAID, and exists because a card
+ * that can only render lifecycle notices and tool rows goes blank for minutes
+ * during any stretch of reasoning or prose — which is indistinguishable from a
+ * stalled run. It is emitted at message boundaries from the durable transcript,
+ * never from the live cumulative delta: a delta is the whole reply so far and
+ * re-emitting it per frame would append a growing near-duplicate every time.
+ */
 export type GatewayEvent =
   | { type: "lifecycle"; text: string }
+  | { type: "assistant"; text: string }
   | { type: "tool"; text: string; toolName: string; args: Record<string, unknown> }
   | { type: "tool-result"; text: string; toolName: string; isError: boolean };
 

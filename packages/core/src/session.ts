@@ -131,6 +131,53 @@ function pushLog(
   job.logs.push({ ...entry, seq: job.logs.length + 1 });
 }
 
+/**
+ * A tool call now reaches this connector twice: once live, the instant openclaw
+ * starts it, and again when the durable transcript persists the message that
+ * contains it (see gateway.ts's handleAgentEvent / transcriptMessageEvents).
+ * Neither frame carries a correlatable tool-call id, so identity is the
+ * projected text — both paths build it with the same formatToolEventText.
+ *
+ * Exact text equality is not enough on its own: a persisted `toolCall` block
+ * can carry empty `arguments` where the live frame had the full ones, so the
+ * same Bash call can arrive as "Bash: pnpm test" and then "Bash: ". The match
+ * is therefore ASYMMETRIC, and deliberately so — the two sources race, and
+ * either can land first. An incoming argument-less row is an echo of any
+ * recent call of the same tool, because it carries nothing the richer row
+ * doesn't already say. An incoming row that HAS arguments is only ever an echo
+ * of an identical one: suppressing it against a bare "Bash: " that merely
+ * arrived first would throw away the only row that says what actually ran.
+ * Symmetric matching does exactly that whenever the transcript wins the race.
+ *
+ * The window is deliberately narrow in ENTRIES rather than time: an agent that
+ * legitimately runs `pnpm test` twice, minutes apart with other activity in
+ * between, still gets two rows. Duplicated rows inside the same few events are
+ * the echo, not a repeat — and being slightly wrong here costs a collapsed
+ * cosmetic row in one direction and double-counted `commandsRun` artifacts in
+ * the other, which is why the check gates processEvent too.
+ */
+const EVENT_ECHO_WINDOW = 6;
+
+function splitToolText(text: string): { name: string; summary: string } {
+  const index = text.indexOf(": ");
+  return index === -1
+    ? { name: text, summary: "" }
+    : { name: text.slice(0, index), summary: text.slice(index + 2) };
+}
+
+export function isEchoOfRecentEvent(logs: LogEntry[], event: GatewayEvent): boolean {
+  if (event.type !== "tool") return false;
+  const incoming = splitToolText(event.text);
+  for (let i = logs.length - 1; i >= 0 && i >= logs.length - EVENT_ECHO_WINDOW; i--) {
+    const prior = logs[i];
+    if (prior.type !== event.type) continue;
+    const seen = splitToolText(prior.text);
+    if (seen.name !== incoming.name) continue;
+    if (seen.summary === incoming.summary || !incoming.summary) return true;
+  }
+  return false;
+}
+
 function resolveWaitMs(requested: number | undefined): number {
   if (requested === undefined || !Number.isFinite(requested)) return DEFAULT_WAIT_MS;
   return Math.min(Math.max(requested, MIN_WAIT_MS), MAX_WAIT_MS);
@@ -1399,8 +1446,11 @@ export class SessionManager {
         TIMEOUT_MS,
         (event) => {
           if (job.status !== "running") return;
+          // An echo still proves the run is alive — it just must not be
+          // rendered or counted twice.
           job.lastEventAt = Date.now();
           this.noteLiveActivity(jobId, event);
+          if (isEchoOfRecentEvent(job.logs, event)) return;
           pushLog(job, {
             ts: Date.now(),
             type: event.type,

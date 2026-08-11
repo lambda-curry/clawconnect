@@ -24,6 +24,7 @@ import {
   formatElapsed,
   isStale,
   deriveActivityLabel,
+  deriveRunDuration,
   deriveTimeline,
   deriveLatestUpdate,
   deriveStatusPill,
@@ -634,6 +635,37 @@ describe("formatElapsed", () => {
     expect(formatElapsed(0)).toBe("0s");
     expect(formatElapsed(-5)).toBe("0s");
     expect(formatElapsed(NaN)).toBe("0s");
+  });
+});
+
+describe("deriveRunDuration — how long, as distinct from how recently", () => {
+  it("counts from startedAt while the task is live", () => {
+    const now = 300_000;
+    expect(deriveRunDuration(task({ status: "running", startedAt: now - 252_000 }), now)).toBe("running 4m 12s");
+  });
+
+  it("answers a question deriveActivityLabel cannot: a healthy long run still reads as 'active 3s ago'", () => {
+    const now = 3_600_000;
+    const row = task({ status: "running", startedAt: now - 1_800_000, lastEventAt: now - 3_000 });
+    expect(deriveActivityLabel(row, now)).toBe("active 3s ago");
+    expect(deriveRunDuration(row, now)).toBe("running 30m 0s");
+  });
+
+  it("reports a finished task's total, measured to its last event rather than to now", () => {
+    const now = 500_000;
+    const row = task({ status: "done", startedAt: now - 400_000, lastEventAt: now - 100_000 });
+    expect(deriveRunDuration(row, now)).toBe("ran 5m 0s");
+  });
+
+  it("falls back to now when a terminal row's lastEventAt predates its start", () => {
+    const now = 100_000;
+    expect(deriveRunDuration(task({ status: "done", startedAt: 40_000, lastEventAt: 0 }), now)).toBe("ran 1m 0s");
+  });
+
+  it("returns null rather than inventing a zero when the row carries no startedAt", () => {
+    expect(deriveRunDuration(task({ startedAt: undefined }), 100_000)).toBe(null);
+    expect(deriveRunDuration(task({ startedAt: 0 }), 100_000)).toBe(null);
+    expect(deriveRunDuration(undefined, 100_000)).toBe(null);
   });
 });
 
