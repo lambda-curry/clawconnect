@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { MESSAGE_TOOL_VETO_PREAMBLE, buildSubmitMessage, isEchoOfRecentEvent } from "./session.ts";
+import {
+  LOG_ENTRY_TEXT_MAX,
+  MESSAGE_TOOL_VETO_PREAMBLE,
+  buildSubmitMessage,
+  capLogText,
+  isEchoOfRecentEvent,
+} from "./session.ts";
 import type { GatewayEvent, LogEntry } from "./types.ts";
 
 const logEntry = (type: string, text: string, seq: number): LogEntry => ({ ts: seq, type, text, seq });
@@ -88,5 +94,34 @@ describe("buildSubmitMessage", () => {
 
   it("preamble names the run_task channel so the agent knows the constraint applies", () => {
     expect(MESSAGE_TOOL_VETO_PREAMBLE).toContain("run_task");
+  });
+});
+
+describe("capLogText — bounding one log entry, not the history", () => {
+  it("leaves ordinary output untouched", () => {
+    const text = "Bash: pnpm test\nok";
+    expect(capLogText(text)).toBe(text);
+  });
+
+  it("keeps a payload exactly at the cap whole", () => {
+    const text = "x".repeat(LOG_ENTRY_TEXT_MAX);
+    expect(capLogText(text)).toBe(text);
+  });
+
+  it("caps a payload past the limit and says how much it dropped", () => {
+    const text = "x".repeat(LOG_ENTRY_TEXT_MAX + 500);
+    const capped = capLogText(text);
+    expect(capped.length).toBeLessThan(text.length);
+    expect(capped.startsWith("x".repeat(100))).toBe(true);
+    // The count must describe the payload, not the rendered string — a reader
+    // deciding whether to go re-derive the full text needs the real shortfall.
+    expect(capped).toContain(`[${text.length - (LOG_ENTRY_TEXT_MAX - 1)} more chars]`);
+  });
+
+  it("bounds a pathological payload to roughly the cap, not a multiple of it", () => {
+    // The case that motivated this: one shell step printing a large file kept
+    // that whole payload resident for the life of the process.
+    const capped = capLogText("y".repeat(5_000_000));
+    expect(capped.length).toBeLessThan(LOG_ENTRY_TEXT_MAX + 100);
   });
 });

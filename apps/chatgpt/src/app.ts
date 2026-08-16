@@ -517,6 +517,50 @@ export function createApp(registry: AgentRegistry, opts: CreateAppOptions = {}):
   hono.get("/", (c) => c.text("OK"));
   hono.get("/health", (c) => c.json({ ok: true }));
 
+  // What this process is holding, so a climbing RSS can be attributed instead of
+  // guessed at. Jobs are retained in memory for the life of the process and their
+  // logs are never trimmed, so `retained` is the number that separates "busy day"
+  // from "leak": memory that rises while these counts stay flat is somewhere else,
+  // and memory that rises with them is exactly this retention.
+  //
+  // Aggregate only — no ids, no session keys, no log text — because this port may
+  // sit behind a public ingress. Same reason it is a plain GET and not a tool: a
+  // new tool declaration would need every connected client to re-approve its
+  // frozen catalog (see AGENTS.md), which is a heavy price for a counter.
+  hono.get("/health/retention", (c) => {
+    const usage = process.memoryUsage();
+    const retained = pool.allEntries().reduce(
+      (total, entry) => {
+        const stats = entry.sessions.retentionStats();
+        return {
+          jobs: total.jobs + stats.jobs,
+          logEntries: total.logEntries + stats.logEntries,
+          logTextChars: total.logTextChars + stats.logTextChars,
+          oldestJobStartedAt:
+            stats.oldestJobStartedAt === undefined
+              ? total.oldestJobStartedAt
+              : Math.min(total.oldestJobStartedAt ?? stats.oldestJobStartedAt, stats.oldestJobStartedAt),
+        };
+      },
+      { jobs: 0, logEntries: 0, logTextChars: 0, oldestJobStartedAt: undefined as number | undefined },
+    );
+    return c.json({
+      ok: true,
+      uptimeSeconds: Math.round(process.uptime()),
+      // rss is what the host sees; heapUsed vs external says whether growth is
+      // JS objects (which a heap snapshot can name) or off-heap buffers (which
+      // it cannot) — the distinction that decides where to look next.
+      memory: {
+        rssBytes: usage.rss,
+        heapUsedBytes: usage.heapUsed,
+        heapTotalBytes: usage.heapTotal,
+        externalBytes: usage.external,
+        arrayBuffersBytes: usage.arrayBuffers,
+      },
+      retained,
+    });
+  });
+
   async function requestListener(req: IncomingMessage, res: ServerResponse) {
     if (req.url?.startsWith("/mcp")) {
       if (req.method === "OPTIONS") {

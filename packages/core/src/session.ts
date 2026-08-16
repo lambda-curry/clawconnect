@@ -59,6 +59,10 @@ function readEnvMs(name: string, fallbackMs: number): number {
   return Number.isFinite(n) && n > 0 ? n : fallbackMs;
 }
 
+function readEnvChars(name: string, fallbackChars: number): number {
+  return readEnvMs(name, fallbackChars);
+}
+
 // Live chat() wait. Bumped from the original 10 min so long natural runs
 // (no overflow, no early lifecycle:end) get a chance to resolve normally
 // instead of timing out into job.status = "error". Override via env if a
@@ -116,19 +120,44 @@ function attachmentOutputRef(record: AgentSessionAttachment): string {
   return record.worktree ? `${record.handle}:${record.worktree}` : record.handle;
 }
 
+// Cap on a single LogEntry.text. The entry COUNT is still unbounded on purpose
+// (see pushLog) — this bounds only how large any one entry may be, which is
+// what actually makes retained memory a function of tool output rather than of
+// run length. A single run whose shell step prints a large file otherwise keeps
+// that whole payload resident for as long as the process lives, and one such
+// step costs more than thousands of ordinary events. The full text stays
+// re-derivable from the runtime transcript, and every reader of a single entry
+// already shows a preview rather than the whole thing (log-projection.ts), so
+// nothing downstream depends on the untruncated value.
+export const LOG_ENTRY_TEXT_MAX = readEnvChars("CLAWCONNECT_LOG_ENTRY_TEXT_MAX", 8_000);
+
+export function capLogText(text: string): string {
+  if (text.length <= LOG_ENTRY_TEXT_MAX) return text;
+  const dropped = text.length - (LOG_ENTRY_TEXT_MAX - 1);
+  // Say what was dropped: a silently shortened log reads as a tool that
+  // produced less output than it did, which is worse than a visible cut.
+  return `${text.slice(0, LOG_ENTRY_TEXT_MAX - 1)}…[${dropped} more chars]`;
+}
+
 /**
  * Job.logs is authoritative full history — server-retained, never trimmed or
- * capped (docs/decisions/2026-07-27-task-contract.md: "the server remains
- * authoritative" / "the server retains full history"; the widget/check_task
+ * capped in ENTRY COUNT (docs/decisions/2026-07-27-task-contract.md: "the server
+ * remains authoritative" / "the server retains full history"; the widget/check_task
  * simplification only bounds what a given response projects from it — see
  * log-projection.ts). seq is 1-based and equal to the post-push array
  * length; monotonic for the life of the job regardless of how long it runs.
+ *
+ * Per-entry text IS capped (LOG_ENTRY_TEXT_MAX). Retention here is the process's
+ * dominant memory cost: jobs are held in an in-memory Map for the life of the
+ * process, so every byte pushed is resident until restart. Capping the entry
+ * keeps the history intact — every event still has its seq, type and timestamp —
+ * while removing the unbounded dimension.
  */
 function pushLog(
   job: Pick<Job, "logs">,
   entry: { ts: number; type: string; text: string; isError?: boolean },
 ): void {
-  job.logs.push({ ...entry, seq: job.logs.length + 1 });
+  job.logs.push({ ...entry, text: capLogText(entry.text), seq: job.logs.length + 1 });
 }
 
 /**
@@ -606,6 +635,45 @@ export class SessionManager {
   /** True when a host registered callbacks for `runtimeId`. Wiring assertion only — it exposes no sessions. */
   hasAgentSessionRuntime(runtimeId: string): boolean {
     return this.runtimes?.has(runtimeId) === true;
+  }
+
+  /**
+   * What this manager is holding in memory, as counts only.
+   *
+   * Jobs live in an in-memory Map for the life of the process and their logs are
+   * never trimmed, so retained memory is a function of how much work has run
+   * since the last restart. Nothing exposed that; a host reading only RSS sees
+   * a number going up with no way to tell growth from a busy day, which is
+   * exactly how a slow climb gets mis-attributed to whatever else is running.
+   *
+   * Deliberately aggregate: no job ids, session keys, agent names or log text.
+   * A deployment may serve this over a public ingress, and a count answers
+   * "is retention growing" without disclosing what the retained work was.
+   * `logTextChars` is a lower bound on the payload — it counts entry text only,
+   * not per-object overhead — which is the number that moves when this leaks.
+   */
+  retentionStats(): {
+    jobs: number;
+    logEntries: number;
+    logTextChars: number;
+    oldestJobStartedAt?: number;
+  } {
+    let logEntries = 0;
+    let logTextChars = 0;
+    let oldestJobStartedAt: number | undefined;
+    for (const job of this.jobs.values()) {
+      logEntries += job.logs.length;
+      for (const entry of job.logs) logTextChars += entry.text.length;
+      if (oldestJobStartedAt === undefined || job.startedAt < oldestJobStartedAt) {
+        oldestJobStartedAt = job.startedAt;
+      }
+    }
+    return {
+      jobs: this.jobs.size,
+      logEntries,
+      logTextChars,
+      ...(oldestJobStartedAt === undefined ? {} : { oldestJobStartedAt }),
+    };
   }
 
   /**
