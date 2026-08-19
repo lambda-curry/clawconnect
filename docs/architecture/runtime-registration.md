@@ -60,9 +60,9 @@ comma- or newline-separated specifiers — bare package names, absolute paths, o
 paths relative to the process cwd — imports each one, and never throws: a
 module that is missing, fails to import, exports no registrar, or throws while
 registering is logged and skipped, because every task that does not involve a
-delegation still works. Unset or registering nothing, NO runtime is reachable —
-core ships none — and every attachment reads back as a precise
-`unknown_runtime` result rather than an error.
+If the variable is unset, or every module it names registers nothing, then no
+runtime is reachable at all — core ships none — and every attachment reads back
+as a precise `unknown_runtime` result rather than an error.
 
 A worked example lives in `examples/local-tmux-runtime/`: plain JavaScript, no
 build step, no import from `@clawconnect/core`, loadable by the shipped binary

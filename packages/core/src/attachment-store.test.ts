@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -160,21 +160,30 @@ describe("JsonFileAttachmentStore: an unreadable file is preserved, a missing on
   });
 
   it("refuses to save at all when the unreadable file could not even be preserved", () => {
+    // Preservation fails here WITHOUT depending on the effective user: the
+    // preserved name is the original plus a ~33-character suffix, so a
+    // basename already near the filesystem's limit cannot grow one and the
+    // rename fails ENAMETOOLONG for anybody. The earlier version made the
+    // parent directory read-only, which a root process writes straight
+    // through — the rename would then succeed and this test would fail for an
+    // environmental reason rather than a real one. It also had to restore the
+    // mode afterwards, and a failing assertion before that line left the
+    // directory unremovable for the rest of the run.
     const dir = mkdtempSync(join(tmpdir(), "clawconnect-fleetstore-test-"));
     dirs.push(dir);
-    const filePath = join(dir, "attachments.json");
+    const filePath = join(dir, `${"j".repeat(240)}.json`);
     writeFileSync(filePath, "{ not valid json");
-    chmodSync(dir, 0o500);
 
     const seen: StoreDegradation[] = [];
     const store = new JsonFileAttachmentStore(filePath, (d) => seen.push(d));
     expect(store.load()).toEqual([]);
+    expect(seen).toHaveLength(1);
+    // The discriminating assertion: preservation was ATTEMPTED and failed.
     expect(seen[0].preservedAs).toBeUndefined();
+    expect(seen[0].message).toMatch(/could not be preserved/i);
 
-    // Writable again, so the refusal below is the store's rule rather than
-    // the filesystem's.
-    chmodSync(dir, 0o700);
     store.save([sample]);
+    // Untouched — the save was refused, not attempted and half-done.
     expect(readFileSync(filePath, "utf8")).toBe("{ not valid json");
   });
 });

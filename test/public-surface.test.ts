@@ -18,9 +18,9 @@ import { describe, expect, it } from "vitest";
 const REPO_ROOT = join(import.meta.dirname, "..");
 
 /**
- * Private names. `claude-fleet` is deliberately NOT here: it is the real,
- * exported id of the legacy local adapter that ships in this repo, so banning
- * it would mean lying about the code rather than cleaning it up.
+ * Private names. `claude-fleet` is deliberately NOT here: it is the runtime id
+ * used by the example module in `examples/local-tmux-runtime/`, so banning it
+ * would hide the example rather than clean anything up.
  */
 const BANNED_NAMES = /\b(clawdy|saffron|t3|arbor|main-mini|minip3)\b/i;
 
@@ -91,7 +91,7 @@ describe("public surface stays host-neutral", () => {
     expect(BANNED_REFERENCES.test("`/Users/someone/notes/report.md`")).toBe(true);
     expect(BANNED_REFERENCES.test("thread `thr_9dfe1478`")).toBe(true);
     // …and the exemption holds: the legacy adapter's real id stays legal.
-    expect(BANNED_NAMES.test("the built-in claude-fleet adapter")).toBe(false);
+    expect(BANNED_NAMES.test("the claude-fleet example runtime")).toBe(false);
   });
 
   it("names no private host, company, or agent in public docs", () => {
