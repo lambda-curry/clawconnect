@@ -25,6 +25,14 @@ export type GatewayEvent =
 
 // ── Artifacts ───────────────────────���───────────────────────────��────────────
 
+/**
+ * How an inferred identifier was obtained. `"command"` means it was read off a
+ * command the agent actually ran; `"summary-text"` means it was scraped from
+ * free-form prose, which is a guess about what the prose meant and must not be
+ * presented as established fact.
+ */
+export type ArtifactProvenance = "summary-text" | "command";
+
 export type Artifacts = {
   filesChanged: string[];
   commandsRun: string[];
@@ -32,6 +40,13 @@ export type Artifacts = {
   commitSha?: string;
   prUrl?: string;
   needsHumanDecision: boolean;
+  /**
+   * How each inferred identifier was obtained. An identifier present without a
+   * provenance entry is a bug; an absent identifier makes no claim at all.
+   * Optional so job records persisted before this field existed deserialize
+   * unchanged.
+   */
+  provenance?: Partial<Record<"commitSha" | "branchName" | "prUrl", ArtifactProvenance>>;
 };
 
 // ── Errors ─��───────────────────────────────────────────��─────────────────────
