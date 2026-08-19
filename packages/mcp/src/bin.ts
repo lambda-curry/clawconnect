@@ -31,13 +31,18 @@ console.error(
 );
 
 // Managed-session wiring, both halves of it (see core's runtime-modules.ts and
-// attachment-store.ts). Absent CLAWCONNECT_AGENT_SESSION_RUNTIME_MODULES
-// this is exactly the previous behavior — claude-fleet only — and the store
-// directory is inert until something actually attaches.
+// attachment-store.ts). Absent CLAWCONNECT_AGENT_SESSION_RUNTIME_MODULES no
+// runtime is reachable — the default install — and the store directory is
+// inert until something actually attaches.
 const agentSessionRuntimes = await loadAgentSessionRuntimes();
 const attachmentStoreDir =
   process.env.CLAWCONNECT_ATTACHMENT_STORE_DIR?.trim() ||
   join(homedir(), ".clawconnect", "attachments");
+// Where run_task's opaque payload channel materialises its files (see core's
+// payload-store.ts). Passed here rather than defaulted in the factory so
+// constructing a server in a test never writes to a real home directory.
+const payloadDir =
+  process.env.CLAWCONNECT_PAYLOAD_DIR?.trim() || join(homedir(), ".clawconnect", "payloads");
 
 // serveStdio owns the opening exchange: a 2026-07-28 server/discover probe
 // selects the modern per-request-envelope era, while initialize (or another
@@ -45,7 +50,7 @@ const attachmentStoreDir =
 // One factory instance is then pinned for the lifetime of this stdio
 // connection, preserving the server-owned task pool across calls.
 serveClawConnectStdio(
-  { registry, agentSessionRuntimes, attachmentStoreDir },
+  { registry, agentSessionRuntimes, attachmentStoreDir, payloadDir },
   {
     onerror: (error) => console.error("[mcp] stdio serving error:", error),
   },

@@ -281,13 +281,20 @@ The result is what the user wants — not the jobId. Call check_task in a loop u
 
 Skip the polling loop only for explicit fire-and-forget, or when parallel-dispatching to several agents (dispatch all first, then poll each).
 
-Pass a sessionKey from a previous task to continue the same thread.`,
+Pass a sessionKey from a previous task to continue the same thread.
+
+Use \`payload\` for content that is data rather than instructions — a spec, a file to hand onward, a brief meant for something further down the chain. It is written to a file and only the PATH is given to the agent, so its contents never become part of what the agent is being asked to do. \`task\`/\`context\` are read as instructions; \`payload\` is not.`,
       inputSchema: {
         type: "object",
         properties: {
           task: { type: "string", description: "The task to perform" },
           agent: agentProp,
           context: { type: "string", description: "Additional context for the task" },
+          payload: {
+            type: "string",
+            description:
+              "Opaque content that is NOT addressed to the agent. Written to a file; the agent is told only the path, so these bytes never enter the conversation and are never read as instructions. Use it for anything meant to be handed onward rather than acted on.",
+          },
           sessionKey: {
             type: "string",
             description:
@@ -305,6 +312,7 @@ Pass a sessionKey from a previous task to continue the same thread.`,
           taskId: { type: "string" },
           sessionKey: { type: "string" },
           status: { type: "string", enum: ["running"] },
+          payloadPath: { type: "string" },
           execution: { type: "string", enum: ["running"] },
           upstream: { type: "string", enum: ["connected", "reconnecting", "unavailable"] },
           transcript: { type: "string", enum: ["live", "replaying", "detached"] },
@@ -345,6 +353,8 @@ Pass a sessionKey from a previous task to continue the same thread.`,
             task: str(args.task) ?? "",
             agent: requestedAgent,
             context: str(args.context),
+            // Passed straight through and never inspected — see payload-store.ts.
+            payload: str(args.payload),
             sessionKey: str(args.sessionKey),
             // The credential's identity is ground truth; a model-supplied
             // senderName only fills in when the connection is anonymous.
@@ -904,7 +914,9 @@ At detail levels that include it, \`updates\` is a bounded recent-activity windo
     mutates: false,
     description: `${READ_ONLY} Reports what this MCP connection actually is: the protocol era and revision in use, the server version and build commit, a fingerprint of the tool catalog being served, the authenticated identity, and which agents are in scope.
 
-Use it when something looks inconsistent — a tool you expect is missing, a description doesn't match what you were told, or a fix appears not to have taken effect. Compare \`toolsetVersion\` against what you were told to expect: if the server reports one value and your tool catalog was built from another, your client is holding a stale snapshot and needs to reconnect, which is a different problem from the server being wrong.`,
+Use it when something looks inconsistent — a tool you expect is missing, a description doesn't match what you were told, or a fix appears not to have taken effect. Compare \`toolsetVersion\` against what you were told to expect: if the server reports one value and your tool catalog was built from another, your client is holding a stale snapshot and needs to reconnect, which is a different problem from the server being wrong.
+
+It also reports \`degradedStores\` when a persistence file could not be read at startup. That is the one answer here that means work may have been lost: in-flight tasks from before the restart were not recovered, and the unreadable file was preserved alongside the original for a human to look at. Its absence is the healthy case.`,
     inputSchema: { type: "object", properties: {} },
     outputSchema: {
       type: "object",
@@ -930,6 +942,10 @@ Use it when something looks inconsistent — a tool you expect is missing, a des
             allowed: { type: "array", items: { type: "string" } },
             default: { type: "string" },
           },
+        },
+        degradedStores: {
+          type: "array",
+          items: { type: "object", additionalProperties: true },
         },
       },
       required: ["protocolEra", "serverVersion", "build", "toolsetVersion", "tools"],
@@ -957,6 +973,10 @@ Use it when something looks inconsistent — a tool you expect is missing, a des
         tools: capabilities.map((c) => c.name).sort(),
         identity: { user: identity.user, ...(identity.legacy ? { legacy: true } : {}) },
         agents: { allowed: scope.allowedIds, default: scope.defaultId },
+        // Omitted entirely when nothing degraded, so its PRESENCE is the
+        // signal — a field that is always there, usually empty, is one a
+        // reader learns to skip.
+        ...(ctx.pool.storeHealth().length ? { degradedStores: ctx.pool.storeHealth() } : {}),
       }),
   });
 

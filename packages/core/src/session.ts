@@ -13,8 +13,6 @@ import {
   isBlockedAgentSessionState,
   isCompletedTurnState,
   isDelegateBlockedTerminalReason,
-  normalizeAgentSessionObservation,
-  withAgentSessionTimeout,
   type AgentSessionRef,
   type AgentSessionState,
   type AgentSessionRequest,
@@ -22,15 +20,11 @@ import {
   type AgentSessionRuntimeRegistry,
   type AgentSessionStatus,
 } from "./agent-session.ts";
-import {
-  CLAUDE_FLEET_RUNTIME_ID,
-  fleetAdapterRuntime,
-  type FleetAdapter,
-} from "./fleet-adapter.ts";
 import type { AttachmentStore } from "./attachment-store.ts";
 import { parseSessionHandoff } from "./session-handoff.ts";
 import { OpenClawGateway, type RunObservation } from "./gateway.ts";
 import type { JobStore, PersistedJob } from "./job-store.ts";
+import { payloadDeliveryNote, type PayloadStore } from "./payload-store.ts";
 import { projectLogWindow } from "./log-projection.ts";
 import {
   NO_SUMMARY_SENTINEL,
@@ -312,12 +306,18 @@ function logDebug(message: string): void {
  * Build the message string sent into `gateway.chat()`. Extracted so the
  * preamble + senderName + context composition is testable without standing
  * up a live gateway.
+ *
+ * `payloadPath` adds a short delivery note and NOTHING else — the payload's
+ * bytes never appear here, which is the entire point of the channel (see
+ * payload-store.ts). It goes last, after the task, so it reads as a footer
+ * about the message rather than as part of the brief.
  */
-export function buildSubmitMessage(input: TaskInput): string {
+export function buildSubmitMessage(input: TaskInput, payloadPath?: string): string {
   const body = input.context ? `${input.context}\n\n${input.task}` : input.task;
   const senderName = input.senderName?.trim();
   const withSender = senderName ? `[Message from: ${senderName}]\n\n${body}` : body;
-  return `${MESSAGE_TOOL_VETO_PREAMBLE}\n\n---\n\n${withSender}`;
+  const withPayload = payloadPath ? `${withSender}\n\n---\n\n${payloadDeliveryNote(payloadPath)}` : withSender;
+  return `${MESSAGE_TOOL_VETO_PREAMBLE}\n\n---\n\n${withPayload}`;
 }
 
 function createThreadSessionKey(agentId: string): string {
@@ -473,8 +473,8 @@ export class SessionManager {
     private readonly agentId: string = "main",
     private readonly store?: JobStore,
     private readonly attachmentStore?: AttachmentStore,
-    private readonly fleetAdapter?: FleetAdapter,
     private readonly runtimes?: AgentSessionRuntimeRegistry,
+    private readonly payloads?: PayloadStore,
   ) {
     if (store) this.rehydrateFromStore(store);
     if (attachmentStore) this.rehydrateAttachmentsFromStore(attachmentStore);
@@ -505,6 +505,7 @@ export class SessionManager {
         prompt: pj.prompt,
         parentRunId: pj.parentRunId,
         lastSeenSequence: pj.lastSeenSequence,
+        ...(pj.payloadPath ? { payloadPath: pj.payloadPath } : {}),
         upstreamState: "reconnecting",
         transcriptState: "replaying",
         cancellationState: "none",
@@ -597,6 +598,7 @@ export class SessionManager {
         prompt: j.prompt,
         parentRunId: j.parentRunId,
         lastSeenSequence: j.lastSeenSequence,
+        payloadPath: j.payloadPath,
       }));
     this.store.save(active);
   }
@@ -617,20 +619,10 @@ export class SessionManager {
   // ── Managed session attachment ──────────────────────────────────────────
   //
   // Every read below touches ONLY `attachments.get(sessionKey)` — one
-  // session, O(1) — or hands the resulting single record to the injected
-  // FleetAdapter. There is no code path anywhere in this block that iterates
-  // sessions/handles/hosts, which is what "no heuristic scanning" (mission
-  // requirement 4) means structurally, not just by convention.
-
-  /**
-   * True when a FleetAdapter was injected at construction — i.e. recovery
-   * tier 3 is actually reachable, not just persisted metadata. Exists so
-   * production entrypoint tests can assert the wiring is present without
-   * needing to drive a full recovery scenario end to end.
-   */
-  hasFleetAdapter(): boolean {
-    return this.fleetAdapter !== undefined;
-  }
+  // session, O(1) — or hands the resulting single record to the runtime a
+  // host registered for it. There is no code path anywhere in this block that
+  // iterates sessions/handles/hosts, which is what "no heuristic scanning"
+  // (mission requirement 4) means structurally, not just by convention.
 
   /** True when a host registered callbacks for `runtimeId`. Wiring assertion only — it exposes no sessions. */
   hasAgentSessionRuntime(runtimeId: string): boolean {
@@ -700,22 +692,16 @@ export class SessionManager {
   }
 
   /**
-   * Which runtime answers for this record: a host-registered one if there is
-   * one, otherwise the built-in claude-fleet adapter presented through the
-   * same seam. A host that registers "claude-fleet" itself deliberately wins —
-   * a host driving it through its own transport knows more than a local
-   * tmux probe does.
+   * Which runtime answers for this record — whichever one the host registered
+   * under that id, and nothing else. ClawConnect ships no runtime of its own,
+   * so an id nobody registered simply has no answer, and every caller turns
+   * that into a normalized `unknown_runtime` result rather than an error.
    *
    * A map lookup on ONE id. There is no path from here to a runtime's session
    * list, because the callback seam defines no such callback.
    */
   private resolveRuntime(record: AgentSessionAttachment): AgentSessionRuntime | undefined {
-    const registered = this.runtimes?.get(record.runtime);
-    if (registered) return registered;
-    if (record.runtime === CLAUDE_FLEET_RUNTIME_ID && this.fleetAdapter) {
-      return fleetAdapterRuntime(this.fleetAdapter, record);
-    }
-    return undefined;
+    return this.runtimes?.get(record.runtime);
   }
 
   /**
@@ -789,8 +775,9 @@ export class SessionManager {
     }
 
     // "unavailable"/"unknown" describe the read, not the session, and never
-    // become a stored status. A liveness-only observation (the built-in
-    // claude-fleet probe, which reports no state at all) may still promote the
+    // become a stored status. A liveness-only observation (a runtime whose
+    // probe can answer "the process is up" but cannot tell working from
+    // waiting, so it reports no state at all) may still promote the
     // uninformative initial "starting" — and only that, evaluated against the
     // FRESH record, so a status the host reported while the probe was in flight
     // is never clobbered by a bare liveness bit.
@@ -879,7 +866,7 @@ export class SessionManager {
     const previous = state.currentAttachmentId
       ? state.attachments?.[state.currentAttachmentId]
       : undefined;
-    const runtime = directive.runtime ?? CLAUDE_FLEET_RUNTIME_ID;
+    const runtime = directive.runtime;
 
     // An "attach" naming the session that is ALREADY current is a
     // re-statement, not a new delegation target — which is exactly what
@@ -1089,15 +1076,15 @@ export class SessionManager {
    * An explicit host-reported status (on either op) is authoritative and
    * is persisted synchronously, THEN this returns immediately — it never
    * also kicks off the background liveness probe below. Two independent
-   * reasons: (1) the host's own report is a stronger signal than a bare tmux
+   * reasons: (1) the host's own report is a stronger signal than a bare
    * liveness bit and shouldn't be second-guessed by it, and (2) starting the
    * probe anyway would race it — see the callback's re-read for why a probe
    * that outlives a later status write is unsafe even when CAS-guarded by
    * identity alone.
    *
    * Only when the host supplied NO status does `inspect` fall through to a
-   * bounded, single-attachment read through the runtime seam (a host-
-   * registered runtime, or the built-in tmux liveness probe for claude-fleet).
+   * bounded, single-attachment read through the runtime seam, to whichever
+   * runtime the host registered for this record.
    * Deliberately NOT awaited by the caller (submitTask stays synchronous,
    * matching its existing public contract): the result lands a tick later via
    * the fire-and-forget dispatch below, and every write it makes goes through
@@ -1232,72 +1219,39 @@ export class SessionManager {
   }
 
   /**
-   * Reads the attachment through whichever path can produce a TRUSTWORTHY
-   * final answer for a completed turn, for the recovery tier below:
+   * Reads the attachment through the runtime seam for the recovery tier
+   * below. The runtime answers through its own `inspect`, and the shared
+   * normalization guarantees `finalResponse` only exists in a completed-turn
+   * state — so how hard a runtime works to be sure before it claims a
+   * completed turn (a process that must have EXITED, a transcript entry
+   * carrying its own timestamp) is enforced inside that runtime's module,
+   * where the evidence actually is.
    *
-   *   - a host-registered runtime answers through its own `inspect`, and the
-   *     shared normalization guarantees `finalResponse` only exists in a
-   *     completed-turn state;
-   *   - claude-fleet with no host-registered runtime falls back to the
-   *     FleetAdapter's terminal transcript read, which carries its own,
-   *     stronger trust gate (the tmux session must have ENDED, and the
-   *     transcript entry supplies its own timestamp) than a liveness probe
-   *     could. That is why recovery does not simply reuse `inspect` here.
-   *
-   * Anything else — an unknown runtime, no adapter — yields undefined, and the
-   * caller falls through to today's completed_no_summary.
-   *
-   * The `source` it reports is what the job's `resultSource` becomes:
-   * "fleet-transcript" stays the LEGACY claude-fleet transcript path only, so
-   * a result recovered from an arbitrary runtime is never mislabelled as one
-   * read out of a Claude Code transcript.
+   * An id no host registered yields undefined, and the caller falls through
+   * to today's completed_no_summary.
    */
   private async observeForRecovery(
     record: AgentSessionAttachment,
   ): Promise<{ status: AgentSessionStatus; source: ResultSource } | undefined> {
-    const ref = this.agentSessionRef(record);
-    const now = Date.now();
     const registered = this.runtimes?.get(record.runtime);
-    if (registered) {
-      const status = await dispatchAgentSession(registered, ref, { op: "inspect" }, { now });
-      return { status, source: "agent-session" };
-    }
-    if (record.runtime !== CLAUDE_FLEET_RUNTIME_ID || !this.fleetAdapter) return undefined;
-    try {
-      // Bounded for the same reason a runtime callback is (see
-      // withAgentSessionTimeout): this read runs on the path that decides a
-      // job's terminal status, and an adapter that never answers must not be
-      // able to hold a job in `running` forever.
-      const handoff = await withAgentSessionTimeout((signal) =>
-        this.fleetAdapter!.readTerminalHandoff(record, signal),
-      );
-      if (!handoff?.text) return undefined;
-      return {
-        status: normalizeAgentSessionObservation(
-          ref,
-          // `resultAt` is the transcript entry's OWN timestamp — never wall-clock
-          // read time — which is what makes the freshness bound below meaningful.
-          { state: "completed", finalResponse: handoff.text, lastEventAt: handoff.resultAt },
-          now,
-        ),
-        source: "fleet-transcript",
-      };
-    } catch (err) {
-      logDebug(
-        `[agent-session] readTerminalHandoff failed for ${record.handle}: ${err instanceof Error ? err.message : String(err)}`,
-      );
-      return undefined;
-    }
+    if (!registered) return undefined;
+    const status = await dispatchAgentSession(
+      registered,
+      this.agentSessionRef(record),
+      { op: "inspect" },
+      { now: Date.now() },
+    );
+    return { status, source: "agent-session" };
   }
 
   /**
    * Recovery order tier 3 (see docs/architecture/2026-08-02-managed-fleet-
    * attachment-plan.md §8) — reached ONLY from the two places in this file
    * where the parent's own live+transcript recovery has already given up.
-   * Consults ONLY the session's known current attachment via the injected
-   * FleetAdapter; returns undefined (never synthesizes a fake completion)
-   * for any of:
-   *   - no attachment, or no adapter configured;
+   * Consults ONLY the session's known current attachment, through the
+   * runtime the host registered for it; returns undefined (never synthesizes
+   * a fake completion) for any of:
+   *   - no attachment, or no runtime registered for it;
    *   - the attachment was not delegated to THIS turn (delegatedTurnId does
    *     not match `job.jobId`) — otherwise a still-current attachment left
    *     over from an earlier, unrelated turn could answer a LATER task it
@@ -1318,7 +1272,7 @@ export class SessionManager {
   private async tryAttachedSessionRecovery(
     job: Job,
   ): Promise<{ summary: string; attachmentId: string; resultSource: ResultSource } | undefined> {
-    if (!this.fleetAdapter && !this.runtimes) return undefined;
+    if (!this.runtimes) return undefined;
     const current = this.getAgentSessionAttachment(job.sessionKey);
     if (!current) return undefined;
 
@@ -1351,7 +1305,7 @@ export class SessionManager {
 
     // A result we cannot date cannot be proven to belong to THIS turn, and an
     // undatable answer must read as "nothing trustworthy yet" rather than as
-    // an untimestamped success — the same rule fleet-adapter.ts applies when
+    // an untimestamped success — the same rule a runtime module applies when
     // it skips a transcript entry with no parseable timestamp.
     const resultAt = status.lastEventAt ?? status.termination?.at;
     if (resultAt === undefined) {
@@ -1406,11 +1360,6 @@ export class SessionManager {
     const effectiveInput: TaskInput =
       strippedContext === input.context ? input : { ...input, context: strippedContext };
 
-    // buildSubmitMessage prepends the `message`-tool veto preamble, the
-    // sender identity, and optional context block in the canonical order
-    // tested in session.test.ts.
-    const message = buildSubmitMessage(effectiveInput);
-
     // Concurrency guard: a second chat.send to an OpenClaw session that
     // already has a run in progress aborts the in-flight run, and the new
     // run resolves with an empty `chat.final` — so BOTH jobs break (the
@@ -1456,6 +1405,20 @@ export class SessionManager {
     }
 
     const jobId = randomUUID();
+
+    // Materialised only now, for the same reason the directive is applied
+    // only now: the file is named by job id, and a submit rejected as "session
+    // busy" never became a turn, so it must not leave a payload behind for
+    // nobody. Best-effort — a store that cannot write returns undefined and
+    // the task dispatches with no payload note rather than failing.
+    const payloadPath = input.payload ? this.payloads?.write(jobId, input.payload) : undefined;
+
+    // buildSubmitMessage prepends the `message`-tool veto preamble, the
+    // sender identity, and optional context block in the canonical order
+    // tested in session.test.ts, and appends the payload delivery note (the
+    // PATH — never the payload's contents).
+    const message = buildSubmitMessage(effectiveInput, payloadPath);
+
     // Apply the directive now that we know it correlates to a REAL turn.
     if (parsedDirective)
       this.applyAgentSessionDirective(sessionKey, jobId, parsedDirective.directive);
@@ -1480,6 +1443,7 @@ export class SessionManager {
       upstreamState: "reconnecting",
       transcriptState: "detached",
       cancellationState: "none",
+      ...(payloadPath ? { payloadPath } : {}),
     };
     if (!input.sessionKey) {
       pushLog(job, {
@@ -2852,6 +2816,7 @@ export class SessionManager {
       nextAction: buildNextAction(job),
       resultSource: job.resultSource,
       terminalReason: job.terminalReason,
+      ...(job.payloadPath ? { payloadPath: job.payloadPath } : {}),
       // The upstream run this turn dispatched. Absent until chat.send answers,
       // and on a job reloaded from a store written before it existed. Exposed
       // because a diagnostic that names no run cannot be checked against

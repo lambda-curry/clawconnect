@@ -11,9 +11,9 @@ you are unsure about.
 
 Two things are deliberately allowed and are not leaks:
 
-- `claude-fleet` — the real exported id of the legacy local adapter that ships
-  here (`packages/core/src/fleet-adapter.ts`). Banning the string would hide
-  the code rather than clean it up.
+- `claude-fleet` — the runtime id used by the example runtime module in
+  `examples/local-tmux-runtime/`. It is an example, not shipped code, and
+  banning the string would hide it rather than let it demonstrate the seam.
 - The `lambda-curry` GitHub org in repository URLs — that is this project's
   actual public home.
 
@@ -76,6 +76,42 @@ Conventions the surface enforces, all covered by that test:
   `prompt` preset returns no `status` at all.
 - `run_task` is the only capability that mutates anything.
 
+## `run_task`'s payload is not a second `context`
+
+`task` and `context` reach the agent as ONE conversational message. A brief of
+the form "you are the manager; write the context to a file; then launch the
+worker" therefore reaches the manager AND the worker — the manager faithfully
+passes the whole brief onward, the worker reads the same manager instructions,
+concludes it is the manager, and launches another worker. Observed on two
+independent dispatches; every status surface above the worker looked healthy
+throughout.
+
+`payload` (`packages/core/src/payload-store.ts`) is the structural fix: the
+bytes never enter the instruction stream at all. The server materialises the
+blob to a file and the agent is told only the path. Never parse, interpret,
+template, truncate, or echo a payload, and never return its contents from a
+read tool — `get_task` reports `payloadPath` and nothing more. Retention is
+**TTL-based, never terminal-based**: the worker routinely outlives the job that
+launched it, so deleting on completion pulls the file out from under a live
+reader.
+
+## A failed store read must not destroy the store
+
+`JsonFileJobStore` and `JsonFileAttachmentStore` distinguish "the file is not
+there" (empty is a fact) from "the file could not be read" (empty is a lie).
+Both used to answer `[]` for either, and since `persistActiveJobs` is a
+whole-map overwrite, the first save after a failed load wrote the truncated set
+over the only file that could have shown what was lost. The evidence destroyed
+itself.
+
+An unreadable file is renamed aside (`<file>.corrupt-<timestamp>`) before
+anything can overwrite it, and the degradation is reported through the store's
+`onDegraded` sink — `GatewayPool` collects it and `get_connection_info` serves
+it as `degradedStores`, which is the tool a supervisor already calls when
+something looks inconsistent. If the preservation itself fails, the store
+**refuses to save**: not persisting is recoverable, shredding the only copy is
+not. Keep both stores identical here.
+
 ## Deploying a tool-surface change
 
 **ChatGPT freezes the approved tool snapshot.** Editing a declaration and
@@ -118,13 +154,25 @@ tasks/cancel` can later be a thin adapter over it — which mainly means not
 baking today's `check_task` wire shape into the job model itself. The
 capability layer is where that adapter goes.
 
-## The runtime seam is optional
+## The runtime seam is optional, and core ships no runtime
 
 ClawConnect never starts, chooses, or enumerates an agent session. There is no
 spawn and no list callback, and that is structural, not a policy — do not add
 one. A default install registers **no** runtime: every MCP tool behaves
 identically without one, and an attachment for an unregistered runtime reads
 back as a normalized `unknown_runtime` result rather than an error.
+
+`packages/core` holds the neutral registry, the attachment model, and the
+callback seam — and **no concrete adapter**. It shipped one until 2026-08-18
+(a tmux/`~/.claude-fleet` adapter that both entrypoints constructed by
+default), which meant core knew about exactly one runtime while its own design
+notes said it knew about none. That adapter now lives in
+`examples/local-tmux-runtime/` and reaches the connector through
+`CLAWCONNECT_AGENT_SESSION_RUNTIME_MODULES` like any host module. Do not
+reintroduce a runtime-specific import, constant, or `ResultSource` value into
+core: how strongly a runtime can vouch for what it returns is a claim made
+inside that runtime's module, where the evidence is, and the record already
+names which runtime answered.
 
 A host either embeds the library and passes `agentSessionRuntimes`, or runs a
 shipped binary and names ES modules via

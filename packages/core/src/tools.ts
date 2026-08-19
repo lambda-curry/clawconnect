@@ -35,6 +35,7 @@ export function runTask(pool: GatewayPool, input: TaskInput): RunTaskResult {
   const job = entry.sessions.submitTask({
     task: input.task,
     context: input.context,
+    payload: input.payload,
     sessionKey: input.sessionKey,
     senderName: input.senderName,
   });

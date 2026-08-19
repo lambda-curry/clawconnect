@@ -1,7 +1,7 @@
 import { McpServer, fromJsonSchema } from "@modelcontextprotocol/server";
 import {
+  FilePayloadStore,
   GatewayPool,
-  LocalTmuxFleetAdapter,
   buildCapabilities,
   buildCheckTaskStructuredContent,
   blockedDelegation,
@@ -15,7 +15,6 @@ import type {
   CheckMode,
   CheckTaskResult,
   ContinuationState,
-  FleetAdapter,
   JobSnapshot,
 } from "@clawconnect/core";
 
@@ -199,18 +198,23 @@ export interface CreateMcpServerOptions {
   registry: AgentRegistry;
   provider?: ProviderConfig;
   /**
-   * Fleet-transcript recovery adapter (see docs/architecture/2026-08-02-
-   * managed-fleet-attachment-plan.md). Defaults to a real LocalTmuxFleetAdapter
-   * so recovery tier 3 is actually reachable in production. Override in
-   * tests to inject a fake and assert on wiring.
-   */
-  fleetAdapter?: FleetAdapter;
-  /**
    * Managed-agent-session runtimes this host can drive (see agent-session.ts
-   * in core). Omitted, claude-fleet stays the only reachable runtime and any
-   * other attachment reads back as a precise unknown_runtime result.
+   * in core). Omitted — the default install — no attachment has anything to
+   * ask, and any attachment reads back as a precise unknown_runtime result.
    */
   agentSessionRuntimes?: AgentSessionRuntimeRegistry;
+  /**
+   * Directory for run_task's opaque payload files (see core's
+   * payload-store.ts).
+   *
+   * Deliberately NOT defaulted here, for the same reason attachmentStoreDir
+   * is not: this factory is what tests and embedders construct, and a default
+   * would have them writing files as a side effect of construction. The
+   * shipped `clawconnect-mcp` bin passes one. Without it, `payload` is
+   * accepted and silently produces no file — which is why the bin, not this
+   * factory, is the deployed path.
+   */
+  payloadDir?: string;
   /**
    * Directory for per-agent attachment-lineage files (`<agentId>.attachments.json`,
    * see attachment-store.ts). Attachment lineage is durable state the
@@ -292,13 +296,12 @@ export function createMcpServer(config: CreateMcpServerOptions) {
     },
   );
 
-  const fleetAdapter = config.fleetAdapter ?? new LocalTmuxFleetAdapter();
   const pool = new GatewayPool(
     config.registry,
     undefined,
-    fleetAdapter,
     config.attachmentStoreDir,
     config.agentSessionRuntimes,
+    config.payloadDir ? new FilePayloadStore(config.payloadDir) : undefined,
   );
   // Rehydrate every configured agent's persisted attachment lineage now, not
   // lazily on the first request that happens to touch one — an agent nobody

@@ -1,7 +1,8 @@
 import { join } from "node:path";
 import type { AgentSessionRuntimeRegistry } from "./agent-session.ts";
-import type { FleetAdapter } from "./fleet-adapter.ts";
 import { JsonFileAttachmentStore } from "./attachment-store.ts";
+import type { PayloadStore } from "./payload-store.ts";
+import type { StoreDegradation } from "./store-health.ts";
 import { OpenClawGateway } from "./gateway.ts";
 import { SessionManager } from "./session.ts";
 import { JsonFileJobStore } from "./job-store.ts";
@@ -17,6 +18,18 @@ interface PoolEntry {
 export class GatewayPool {
   private entries = new Map<string, PoolEntry>();
   private jobIndex = new Map<string, string>();
+  /**
+   * Every store that answered a load with "I could not read this".
+   *
+   * Kept because the alternative is a stderr line nobody reads: a failed load
+   * rehydrates nothing, and until this existed the only in-band evidence that
+   * a restart had silently orphaned every in-flight job was the absence of
+   * jobs — which is indistinguishable from there having been none. Surfaced
+   * by get_connection_info, the tool a supervisor already calls when
+   * something looks inconsistent. Never cleared: a degraded load is a fact
+   * about this process's lifetime, not a current condition.
+   */
+  private degradations: StoreDegradation[] = [];
 
   /**
    * When set, each agent's SessionManager gets its own file
@@ -32,15 +45,26 @@ export class GatewayPool {
    * `runtimes` is the host's managed-agent-session runtime table (see
    * agent-session.ts). It is shared across every agent's SessionManager on
    * purpose — a runtime is a property of the deployment, not of an OpenClaw
-   * agent — and omitting it leaves claude-fleet as the only reachable runtime.
+   * agent — and omitting it means no attachment has anything to ask, which is
+   * the default install: every MCP tool behaves identically without one.
+   *
+   * `payloads` is where run_task's opaque payload channel materialises its
+   * files (see payload-store.ts). Shared across agents for the same reason
+   * `runtimes` is, and omitted in-memory (tests, the stdio server) so
+   * constructing a pool never writes to disk as a side effect.
    */
   constructor(
     private readonly registry: AgentRegistry,
     private readonly jobStoreDir?: string,
-    private readonly fleetAdapter?: FleetAdapter,
     private readonly attachmentStoreDir: string | undefined = jobStoreDir,
     private readonly runtimes?: AgentSessionRuntimeRegistry,
+    private readonly payloads?: PayloadStore,
   ) {}
+
+  /** Stores that failed a load this process lifetime. Empty is the healthy answer. See `degradations`. */
+  storeHealth(): StoreDegradation[] {
+    return [...this.degradations];
+  }
 
   list(): AgentEntry[] {
     return [...this.registry.agents];
@@ -55,17 +79,20 @@ export class GatewayPool {
     if (existing) return existing;
     const agent = resolveAgent(this.registry, agentId);
     const gateway = new OpenClawGateway({ url: agent.url, token: agent.password });
-    const store = this.jobStoreDir ? new JsonFileJobStore(join(this.jobStoreDir, `${agent.id}.json`)) : undefined;
+    const onDegraded = (d: StoreDegradation) => this.degradations.push(d);
+    const store = this.jobStoreDir
+      ? new JsonFileJobStore(join(this.jobStoreDir, `${agent.id}.json`), onDegraded)
+      : undefined;
     const attachmentStore = this.attachmentStoreDir
-      ? new JsonFileAttachmentStore(join(this.attachmentStoreDir, `${agent.id}.attachments.json`))
+      ? new JsonFileAttachmentStore(join(this.attachmentStoreDir, `${agent.id}.attachments.json`), onDegraded)
       : undefined;
     const sessions = new SessionManager(
       gateway,
       agent.openclawAgentId,
       store,
       attachmentStore,
-      this.fleetAdapter,
       this.runtimes,
+      this.payloads,
     );
     const entry: PoolEntry = { agent, gateway, sessions };
     this.entries.set(agent.id, entry);

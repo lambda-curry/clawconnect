@@ -152,6 +152,36 @@ describe("read/write separation is stated in prose, not only in annotations", ()
   });
 });
 
+describe("the opaque payload channel is declared once, and reaches both transports", () => {
+  /**
+   * `payload` exists because `task`/`context` reach the agent as one
+   * conversational message: a brief addressed to a manager is passed onward
+   * verbatim to the worker, which reads the manager instructions and
+   * concludes it is the manager. A transport that served run_task WITHOUT
+   * this argument would silently drop callers back into that defect, which is
+   * exactly the class of drift this file exists to catch.
+   */
+  it("run_task declares payload on both transports, described as data rather than instructions", async () => {
+    const [viaStdio, viaHttp] = await Promise.all([stdioTools(), httpTools()]);
+    for (const [label, tools] of [["stdio", viaStdio], ["http", viaHttp]] as const) {
+      const payload = (
+        tools.find((t) => t.name === "run_task")?.inputSchema as
+          | { properties?: { payload?: { type?: string; description?: string } } }
+          | undefined
+      )?.properties?.payload;
+      expect(payload?.type, `${label} payload type`).toBe("string");
+      expect(payload?.description, `${label} payload description`).toMatch(/NOT addressed to the agent/);
+      expect(payload?.description, `${label} payload description`).toMatch(/only the path/i);
+    }
+  });
+
+  it("payload is optional, so every existing caller keeps working unchanged", async () => {
+    const tools = await stdioTools();
+    const required = (tools.find((t) => t.name === "run_task")?.inputSchema as { required?: string[] } | undefined)?.required;
+    expect(required).toEqual(["task"]);
+  });
+});
+
 describe("structured output", () => {
   it("every tool declares an outputSchema, so chaining never depends on parsing prose", async () => {
     const tools = await stdioTools();
