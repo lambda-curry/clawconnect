@@ -42,8 +42,21 @@ const SWEEP_INTERVAL_MS = 60 * 60 * 1000;
 const SAFE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
 export interface PayloadStore {
-  /** Materialises `payload` and returns its path, or undefined if it could not be written. */
-  write(jobId: string, payload: string): string | undefined;
+  /**
+   * Materialises `payload` and returns its path. THROWS if it could not —
+   * there is deliberately no "returned nothing" branch, because that is the
+   * shape that invites a caller to carry on without it.
+   *
+   * A write is load-bearing by construction: the caller explicitly passed a
+   * payload, and the task text routinely names the file. Dropping it
+   * dispatches a task that references data the agent cannot find, which is
+   * indistinguishable from a task that never had a payload — a failed
+   * operation rendering as a state of the world. Failing is recoverable (the
+   * caller retries); silently degrading is not.
+   *
+   * This is the opposite of `sweep`, which must never throw. See its comment.
+   */
+  write(jobId: string, payload: string): string;
 }
 
 /**
@@ -64,11 +77,11 @@ export function payloadDeliveryNote(payloadPath: string): string {
  * File-backed PayloadStore. One file per job, mode 0600, in a dedicated
  * directory.
  *
- * Best-effort in both directions, on purpose. A write failure returns
- * undefined and the task dispatches without a payload path rather than
- * failing; a sweep failure is invisible to the dispatch entirely. Losing a
- * payload is bad, but a task that cannot start at all because a cleanup pass
- * hit an unreadable directory is worse.
+ * Best-effort in exactly ONE direction, and the distinction is the point.
+ * `sweep` is silent about everything: nobody asked for it, nothing reads its
+ * result, and a task that cannot start because a cleanup pass hit an
+ * unreadable directory would be a worse outcome than an uncollected file.
+ * `write` is the opposite and throws — see PayloadStore.write.
  */
 export class FilePayloadStore implements PayloadStore {
   private lastSweepAt = 0;
@@ -82,8 +95,14 @@ export class FilePayloadStore implements PayloadStore {
     this.sweep();
   }
 
-  write(jobId: string, payload: string): string | undefined {
-    if (!SAFE_ID_RE.test(jobId)) return undefined;
+  write(jobId: string, payload: string): string {
+    // Job ids are minted internally, so a failure here is an invariant
+    // violation in THIS process, not bad caller input. Returning undefined
+    // would hide a bug in id minting behind a task that merely looks like it
+    // was sent without a payload.
+    if (!SAFE_ID_RE.test(jobId)) {
+      throw new Error(`payload-store: refusing to write a payload for an unusable job id ${JSON.stringify(jobId)}`);
+    }
     const path = join(this.dir, `${jobId}.payload`);
     try {
       mkdirSync(this.dir, { recursive: true, mode: 0o700 });
@@ -92,8 +111,16 @@ export class FilePayloadStore implements PayloadStore {
       writeFileSync(path, payload, { mode: 0o600 });
       chmodSync(path, 0o600);
     } catch (err) {
-      console.error(`[payload-store] failed to write ${path}: ${(err as Error).message}`);
-      return undefined;
+      // The dispatch is about to be refused, so anything already on disk here
+      // is unreferenced garbage — and if the chmod is what failed, it is
+      // garbage with looser permissions than a payload may keep. Best-effort,
+      // and never allowed to replace the error that actually matters.
+      try {
+        rmSync(path, { force: true });
+      } catch {
+        // Nothing to add: the write error below is the one worth reporting.
+      }
+      throw new Error(`payload-store: failed to write ${path}: ${(err as Error).message}`);
     }
     this.sweep();
     return path;

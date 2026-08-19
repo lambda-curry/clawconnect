@@ -95,6 +95,18 @@ read tool — `get_task` reports `payloadPath` and nothing more. Retention is
 launched it, so deleting on completion pulls the file out from under a live
 reader.
 
+**A failed WRITE fails the dispatch; a failed SWEEP is invisible. Do not
+collapse the two.** A sweep is not load-bearing — nobody asked for it and
+nothing reads its result — so it must never block a task. A write is
+load-bearing by construction: the caller passed a payload, the task text names
+the file, and dispatching without it sends a task referencing data the agent
+cannot find, which reads exactly like a task that never had a payload. That is
+the same failure-rendered-as-a-state this repo keeps fixing. `write` therefore
+returns `string` and throws — there is deliberately no "returned nothing"
+branch to tempt a caller — and `submitTask` refuses through the same rejection
+path a "session busy" collision uses. A missing payload store counts as a
+failed write. No fallback, no flag.
+
 ## A failed store read must not destroy the store
 
 `JsonFileJobStore` and `JsonFileAttachmentStore` distinguish "the file is not

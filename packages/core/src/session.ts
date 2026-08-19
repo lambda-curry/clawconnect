@@ -44,6 +44,7 @@ import {
   type ResultSource,
   type SessionAttachmentState,
   type TaskInput,
+  type TaskUpstreamState,
 } from "./types.ts";
 
 function readEnvMs(name: string, fallbackMs: number): number {
@@ -1345,6 +1346,56 @@ export class SessionManager {
     return isBlockedAgentSessionState(current.status) ? current : undefined;
   }
 
+  /**
+   * A submit that never became a turn.
+   *
+   * Both callers refuse BEFORE anything is dispatched or recorded, and the
+   * distinction that matters is what this deliberately does NOT touch:
+   * `latestJobBySession`, `jobHistoryBySession`, `sessions`, the attachment
+   * directive, and `persistActiveJobs` are all left alone. A rejected submit
+   * must not claim or burn the delegation slot that belongs to the turn
+   * actually running, must not overwrite the persisted set of in-flight jobs,
+   * and must not make the session look like it has work on it.
+   *
+   * The record itself IS registered in `jobs`, so a listing can show a
+   * refusal rather than a task that silently never appeared — the one place
+   * this shape is deliberately visible.
+   *
+   * `code` is the short, stable diagnostic (`"session busy"`); `message` is
+   * what a human or a model reads. run_task turns this into a thrown error at
+   * the tool boundary (see tools.ts), which is how both transports surface it.
+   */
+  private rejectSubmit(
+    sessionKey: string,
+    message: string,
+    code: string,
+    suggestedRecovery: string,
+    input: TaskInput,
+    upstreamState: TaskUpstreamState = "unavailable",
+  ): Job {
+    const jobId = randomUUID();
+    const now = Date.now();
+    const job: Job = {
+      jobId,
+      sessionKey,
+      status: "error",
+      error: message,
+      errorInfo: { category: "unknown", message: code, suggestedRecovery },
+      startedAt: now,
+      lastEventAt: now,
+      logs: [],
+      artifacts: emptyArtifacts(),
+      pollCount: 0,
+      prompt: { task: input.task, context: input.context, senderName: input.senderName },
+      upstreamState,
+      transcriptState: "complete",
+      cancellationState: "none",
+    };
+    this.jobs.set(jobId, job);
+    logDebug(`[job ${jobId.slice(0, 8)}] rejected on session ${sessionKey}: ${code}`);
+    return job;
+  }
+
   submitTask(input: TaskInput): Job {
     const { sessionKey, migratedFromLegacy } = resolveSessionKey(input.sessionKey, this.agentId);
 
@@ -1368,40 +1419,16 @@ export class SessionManager {
     const priorJobId = this.latestJobBySession.get(sessionKey);
     const priorJob = priorJobId ? this.jobs.get(priorJobId) : undefined;
     if (priorJob && priorJob.status === "running") {
-      const busyJobId = randomUUID();
-      const busyJob: Job = {
-        jobId: busyJobId,
+      return this.rejectSubmit(
         sessionKey,
-        status: "error",
-        error:
-          `A task is already running on this session (jobId ${priorJobId}). ` +
+        `A task is already running on this session (jobId ${priorJobId}). ` +
           `Poll check_task until it finishes before sending another message to this ` +
           `session, or omit sessionKey to start a fresh thread.`,
-        errorInfo: {
-          category: "unknown",
-          message: "session busy",
-          suggestedRecovery:
-            "Wait for the in-flight job on this session to reach a terminal status, then retry — or start a new thread by omitting sessionKey.",
-        },
-        startedAt: Date.now(),
-        lastEventAt: Date.now(),
-        logs: [],
-        artifacts: emptyArtifacts(),
-        pollCount: 0,
-        prompt: {
-          task: effectiveInput.task,
-          context: effectiveInput.context,
-          senderName: effectiveInput.senderName,
-        },
-        upstreamState: priorJob.upstreamState,
-        transcriptState: "complete",
-        cancellationState: "none",
-      };
-      this.jobs.set(busyJobId, busyJob);
-      logDebug(
-        `[job ${busyJobId.slice(0, 8)}] rejected: session ${sessionKey} busy with job ${priorJobId?.slice(0, 8)}`,
+        "session busy",
+        "Wait for the in-flight job on this session to reach a terminal status, then retry — or start a new thread by omitting sessionKey.",
+        effectiveInput,
+        priorJob.upstreamState,
       );
-      return busyJob;
     }
 
     const jobId = randomUUID();
@@ -1409,9 +1436,39 @@ export class SessionManager {
     // Materialised only now, for the same reason the directive is applied
     // only now: the file is named by job id, and a submit rejected as "session
     // busy" never became a turn, so it must not leave a payload behind for
-    // nobody. Best-effort — a store that cannot write returns undefined and
-    // the task dispatches with no payload note rather than failing.
-    const payloadPath = input.payload ? this.payloads?.write(jobId, input.payload) : undefined;
+    // nobody.
+    //
+    // NOT best-effort. A caller that passed a payload made it load-bearing by
+    // construction — the task text routinely names the file — so dispatching
+    // without it sends a task that references data the agent cannot find, and
+    // that is indistinguishable from a task which never had a payload. The
+    // whole point of this channel is that a failed operation must not render
+    // as a state of the world. A refused submit is recoverable (the caller
+    // retries); an agent hunting for a file nobody wrote is not, and the only
+    // trace would be a stderr line nobody reads. Contrast the payload STORE's
+    // sweep, which is genuinely best-effort and must never fail a dispatch.
+    let payloadPath: string | undefined;
+    if (input.payload !== undefined) {
+      try {
+        if (!this.payloads) {
+          // Accepting the argument and producing no file is the same silent
+          // degradation as a failed write, so it gets the same answer. This is
+          // reachable: createMcpServer deliberately does not default a payload
+          // directory (see its options), and only the shipped bin passes one.
+          throw new Error("no payload store is configured for this deployment");
+        }
+        payloadPath = this.payloads.write(jobId, input.payload);
+      } catch (err) {
+        return this.rejectSubmit(
+          sessionKey,
+          `The task was not dispatched: its payload could not be stored. ${(err as Error).message}. ` +
+            `Nothing is running, so retrying is not a duplicate submit.`,
+          "payload could not be stored",
+          "Make the payload directory writable (or configure one), then retry the same submit — no task was created, so nothing needs cancelling first.",
+          effectiveInput,
+        );
+      }
+    }
 
     // buildSubmitMessage prepends the `message`-tool veto preamble, the
     // sender identity, and optional context block in the canonical order
