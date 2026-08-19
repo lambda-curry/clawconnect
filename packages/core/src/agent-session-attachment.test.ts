@@ -8,7 +8,6 @@ import {
 } from "./agent-session.ts";
 import { ATTACHMENT_RESULT_SUMMARY_MAX, SessionManager } from "./session.ts";
 import type { OpenClawGateway, RunObservation } from "./gateway.ts";
-import type { FleetAdapter, FleetHandoff } from "./fleet-adapter.ts";
 import type { AttachmentStore } from "./attachment-store.ts";
 import type { JobStore, PersistedJob } from "./job-store.ts";
 import { NO_SUMMARY_SENTINEL, type AgentSessionAttachment, type GatewayEvent, type SessionAttachmentState } from "./types.ts";
@@ -23,8 +22,20 @@ import { NO_SUMMARY_SENTINEL, type AgentSessionAttachment, type GatewayEvent, ty
  * docs/architecture/2026-08-02-managed-fleet-attachment-plan.md.
  */
 
+/**
+ * The runtime id every fixture in this file attaches to. ClawConnect ships no
+ * runtime and has no default, so an attach directive has to name one — the
+ * neutral marker always did, and the explicit directive now matches it.
+ */
+const RUNTIME_ID = "example-runtime";
+
+/** Fills in the required `runtime` for attach/replace so each test states only what it is actually about. */
 function directiveBlock(directive: Record<string, unknown>): string {
-  return `[[clawconnect:agent-session]]${JSON.stringify(directive)}[[/clawconnect:agent-session]]`;
+  const withRuntime =
+    (directive.op === "attach" || directive.op === "replace") && directive.runtime === undefined
+      ? { ...directive, runtime: RUNTIME_ID }
+      : directive;
+  return `[[clawconnect:agent-session]]${JSON.stringify(withRuntime)}[[/clawconnect:agent-session]]`;
 }
 
 /** Never settles chat() on its own — every fixture here drives completion explicitly via finishChat/failChat. */
@@ -71,36 +82,54 @@ function fakeGateway(
   };
 }
 
-function fakeFleetAdapter(
+type FakeHandoff = { text: string; resultAt: number };
+
+/**
+ * A runtime shaped like the local-tmux example (see
+ * examples/local-tmux-runtime): a liveness probe that deliberately claims NO
+ * state, and a terminal handoff it will only offer once the session is gone.
+ *
+ * These tests are about CORE's rules — when recovery may consult an
+ * attachment, whose turn an answer may belong to, which writes survive a
+ * race — and the neutral seam is the only path to them now that no adapter
+ * ships in core. Modelling both halves in one `inspect` is what a real
+ * runtime module does, so `isLiveCalls` counts every probe and `handoffCalls`
+ * counts only the ones that got as far as asking for a result.
+ */
+function fakeRuntime(
   opts: {
-    isLive?: boolean | ((a: AgentSessionAttachment) => Promise<boolean>);
-    handoff?: FleetHandoff | null | ((a: AgentSessionAttachment) => Promise<FleetHandoff | null>);
+    isLive?: boolean | (() => Promise<boolean>);
+    handoff?: FakeHandoff | null | (() => Promise<FakeHandoff | null>);
   } = {},
-): FleetAdapter & {
-  isLiveCalls: AgentSessionAttachment[];
-  handoffCalls: AgentSessionAttachment[];
-  /** The signal each readTerminalHandoff call received — undefined means the caller forwarded none. */
+): {
+  registry: AgentSessionRuntimeRegistry;
+  isLiveCalls: AgentSessionRef[];
+  handoffCalls: AgentSessionRef[];
+  /** The signal each handoff read received — undefined means the caller forwarded none. */
   handoffSignals: (AbortSignal | undefined)[];
 } {
-  const isLiveCalls: AgentSessionAttachment[] = [];
-  const handoffCalls: AgentSessionAttachment[] = [];
+  const isLiveCalls: AgentSessionRef[] = [];
+  const handoffCalls: AgentSessionRef[] = [];
   const handoffSignals: (AbortSignal | undefined)[] = [];
-  return {
-    isLiveCalls,
-    handoffCalls,
-    handoffSignals,
-    async isLive(a) {
-      isLiveCalls.push(a);
-      if (typeof opts.isLive === "function") return opts.isLive(a);
-      return opts.isLive ?? false;
+  const registry = new AgentSessionRuntimeRegistry();
+  registry.register({
+    id: RUNTIME_ID,
+    provider: "anthropic-claude-code",
+    async inspect(ref, callOpts) {
+      isLiveCalls.push(ref);
+      const live = typeof opts.isLive === "function" ? await opts.isLive() : (opts.isLive ?? false);
+      // Alive and nothing else: a liveness bit cannot tell working from
+      // waiting, so claiming a state here would let the probe clobber one the
+      // host stated explicitly.
+      if (live) return { alive: true };
+      handoffCalls.push(ref);
+      handoffSignals.push(callOpts?.signal);
+      const handoff = typeof opts.handoff === "function" ? await opts.handoff() : (opts.handoff ?? null);
+      if (!handoff) return { alive: false };
+      return { state: "completed", alive: false, finalResponse: handoff.text, lastEventAt: handoff.resultAt };
     },
-    async readTerminalHandoff(a, signal) {
-      handoffCalls.push(a);
-      handoffSignals.push(signal);
-      if (typeof opts.handoff === "function") return opts.handoff(a);
-      return opts.handoff ?? null;
-    },
-  };
+  });
+  return { registry, isLiveCalls, handoffCalls, handoffSignals };
 }
 
 function deferred<T>() {
@@ -279,9 +308,9 @@ describe("Fleet attachment transitions", () => {
   });
 
   it("inspect with an explicit status never starts the background isLive probe at all", async () => {
-    const adapter = fakeFleetAdapter({ isLive: true });
+    const adapter = fakeRuntime({ isLive: true });
     const ctrl = fakeGateway();
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter.registry);
     const job = sessions.submitTask({
       task: "first",
       context: directiveBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
@@ -301,9 +330,9 @@ describe("Fleet attachment transitions", () => {
 
   it("an explicit needs_input status is never overwritten by an in-flight isLive probe from an EARLIER plain inspect", async () => {
     const { promise: isLivePromise, resolve: resolveIsLive } = deferred<boolean>();
-    const adapter = fakeFleetAdapter({ isLive: () => isLivePromise });
+    const adapter = fakeRuntime({ isLive: () => isLivePromise });
     const ctrl = fakeGateway();
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter.registry);
     const job = sessions.submitTask({
       task: "first",
       context: directiveBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
@@ -338,10 +367,10 @@ describe("Fleet attachment transitions", () => {
     expect(sessions.getAgentSessionAttachment(job.sessionKey)?.status).toBe("needs_input");
   });
 
-  it("no attachment triggers no adapter call at all (no global Fleet scan)", () => {
-    const adapter = fakeFleetAdapter();
+  it("no attachment triggers no runtime call at all (no global session scan)", () => {
+    const adapter = fakeRuntime();
     const ctrl = fakeGateway();
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter.registry);
     sessions.submitTask({ task: "no fleet involved here" });
     ctrl.finishChat("done", 0);
     expect(adapter.isLiveCalls).toHaveLength(0);
@@ -491,11 +520,11 @@ describe("Fleet attachment restart persistence", () => {
   });
 });
 
-describe("Fleet-adapter recovery order (tier 3, after parent live+transcript recovery gives up)", () => {
-  it("child completion does not prematurely finish an active parent — the adapter is never consulted while the job is running", async () => {
-    const adapter = fakeFleetAdapter({ handoff: { text: "child already finished", resultAt: Date.now() } });
+describe("attached-session recovery order (tier 3, after parent live+transcript recovery gives up)", () => {
+  it("child completion does not prematurely finish an active parent — the runtime is never consulted while the job is running", async () => {
+    const adapter = fakeRuntime({ handoff: { text: "child already finished", resultAt: Date.now() } });
     const ctrl = fakeGateway();
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter.registry);
     const job = sessions.submitTask({
       task: "do the thing",
       context: directiveBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
@@ -505,13 +534,13 @@ describe("Fleet-adapter recovery order (tier 3, after parent live+transcript rec
     expect(adapter.handoffCalls).toHaveLength(0);
   });
 
-  it("empty parent final + completed attached child recovers the child result with resultSource=fleet-transcript", async () => {
+  it("empty parent final + completed attached child recovers the child result with resultSource=agent-session", async () => {
     // The handoff form computes resultAt lazily, at ADAPTER-CALL time — well
     // after job.startedAt — matching the real timing (the child produces its
     // answer sometime after the parent turn began, never before).
-    const adapter = fakeFleetAdapter({ handoff: async () => ({ text: "the child's real answer", resultAt: Date.now() }) });
+    const adapter = fakeRuntime({ handoff: async () => ({ text: "the child's real answer", resultAt: Date.now() }) });
     const ctrl = fakeGateway({ pollTranscriptForFinalText: async () => undefined });
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter.registry);
     const job = sessions.submitTask({
       task: "do the thing",
       context: directiveBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
@@ -523,8 +552,8 @@ describe("Fleet-adapter recovery order (tier 3, after parent live+transcript rec
     const recovered = sessions.getJob(job.jobId)!;
     expect(recovered.status).toBe("completed");
     expect(recovered.summary).toBe("the child's real answer");
-    expect(recovered.resultSource).toBe("fleet-transcript");
-    expect(recovered.terminalReason).toBe("fleet-transcript-recovery");
+    expect(recovered.resultSource).toBe("agent-session");
+    expect(recovered.terminalReason).toBe("agent-session-recovery");
 
     const attachment = sessions.getAgentSessionAttachment(job.sessionKey)!;
     expect(attachment.lastResult?.summary).toBe("the child's real answer");
@@ -533,9 +562,9 @@ describe("Fleet-adapter recovery order (tier 3, after parent live+transcript rec
 
   it("output is capped, with the durable transcript reference preserved on the attachment", async () => {
     const longText = "x".repeat(ATTACHMENT_RESULT_SUMMARY_MAX + 500);
-    const adapter = fakeFleetAdapter({ handoff: async () => ({ text: longText, resultAt: Date.now() }) });
+    const adapter = fakeRuntime({ handoff: async () => ({ text: longText, resultAt: Date.now() }) });
     const ctrl = fakeGateway({ pollTranscriptForFinalText: async () => undefined });
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter.registry);
     const job = sessions.submitTask({
       task: "do the thing",
       context: directiveBlock({ op: "attach", handle: "cf-foo", host: "workstation-1", worktree: "/w" }),
@@ -553,9 +582,9 @@ describe("Fleet-adapter recovery order (tier 3, after parent live+transcript rec
   });
 
   it("a still-live / not-yet-trusted child does not get synthesized into a fake completion", async () => {
-    const adapter = fakeFleetAdapter({ handoff: null });
+    const adapter = fakeRuntime({ handoff: null });
     const ctrl = fakeGateway({ pollTranscriptForFinalText: async () => undefined });
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter.registry);
     const job = sessions.submitTask({
       task: "do the thing",
       context: directiveBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
@@ -576,12 +605,12 @@ describe("Fleet-adapter recovery order (tier 3, after parent live+transcript rec
    * signal; the legacy claude-fleet fallback dropped it, so a timed-out read
    * left its local tmux and file work running with nobody waiting on it.
    */
-  it("forwards the recovery deadline's abort signal into the legacy adapter, and fires it on timeout", async () => {
+  it("forwards the recovery deadline's abort signal into the runtime, and fires it on timeout", async () => {
     vi.useFakeTimers();
     try {
-      const adapter = fakeFleetAdapter({ handoff: () => new Promise<FleetHandoff | null>(() => {}) });
+      const adapter = fakeRuntime({ handoff: () => new Promise<FakeHandoff | null>(() => {}) });
       const ctrl = fakeGateway({ pollTranscriptForFinalText: async () => undefined });
-      const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
+      const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter.registry);
       const job = sessions.submitTask({
         task: "do the thing",
         context: directiveBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
@@ -603,9 +632,9 @@ describe("Fleet-adapter recovery order (tier 3, after parent live+transcript rec
   });
 
   it("repeated recovery is idempotent — calling the fallback again with the same handoff doesn't change the outcome or duplicate lineage", async () => {
-    const adapter = fakeFleetAdapter({ handoff: async () => ({ text: "stable answer", resultAt: Date.now() }) });
+    const adapter = fakeRuntime({ handoff: async () => ({ text: "stable answer", resultAt: Date.now() }) });
     const ctrl = fakeGateway({ pollTranscriptForFinalText: async () => undefined });
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter.registry);
     const job = sessions.submitTask({
       task: "do the thing",
       context: directiveBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
@@ -621,21 +650,21 @@ describe("Fleet-adapter recovery order (tier 3, after parent live+transcript rec
     await sessions.waitForJob(job.jobId, 0, undefined, "wait", 1);
     const secondOutcome = sessions.getJob(job.jobId)!;
     expect(secondOutcome.summary).toBe(firstOutcome.summary);
-    expect(secondOutcome.resultSource).toBe("fleet-transcript");
+    expect(secondOutcome.resultSource).toBe("agent-session");
     expect(sessions.getAgentSessionLineage(job.sessionKey)).toHaveLength(1);
   });
 
-  it("late parent final safely replaces the provisional Fleet result", async () => {
-    const adapter = fakeFleetAdapter({ handoff: async () => ({ text: "child's provisional answer", resultAt: Date.now() }) });
+  it("late parent final safely replaces the provisional delegated result", async () => {
+    const adapter = fakeRuntime({ handoff: async () => ({ text: "child's provisional answer", resultAt: Date.now() }) });
     const ctrl = fakeGateway({ pollTranscriptForFinalText: async () => undefined });
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter.registry);
     const job = sessions.submitTask({
       task: "do the thing",
       context: directiveBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
     });
     ctrl.finishChat(NO_SUMMARY_SENTINEL, 0);
     await wait();
-    expect(sessions.getJob(job.jobId)?.resultSource).toBe("fleet-transcript");
+    expect(sessions.getJob(job.jobId)?.resultSource).toBe("agent-session");
 
     // Now the REAL parent transcript finally has the answer.
     ctrl.setPoll(async () => "the real parent answer, arrived late");
@@ -653,9 +682,9 @@ describe("Independent-review blocker fixes: delegated-turn boundary + stale-resu
     // resultAt is BEFORE the test even runs (let alone before job.startedAt),
     // simulating leftover output from a much earlier delegation.
     const staleResultAt = Date.now() - 60_000;
-    const adapter = fakeFleetAdapter({ handoff: async () => ({ text: "stale output from ages ago", resultAt: staleResultAt }) });
+    const adapter = fakeRuntime({ handoff: async () => ({ text: "stale output from ages ago", resultAt: staleResultAt }) });
     const ctrl = fakeGateway({ pollTranscriptForFinalText: async () => undefined });
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter.registry);
     const job = sessions.submitTask({
       task: "do the thing",
       context: directiveBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
@@ -670,9 +699,9 @@ describe("Independent-review blocker fixes: delegated-turn boundary + stale-resu
   });
 
   it("an attachment left current from an EARLIER delegated turn does not answer a LATER, unrelated turn on the same session", async () => {
-    const adapter = fakeFleetAdapter({ handoff: async () => ({ text: "answer to the FIRST delegated task", resultAt: Date.now() }) });
+    const adapter = fakeRuntime({ handoff: async () => ({ text: "answer to the FIRST delegated task", resultAt: Date.now() }) });
     const ctrl = fakeGateway({ pollTranscriptForFinalText: async () => undefined });
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter.registry);
 
     // Turn 1: attaches and delegates. Its own recovery correctly succeeds.
     const turn1 = sessions.submitTask({
@@ -681,7 +710,7 @@ describe("Independent-review blocker fixes: delegated-turn boundary + stale-resu
     });
     ctrl.finishChat(NO_SUMMARY_SENTINEL, 0);
     await wait();
-    expect(sessions.getJob(turn1.jobId)?.resultSource).toBe("fleet-transcript");
+    expect(sessions.getJob(turn1.jobId)?.resultSource).toBe("agent-session");
 
     // Turn 2: a completely different, unrelated task on the SAME session.
     // The host sends NO directive — the attachment is still "current" for
@@ -697,12 +726,12 @@ describe("Independent-review blocker fixes: delegated-turn boundary + stale-resu
   });
 
   it("needs_input stays actionable — a fresh, valid handoff with real output text is still refused while status is needs_input", async () => {
-    // The adapter genuinely has fresh, well-formed output — this is NOT a
+    // The runtime genuinely has fresh, well-formed output — this is NOT a
     // "nothing trustworthy yet" case. The guard must be the attachment's own
     // the host-reported status, not merely the absence of output.
-    const adapter = fakeFleetAdapter({ handoff: async () => ({ text: "here is some output, but I have a question", resultAt: Date.now() }) });
+    const adapter = fakeRuntime({ handoff: async () => ({ text: "here is some output, but I have a question", resultAt: Date.now() }) });
     const ctrl = fakeGateway({ pollTranscriptForFinalText: async () => undefined });
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter.registry);
     const job = sessions.submitTask({
       task: "do the thing",
       context: directiveBlock({ op: "attach", handle: "cf-foo", host: "workstation-1", status: "needs_input" }),
@@ -721,9 +750,9 @@ describe("Independent-review blocker fixes: delegated-turn boundary + stale-resu
   });
 
   it("a failed child's leftover transcript text is never treated as a trusted answer", async () => {
-    const adapter = fakeFleetAdapter({ handoff: async () => ({ text: "partial output before it crashed", resultAt: Date.now() }) });
+    const adapter = fakeRuntime({ handoff: async () => ({ text: "partial output before it crashed", resultAt: Date.now() }) });
     const ctrl = fakeGateway({ pollTranscriptForFinalText: async () => undefined });
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter.registry);
     const job = sessions.submitTask({
       task: "do the thing",
       context: directiveBlock({ op: "attach", handle: "cf-foo", host: "workstation-1", status: "failed" }),
@@ -740,9 +769,9 @@ describe("Independent-review blocker fixes: delegated-turn boundary + stale-resu
 describe("Independent-review blocker fixes: detach/replace races (identity compare-and-set)", () => {
   it("an async inspect liveness result that resolves AFTER a detach does not resurrect the detached record", async () => {
     const { promise: isLivePromise, resolve: resolveIsLive } = deferred<boolean>();
-    const adapter = fakeFleetAdapter({ isLive: () => isLivePromise });
+    const adapter = fakeRuntime({ isLive: () => isLivePromise });
     const ctrl = fakeGateway();
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter.registry);
     const job = sessions.submitTask({
       task: "first",
       context: directiveBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
@@ -787,15 +816,15 @@ describe("Independent-review blocker fixes: detach/replace races (identity compa
     // once the job is already terminal, which a replace CAN legitimately
     // race against.
     let handoffCallCount = 0;
-    const { promise: secondHandoffPromise, resolve: resolveSecondHandoff } = deferred<FleetHandoff | null>();
-    const adapter = fakeFleetAdapter({
+    const { promise: secondHandoffPromise, resolve: resolveSecondHandoff } = deferred<FakeHandoff | null>();
+    const adapter = fakeRuntime({
       handoff: () => {
         handoffCallCount += 1;
         return handoffCallCount === 1 ? Promise.resolve(null) : secondHandoffPromise;
       },
     });
     const ctrl = fakeGateway({ pollTranscriptForFinalText: async () => undefined });
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter.registry);
     const job = sessions.submitTask({
       task: "do the thing",
       context: directiveBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
@@ -845,15 +874,15 @@ describe("Independent-review blocker fixes: detach/replace races (identity compa
 
   it("a delayed handoff from an older turn is discarded when the same attachment continues into needs_input", async () => {
     let handoffCallCount = 0;
-    const { promise: handoffPromise, resolve: resolveHandoff } = deferred<FleetHandoff | null>();
-    const adapter = fakeFleetAdapter({
+    const { promise: handoffPromise, resolve: resolveHandoff } = deferred<FakeHandoff | null>();
+    const adapter = fakeRuntime({
       handoff: () => {
         handoffCallCount += 1;
         return handoffCallCount === 1 ? Promise.resolve(null) : handoffPromise;
       },
     });
     const ctrl = fakeGateway({ pollTranscriptForFinalText: async () => undefined });
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter.registry);
     const job = sessions.submitTask({
       task: "do the thing",
       context: directiveBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
@@ -966,7 +995,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
   it("attaches straight from the runtime's own neutral marker, with no directive dialect", () => {
     const hostRuntime = fakeHostRuntime();
     const ctrl = fakeGateway();
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, hostRuntime.registry);
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, hostRuntime.registry);
     const job = sessions.submitTask({ task: "ship the thing", context: `Delegated.\n${RUNTIME_MARKER}` });
 
     const attachment = sessions.getAgentSessionAttachment(job.sessionKey)!;
@@ -987,7 +1016,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
   it("never lets the raw marker reach the agent's prompt", () => {
     const hostRuntime = fakeHostRuntime();
     const ctrl = fakeGateway();
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, hostRuntime.registry);
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, hostRuntime.registry);
     const job = sessions.submitTask({ task: "ship the thing", context: `Before.\n${RUNTIME_MARKER}\nAfter.` });
     expect(sessions.getJob(job.jobId)?.prompt.context).toBe("Before.\n\nAfter.");
   });
@@ -995,7 +1024,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
   it("re-stating the same session on a later turn refreshes it instead of growing the lineage", async () => {
     const hostRuntime = fakeHostRuntime();
     const ctrl = fakeGateway();
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, hostRuntime.registry);
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, hostRuntime.registry);
     const first = sessions.submitTask({ task: "start", context: RUNTIME_MARKER });
     const attachedAt = sessions.getAgentSessionAttachment(first.sessionKey)!.attachedAt;
     ctrl.finishChat("first turn done", 0);
@@ -1030,7 +1059,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
   it("a different session on the same runtime still replaces, preserving lineage", async () => {
     const hostRuntime = fakeHostRuntime();
     const ctrl = fakeGateway();
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, hostRuntime.registry);
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, hostRuntime.registry);
     const job = sessions.submitTask({ task: "start", context: RUNTIME_MARKER });
     ctrl.finishChat("first turn done", 0);
     await wait();
@@ -1054,12 +1083,12 @@ describe("managed agent sessions on a host-registered runtime", () => {
     const store = new FakeAttachmentStore();
     const hostRuntime = fakeHostRuntime();
     const first = fakeGateway();
-    const sessionsA = new SessionManager(first.gateway, "main", undefined, store, undefined, hostRuntime.registry);
+    const sessionsA = new SessionManager(first.gateway, "main", undefined, store, hostRuntime.registry);
     const job = sessionsA.submitTask({ task: "ship it", context: RUNTIME_MARKER });
 
     // A brand-new manager over the same store, as after a process restart.
     const second = fakeGateway();
-    const sessionsB = new SessionManager(second.gateway, "main", undefined, store, undefined, hostRuntime.registry);
+    const sessionsB = new SessionManager(second.gateway, "main", undefined, store, hostRuntime.registry);
     expect(sessionsB.getAgentSessionAttachment(job.sessionKey)).toMatchObject({
       runtime: "example-runtime",
       provider: "anthropic-claude-code",
@@ -1081,7 +1110,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
       }),
     });
     const ctrl = fakeGateway();
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, hostRuntime.registry);
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, hostRuntime.registry);
 
     // A session that never attached must not produce a single runtime call.
     const unattached = sessions.submitTask({ task: "unrelated work" });
@@ -1123,7 +1152,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
   it("delivers a follow-up turn through the runtime's continue callback", async () => {
     const hostRuntime = fakeHostRuntime({ onContinue: async () => ({ state: "running", latestResponse: "on it" }) });
     const ctrl = fakeGateway();
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, hostRuntime.registry);
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, hostRuntime.registry);
     const job = sessions.submitTask({ task: "ship it", context: RUNTIME_MARKER });
     ctrl.finishChat("done", 0);
     await wait();
@@ -1144,7 +1173,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
   it("reports a precise unsupported_operation instead of failing the task", async () => {
     const hostRuntime = fakeHostRuntime(); // inspect only — no continue callback registered
     const ctrl = fakeGateway();
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, hostRuntime.registry);
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, hostRuntime.registry);
     const job = sessions.submitTask({ task: "ship it", context: RUNTIME_MARKER });
     ctrl.finishChat("done", 0);
     await wait();
@@ -1184,7 +1213,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
   it("returns undefined rather than reaching for anything when nothing is attached", async () => {
     const hostRuntime = fakeHostRuntime();
     const ctrl = fakeGateway();
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, hostRuntime.registry);
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, hostRuntime.registry);
     const job = sessions.submitTask({ task: "no delegation here" });
     expect(await sessions.runAgentSessionOp(job.sessionKey, { op: "inspect" })).toBeUndefined();
     expect(hostRuntime.inspectCalls).toHaveLength(0);
@@ -1200,7 +1229,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
       }),
     });
     const ctrl = fakeGateway({ pollTranscriptForFinalText: async () => undefined });
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, hostRuntime.registry);
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, hostRuntime.registry);
     const job = sessions.submitTask({ task: "ship it", context: RUNTIME_MARKER });
 
     ctrl.finishChat(NO_SUMMARY_SENTINEL, 0);
@@ -1209,9 +1238,9 @@ describe("managed agent sessions on a host-registered runtime", () => {
     const recovered = sessions.getJob(job.jobId)!;
     expect(recovered.status).toBe("completed");
     expect(recovered.summary).toBe("the managed session's real answer");
-    // NOT "fleet-transcript": that value is a specific claim about provenance
-    // (a Claude Code transcript read off disk) that an arbitrary runtime's
-    // reply does not support. See ResultSource.
+    // The only delegated provenance value there is. Core does not restate a
+    // particular runtime's evidentiary claim — the record already names WHICH
+    // runtime answered, which is more precise. See ResultSource.
     expect(recovered.resultSource).toBe("agent-session");
     expect(recovered.terminalReason).toBe("agent-session-recovery");
     const attachment = sessions.getAgentSessionAttachment(job.sessionKey)!;
@@ -1239,7 +1268,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
         }),
       });
       const ctrl = fakeGateway({ pollTranscriptForFinalText: async () => undefined });
-      const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, hostRuntime.registry);
+      const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, hostRuntime.registry);
       const job = sessions.submitTask({
         task: "ship it",
         // The marker itself reports the blocked state, which is exactly how a
@@ -1273,7 +1302,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
   it("leaves an ordinary empty turn exactly as it was — sentinel summary, unchanged reason", async () => {
     const hostRuntime = fakeHostRuntime({ inspect: async () => ({ state: "running" }) });
     const ctrl = fakeGateway({ pollTranscriptForFinalText: async () => undefined });
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, hostRuntime.registry);
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, hostRuntime.registry);
     const job = sessions.submitTask({ task: "ship it", context: RUNTIME_MARKER });
     ctrl.finishChat(NO_SUMMARY_SENTINEL, 0);
     await wait();
@@ -1289,7 +1318,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
     let state = "running";
     const hostRuntime = fakeHostRuntime({ inspect: async () => ({ state }) });
     const ctrl = fakeGateway({ pollTranscriptForFinalText: async () => undefined });
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, hostRuntime.registry);
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, hostRuntime.registry);
     const job = sessions.submitTask({ task: "ship it", context: RUNTIME_MARKER });
     ctrl.finishChat(NO_SUMMARY_SENTINEL, 0);
     await wait();
@@ -1314,7 +1343,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
   it("does not blame this turn for a block on a delegation an EARLIER turn owned", async () => {
     const ctrl = fakeGateway({ pollTranscriptForFinalText: async () => undefined });
     const hostRuntime = fakeHostRuntime({ inspect: async () => ({ state: "needs_input" }) });
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, hostRuntime.registry);
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, hostRuntime.registry);
     const turn1 = sessions.submitTask({
       task: "delegate it",
       context: agentSessionMarker({ runtime: "example-runtime", sessionId: "thr-abc123", host: "workstation-1", state: "needs_input" }),
@@ -1338,7 +1367,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
       inspect: async () => ({ state: "completed", finalResponse: "an answer from who knows when" }),
     });
     const ctrl = fakeGateway({ pollTranscriptForFinalText: async () => undefined });
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, hostRuntime.registry);
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, hostRuntime.registry);
     const job = sessions.submitTask({ task: "ship it", context: RUNTIME_MARKER });
     ctrl.finishChat(NO_SUMMARY_SENTINEL, 0);
     await wait();
@@ -1352,7 +1381,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
       inspect: async () => ({ state: "completed", finalResponse: "an answer from a previous delegation", lastEventAt: 1_000 }),
     });
     const ctrl = fakeGateway({ pollTranscriptForFinalText: async () => undefined });
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, hostRuntime.registry);
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, hostRuntime.registry);
     const job = sessions.submitTask({ task: "ship it", context: RUNTIME_MARKER });
     ctrl.finishChat(NO_SUMMARY_SENTINEL, 0);
     await wait();
@@ -1364,7 +1393,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
     const gate = deferred<AgentSessionObservation>();
     const hostRuntime = fakeHostRuntime({ inspect: () => gate.promise });
     const ctrl = fakeGateway();
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, hostRuntime.registry);
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, hostRuntime.registry);
     const job = sessions.submitTask({ task: "ship it", context: RUNTIME_MARKER });
 
     // A read for THIS turn goes out and hangs.
@@ -1398,7 +1427,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
     let call = 0;
     const hostRuntime = fakeHostRuntime({ inspect: () => gates[call++].promise });
     const ctrl = fakeGateway();
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, hostRuntime.registry);
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, hostRuntime.registry);
     const job = sessions.submitTask({ task: "ship it", context: RUNTIME_MARKER });
 
     const older = sessions.runAgentSessionOp(job.sessionKey, { op: "inspect" });
@@ -1423,7 +1452,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
     const gate = deferred<AgentSessionObservation>();
     const hostRuntime = fakeHostRuntime({ inspect: () => gate.promise });
     const ctrl = fakeGateway();
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, hostRuntime.registry);
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, hostRuntime.registry);
     const job = sessions.submitTask({ task: "ship it", context: RUNTIME_MARKER });
 
     const inFlight = sessions.runAgentSessionOp(job.sessionKey, { op: "inspect" });
@@ -1457,7 +1486,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
     const gate = deferred<AgentSessionObservation>();
     const hostRuntime = fakeHostRuntime({ inspect: () => gate.promise });
     const ctrl = fakeGateway();
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, hostRuntime.registry);
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, hostRuntime.registry);
     const job = sessions.submitTask({ task: "ship it", context: RUNTIME_MARKER });
     expect(sessions.getAgentSessionAttachment(job.sessionKey)?.status).toBe("running");
 
@@ -1490,7 +1519,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
   it("asks the runtime to stop the session only when the detach says so, and detaches locally either way", async () => {
     const quiet = fakeHostRuntime({ withDetach: true });
     const ctrl = fakeGateway();
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, quiet.registry);
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, quiet.registry);
     const job = sessions.submitTask({ task: "ship it", context: RUNTIME_MARKER });
     ctrl.finishChat("done", 0);
     await wait();
@@ -1513,7 +1542,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
       },
     });
     const ctrl = fakeGateway();
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, hostRuntime.registry);
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, hostRuntime.registry);
     const job = sessions.submitTask({ task: "ship it", context: RUNTIME_MARKER });
     ctrl.finishChat("done", 0);
     await wait();
@@ -1531,51 +1560,26 @@ describe("managed agent sessions on a host-registered runtime", () => {
     expect(sessions.getAgentSessionAttachment(job.sessionKey)).toBeUndefined();
   });
 
-  it("keeps claude-fleet on the built-in adapter, and reports precisely what that adapter cannot do", async () => {
-    const adapter = fakeFleetAdapter({ isLive: true });
+  /**
+   * The counterpart of the two tests deleted here on 2026-08-18, which
+   * asserted that claude-fleet fell back to a built-in tmux adapter and that a
+   * host-registered runtime beat it. There is no built-in adapter to beat any
+   * more: an id nobody registered has nobody to ask, and says so precisely
+   * rather than failing.
+   */
+  it("an attachment naming a runtime nobody registered reports unknown_runtime, not an error", async () => {
     const ctrl = fakeGateway();
-    // A registry is present but knows nothing about claude-fleet — the
-    // explicit tmux fallback still answers for it.
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter, fakeHostRuntime().registry);
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, fakeHostRuntime().registry);
     const job = sessions.submitTask({
       task: "do the thing",
-      context: directiveBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
+      context: directiveBlock({ op: "attach", runtime: "nobody-registered-this", handle: "cf-foo", host: "workstation-1" }),
     });
 
     const inspected = await sessions.runAgentSessionOp(job.sessionKey, { op: "inspect" });
-    expect(adapter.isLiveCalls.map((a) => a.handle)).toEqual(["cf-foo"]);
-    // Liveness only: the adapter deliberately claims no state, so a bare tmux
-    // bit can only promote the uninformative initial "starting".
-    expect(inspected?.state).toBe("unknown");
-    expect(sessions.getAgentSessionAttachment(job.sessionKey)?.status).toBe("running");
-
-    const nudged = await sessions.runAgentSessionOp(job.sessionKey, { op: "continue", prompt: "keep going" });
-    expect(nudged?.error).toMatchObject({ code: "unsupported_operation" });
-  });
-
-  it("lets a host-registered claude-fleet runtime win over the built-in adapter", async () => {
-    const adapter = fakeFleetAdapter({ isLive: true });
-    const registry = new AgentSessionRuntimeRegistry();
-    const seen: AgentSessionRef[] = [];
-    registry.register({
-      id: "claude-fleet",
-      provider: "anthropic-claude-code",
-      inspect: async (ref) => {
-        seen.push(ref);
-        return { state: "idle" };
-      },
-    });
-    const ctrl = fakeGateway();
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter, registry);
-    const job = sessions.submitTask({
-      task: "do the thing",
-      context: directiveBlock({ op: "attach", handle: "cf-foo", host: "workstation-1" }),
-    });
-
-    await sessions.runAgentSessionOp(job.sessionKey, { op: "inspect" });
-    expect(seen.map((r) => r.sessionId)).toEqual(["cf-foo"]);
-    expect(adapter.isLiveCalls).toHaveLength(0);
-    expect(sessions.getAgentSessionAttachment(job.sessionKey)?.status).toBe("idle");
+    expect(inspected?.error).toMatchObject({ code: "unknown_runtime" });
+    // The record itself is untouched — a read that could not happen says
+    // nothing about the session.
+    expect(sessions.getAgentSessionAttachment(job.sessionKey)?.runtime).toBe("nobody-registered-this");
   });
 
   /**
@@ -1603,7 +1607,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
     it("lets the first post-restart observation land instead of refusing it", async () => {
       const hostRuntime = fakeHostRuntime({ inspect: async () => ({ state: "needs_input", latestResponse: "which branch?" }) });
       const store = new FakeAttachmentStore([persistedState("sess-restart")]);
-      const sessions = new SessionManager(fakeGateway().gateway, "main", undefined, store, undefined, hostRuntime.registry);
+      const sessions = new SessionManager(fakeGateway().gateway, "main", undefined, store, hostRuntime.registry);
 
       await sessions.runAgentSessionOp("sess-restart", { op: "inspect" });
 
@@ -1640,7 +1644,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
         },
       ]);
       const hostRuntime = fakeHostRuntime({ inspect: async () => ({ state: "idle" }) });
-      const sessions = new SessionManager(fakeGateway().gateway, "main", undefined, store, undefined, hostRuntime.registry);
+      const sessions = new SessionManager(fakeGateway().gateway, "main", undefined, store, hostRuntime.registry);
 
       await sessions.runAgentSessionOp("sess-lineage", { op: "inspect" });
       expect(sessions.getAgentSessionAttachment("sess-lineage")?.observationToken).toBeGreaterThan(99);
@@ -1656,7 +1660,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
       });
       const store = new FakeAttachmentStore([persistedState("sess-restart")]);
       const ctrl = fakeGateway({ pollTranscriptForFinalText: async () => undefined });
-      const sessions = new SessionManager(ctrl.gateway, "main", undefined, store, undefined, hostRuntime.registry);
+      const sessions = new SessionManager(ctrl.gateway, "main", undefined, store, hostRuntime.registry);
 
       // The new turn re-states the attachment (the host passes the marker every
       // turn), which is what delegates it to THIS job. No `state` in the
@@ -1682,7 +1686,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
       // Never resolves, and never rejects — the shape a hung HTTP call takes.
       const hostRuntime = fakeHostRuntime({ inspect: () => new Promise<never>(() => {}) });
       const ctrl = fakeGateway({ pollTranscriptForFinalText: async () => undefined });
-      const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, hostRuntime.registry);
+      const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, hostRuntime.registry);
       const job = sessions.submitTask({ task: "ship it", context: RUNTIME_MARKER });
 
       ctrl.finishChat(NO_SUMMARY_SENTINEL, 0);
@@ -1715,7 +1719,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
       }),
     });
     const ctrl = fakeGateway();
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, hostRuntime.registry);
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, hostRuntime.registry);
     const turn1 = sessions.submitTask({ task: "ship it", context: RUNTIME_MARKER });
     await sessions.runAgentSessionOp(turn1.sessionKey, { op: "inspect" });
 
@@ -1755,7 +1759,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
       inspect: async () => ({ state: "idle", finalResponse: "turn one's answer", lastEventAt: Date.now() }),
     });
     const ctrl = fakeGateway();
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, hostRuntime.registry);
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, hostRuntime.registry);
     const turn1 = sessions.submitTask({ task: "ship it", context: RUNTIME_MARKER });
     await sessions.runAgentSessionOp(turn1.sessionKey, { op: "inspect" });
     expect(sessions.getAgentSessionAttachment(turn1.sessionKey)?.lastResult).toBeDefined();
@@ -1778,7 +1782,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
   it("takes the provider from the registered runtime, not from what the marker claimed", async () => {
     const hostRuntime = fakeHostRuntime({ inspect: async () => ({ state: "running" }) });
     const ctrl = fakeGateway();
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, hostRuntime.registry);
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, hostRuntime.registry);
     const job = sessions.submitTask({
       task: "ship it",
       context: agentSessionMarker({
@@ -1799,7 +1803,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
   it("exposes registered runtimes for wiring assertions without exposing any session", () => {
     const hostRuntime = fakeHostRuntime();
     const ctrl = fakeGateway();
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, undefined, hostRuntime.registry);
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, hostRuntime.registry);
     expect(sessions.hasAgentSessionRuntime("example-runtime")).toBe(true);
     expect(sessions.hasAgentSessionRuntime("some-other-runtime")).toBe(false);
     expect(new SessionManager(fakeGateway().gateway).hasAgentSessionRuntime("example-runtime")).toBe(false);

@@ -36,13 +36,14 @@ const DIRECTIVE_RE = /\[\[clawconnect:agent-session\]\]([\s\S]*?)\[\[\/clawconne
 const MARKER_RE = /<agent-session>\s*(\{[\s\S]*?\})\s*<\/agent-session>/;
 
 /**
- * `handle` (and, transitively, `providerSessionId`) end up in filesystem
- * lookups in fleet-adapter.ts (`~/.claude-fleet/<handle>/meta.json`). Reject
- * anything that isn't a plain path segment here, at the parse boundary, so a
- * malformed or hostile directive can never reach an adapter in the first
- * place — the adapter re-validates independently as defense in depth. The
- * same check applies to a marker's `sessionId`, which is the same value under
- * the neutral name.
+ * `handle` (and, transitively, `providerSessionId`) are handed to a host's
+ * runtime module, which may well turn them into a filesystem path (the
+ * local-tmux example does). Reject anything that isn't a plain path segment
+ * here, at the parse boundary, so a malformed or hostile directive never
+ * reaches a runtime in the first place — a module is expected to re-validate
+ * independently as defense in depth, and the shipped example does. The same
+ * check applies to a marker's `sessionId`, which is the same value under the
+ * neutral name.
  */
 const SAFE_HANDLE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
@@ -78,8 +79,13 @@ function validateDirective(value: unknown): AgentSessionDirective | undefined {
     // out an attach by hand knows which machine it meant. The neutral marker
     // path is what may legitimately omit it (see parseAgentSessionMarker).
     if (!host) return undefined;
+    // Required, and rejected rather than defaulted when absent: ClawConnect
+    // ships no runtime, so there is nothing to fall back to. It defaulted to
+    // "claude-fleet" until 2026-08-18, which is how a hardcoded runtime id
+    // survived in a layer whose whole claim is that it knows about none. The
+    // neutral marker has always required it — this makes the two agree.
     const runtime = asString(v.runtime);
-    if (runtime !== undefined && !isValidRuntimeId(runtime)) return undefined;
+    if (!runtime || !isValidRuntimeId(runtime)) return undefined;
     const reason = asString(v.reason);
     if (v.op === "replace" && !reason) return undefined;
     const providerSessionId = asString(v.providerSessionId);
@@ -87,7 +93,7 @@ function validateDirective(value: unknown): AgentSessionDirective | undefined {
     const metadata = coerceMetadata(v.metadata);
     return {
       op: v.op,
-      ...(runtime ? { runtime } : {}),
+      runtime,
       provider: asString(v.provider),
       handle,
       host,

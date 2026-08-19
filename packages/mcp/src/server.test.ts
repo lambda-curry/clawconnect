@@ -14,7 +14,7 @@ import { createMcpHandler } from "@modelcontextprotocol/server";
 import { createMcpServer, defaultFormatCheckTask } from "./server.ts";
 import { serveClawConnectStdio } from "./stdio.ts";
 import { AgentSessionRuntimeRegistry } from "@clawconnect/core";
-import type { AgentRegistry, CheckTaskResult, FleetAdapter, JobSnapshot } from "@clawconnect/core";
+import type { AgentRegistry, CheckTaskResult, JobSnapshot } from "@clawconnect/core";
 
 /**
  * Generic MCP compatibility fixtures for the stdio server (Claude Code,
@@ -620,26 +620,7 @@ describe("a terminal turn whose delegated session is waiting on a human", () => 
   });
 });
 
-describe("production entrypoint wiring — FleetAdapter", () => {
-  /**
-   * Independent-review blocker 1: recovery tier 3 (see docs/architecture/
-   * 2026-08-02-managed-fleet-attachment-plan.md) is only reachable if a real
-   * FleetAdapter is actually injected in production, not just implemented and
-   * left unwired. Proves createMcpServer() does this by default, without
-   * spinning up a real recovery scenario — SessionManager.hasFleetAdapter()
-   * is the dedicated, minimal surface for exactly this assertion.
-   */
-  it("createMcpServer wires a real FleetAdapter into every agent's SessionManager by default", () => {
-    const { pool } = createMcpServer({ registry: fakeRegistry() });
-    expect(pool.forAgent("test-agent").sessions.hasFleetAdapter()).toBe(true);
-  });
-
-  it("createMcpServer lets a caller override the FleetAdapter (e.g. a test injecting a fake)", () => {
-    const fake: FleetAdapter = { isLive: async () => false, readTerminalHandoff: async () => null };
-    const { pool } = createMcpServer({ registry: fakeRegistry(), fleetAdapter: fake });
-    expect(pool.forAgent("test-agent").sessions.hasFleetAdapter()).toBe(true);
-  });
-
+describe("production entrypoint wiring — agent-session runtimes", () => {
   /**
    * Same failure mode, one layer up: a registered runtime nothing can
    * dispatch to looks exactly like a working integration until a delegation
@@ -658,11 +639,17 @@ describe("production entrypoint wiring — FleetAdapter", () => {
     );
   });
 
-  it("createMcpServer leaves claude-fleet the only reachable runtime when no registry is supplied", () => {
+  /**
+   * The default install registers NOTHING. Core ships no runtime of its own —
+   * an entrypoint that quietly constructed one would make that claim false,
+   * which is exactly what the built-in tmux adapter did until it moved out to
+   * examples/local-tmux-runtime.
+   */
+  it("createMcpServer registers no runtime at all when no registry is supplied", () => {
     const { pool } = createMcpServer({ registry: fakeRegistry() });
-    expect(pool.forAgent("test-agent").sessions.hasAgentSessionRuntime("example-runtime")).toBe(
-      false,
-    );
+    const sessions = pool.forAgent("test-agent").sessions;
+    expect(sessions.hasAgentSessionRuntime("example-runtime")).toBe(false);
+    expect(sessions.hasAgentSessionRuntime("claude-fleet")).toBe(false);
   });
 
   /**
