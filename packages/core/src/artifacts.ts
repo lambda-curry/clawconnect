@@ -74,7 +74,7 @@ export function processEvent(artifacts: Artifacts, event: GatewayEvent) {
 
 const PR_URL = /https:\/\/github\.com\/[^\s)]+\/pull\/\d+/;
 
-const COMMIT_URL = /https:\/\/github\.com\/[^\s/]+\/[^\s/]+\/commit\/([0-9a-f]{7,40})\b/;
+const COMMIT_URL = /https:\/\/github\.com\/[^\s/]+\/[^\s/]+\/commit\/([0-9a-f]{7,40})\b/g;
 
 /**
  * A hex run is only SHA-shaped when it stands alone. `\b` does not establish
@@ -125,14 +125,37 @@ function setInferred(
   artifacts.provenance = { ...artifacts.provenance, [field]: provenance };
 }
 
+/**
+ * Is the SHA at `at` introduced as something the agent was HANDED rather than
+ * something it produced?
+ *
+ * One function, deliberately called from both branches below. The rejection
+ * started life inline on the bare-hex branch only, while the commit-URL branch
+ * returned above it — so a URL introduced by "expected head" was recorded as a
+ * commit the job made, which is the exact defect this file exists to fix,
+ * arriving through the other door. A guard that has to be remembered in two
+ * places is a guard that will be forgotten in one.
+ */
+function isRestatedInput(summary: string, at: number): boolean {
+  return COMMIT_INPUT_MARKER.test(summary.slice(0, at));
+}
+
 function findCommitSha(summary: string): string | undefined {
-  const urlMatch = summary.match(COMMIT_URL);
-  if (urlMatch) return urlMatch[1];
+  // A commit URL is evidence that a commit EXISTS. It is never evidence that
+  // THIS job produced it: "expected head <url>" restates a precondition
+  // exactly the way "expected head <sha>" does, and both must be rejected.
+  //
+  // Iterated rather than first-match-wins so a summary that names an input
+  // commit before the real one — "base <url>, committed as <url>" — still
+  // finds the real one instead of giving up at the input.
+  for (const match of summary.matchAll(COMMIT_URL)) {
+    if (isRestatedInput(summary, match.index)) continue;
+    return match[1];
+  }
 
   for (const match of summary.matchAll(HEX_RUN)) {
-    const before = summary.slice(0, match.index);
-    if (!COMMIT_CUE.test(before)) continue;
-    if (COMMIT_INPUT_MARKER.test(before)) continue;
+    if (!COMMIT_CUE.test(summary.slice(0, match.index))) continue;
+    if (isRestatedInput(summary, match.index)) continue;
     return match[0];
   }
   return undefined;
