@@ -210,9 +210,12 @@ export interface CreateMcpServerOptions {
    * Deliberately NOT defaulted here, for the same reason attachmentStoreDir
    * is not: this factory is what tests and embedders construct, and a default
    * would have them writing files as a side effect of construction. The
-   * shipped `clawconnect-mcp` bin passes one. Without it, `payload` is
-   * accepted and silently produces no file — which is why the bin, not this
-   * factory, is the deployed path.
+   * shipped `clawconnect-mcp` bin passes one — that is the deployed path.
+   *
+   * Without it, a run_task carrying a `payload` is REFUSED rather than
+   * dispatched without one: accepting the argument and silently producing no
+   * file is the same failure-rendered-as-a-state the payload channel exists to
+   * prevent. Tasks that pass no payload are unaffected.
    */
   payloadDir?: string;
   /**

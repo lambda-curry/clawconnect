@@ -111,18 +111,99 @@ describe("an opaque payload never enters the agent's instruction stream", () => 
     expect(withPayload.messages[0].startsWith(`${withoutPayload.messages[0]}\n\n---\n\n`)).toBe(true);
   });
 
-  it("dispatches without a payload path rather than failing when the store cannot write", () => {
-    const { gateway, messages } = recordingGateway();
-    // A file where the directory should be: mkdir fails, so does the write.
-    const dir = tmpDir();
-    const blocked = join(dir, "not-a-directory");
-    writeFileSync(blocked, "");
-    const sessions = new SessionManager(gateway, "main", undefined, undefined, undefined, new FilePayloadStore(blocked));
+});
 
-    const job = sessions.submitTask({ task: "still has to run", payload: "blob" });
+/**
+ * A write failure and a sweep failure are opposite cases, and collapsing them
+ * is how this channel would reintroduce the exact defect it exists to fix.
+ *
+ * A SWEEP is not load-bearing: nobody asked for it, nothing references its
+ * result, and it must never block a dispatch. A WRITE is load-bearing BY
+ * CONSTRUCTION — the caller explicitly passed a payload, and the task text
+ * routinely names it — so a dropped write dispatches a task that references
+ * data the agent cannot find, indistinguishable from a task that never had a
+ * payload. A caller that gets an error retries; an agent handed a
+ * payload-shaped task with no payload flounders, and nothing anywhere says
+ * why.
+ */
+describe("a payload that could not be stored fails the dispatch", () => {
+  /** A payload directory that can never be created: a plain FILE sits where its parent must be. */
+  function unwritableStore(): FilePayloadStore {
+    const blocked = join(tmpDir(), "not-a-directory");
+    writeFileSync(blocked, "");
+    return new FilePayloadStore(join(blocked, "payloads"));
+  }
+
+  it("refuses the task, naming the payload as the cause, and dispatches nothing", () => {
+    const { gateway, messages } = recordingGateway();
+    const sessions = new SessionManager(gateway, "main", undefined, undefined, undefined, unwritableStore());
+
+    const job = sessions.submitTask({ task: "hand the brief onward", payload: MANAGER_BRIEF });
+
+    expect(job.status).toBe("error");
+    expect(job.error).toMatch(/payload/i);
+    expect(job.errorInfo?.message).toMatch(/payload/i);
+    // The underlying cause survives into the message, or the operator is left
+    // guessing between "no permission" and "no such directory".
+    expect(job.error).toMatch(/ENOTDIR|ENOENT|EEXIST|not a directory/i);
+    expect(job.errorInfo?.suggestedRecovery).toMatch(/retry/i);
+    // Nothing was sent upstream: the agent never sees a task whose payload
+    // does not exist.
+    expect(messages).toEqual([]);
+  });
+
+  it("leaves no half-created job — the session gains no running task and nothing is persisted", () => {
+    const { gateway } = recordingGateway();
+    const saved: unknown[][] = [];
+    const store = { load: () => [], save: (jobs: unknown[]) => saved.push(jobs) };
+    const sessions = new SessionManager(gateway, "main", store, undefined, undefined, unwritableStore());
+
+    const job = sessions.submitTask({ task: "hand the brief onward", payload: MANAGER_BRIEF });
+
+    expect(job.status).toBe("error");
+    expect(sessions.getLatestJobForSession(job.sessionKey)).toBeUndefined();
+    expect(sessions.listSessions()).toEqual([]);
+    // persistActiveJobs is a whole-map overwrite; a rejection must not trigger
+    // one, exactly as a "session busy" rejection does not.
+    expect(saved).toEqual([]);
+  });
+
+  it("refuses just as loudly when a payload is passed but no payload store is wired at all", () => {
+    const { gateway, messages } = recordingGateway();
+    // The stdio factory does not default a payload directory. Accepting the
+    // argument and silently producing no file is the same silent degradation
+    // as a failed write, so it gets the same answer.
+    const sessions = new SessionManager(gateway, "main");
+
+    const job = sessions.submitTask({ task: "hand the brief onward", payload: MANAGER_BRIEF });
+    expect(job.status).toBe("error");
+    expect(job.error).toMatch(/payload/i);
+    expect(messages).toEqual([]);
+  });
+
+  it("run_task surfaces the refusal as an error rather than a jobId", () => {
+    const pool = new GatewayPool(singleAgentRegistry(), undefined, undefined, undefined, unwritableStore());
+    // The same shape a "session busy" rejection takes: submitTask returns a
+    // terminal error job and runTask turns it into a thrown error, which the
+    // capability layer renders as an isError result.
+    expect(() => runTask(pool, { task: "hand it onward", payload: MANAGER_BRIEF })).toThrow(/payload/i);
+  });
+
+  it("a broken payload directory does not break ordinary tasks that pass no payload", () => {
+    const { gateway, messages } = recordingGateway();
+    const sessions = new SessionManager(gateway, "main", undefined, undefined, undefined, unwritableStore());
+
+    const job = sessions.submitTask({ task: "an ordinary task" });
     expect(job.status).toBe("running");
-    expect(job.payloadPath).toBeUndefined();
-    expect(messages[0]).toContain("still has to run");
+    expect(messages[0]).toContain("an ordinary task");
+  });
+
+  it("a job id that fails the filename guard throws instead of quietly dropping the payload", () => {
+    const store = new FilePayloadStore(tmpDir());
+    // Job ids are minted internally, so this can only mean a bug in minting.
+    // Returning undefined here would hide that bug behind a missing payload.
+    expect(() => store.write("../escape", "blob")).toThrow(/job id/i);
+    expect(() => store.write("", "blob")).toThrow(/job id/i);
   });
 });
 
