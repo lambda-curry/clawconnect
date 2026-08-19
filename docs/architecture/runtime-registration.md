@@ -60,9 +60,13 @@ comma- or newline-separated specifiers — bare package names, absolute paths, o
 paths relative to the process cwd — imports each one, and never throws: a
 module that is missing, fails to import, exports no registrar, or throws while
 registering is logged and skipped, because every task that does not involve a
-delegation still works. Unset or registering nothing, `claude-fleet` stays the
-only reachable runtime and any other attachment reads back as a precise
-`unknown_runtime` result.
+delegation still works. Unset or registering nothing, NO runtime is reachable —
+core ships none — and every attachment reads back as a precise
+`unknown_runtime` result rather than an error.
+
+A worked example lives in `examples/local-tmux-runtime/`: plain JavaScript, no
+build step, no import from `@clawconnect/core`, loadable by the shipped binary
+exactly as documented above.
 
 **The outer adapter stays outside.** A host's own runtime bridge is one such
 module: it owns that runtime's CLI/API, pairing, project selection, and
@@ -90,9 +94,9 @@ Job persistence stays off there, unchanged: an in-flight job belongs to a live
 stdio connection that a restart ends anyway, while an attachment does not.
 
 The CLI is unchanged and wires neither half. It is a one-shot process that
-makes no managed-session claim — it never registers a runtime, never injects a
-FleetAdapter, and never surfaces an attachment — so there is nothing for it to
-persist between invocations.
+makes no managed-session claim — it never registers a runtime and never
+surfaces an attachment — so there is nothing for it to persist between
+invocations.
 
 ## Restart invariant
 

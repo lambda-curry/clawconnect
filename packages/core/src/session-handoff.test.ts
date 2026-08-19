@@ -19,11 +19,15 @@ describe("parseAgentSessionDirective", () => {
   it("parses an attach directive and strips it from the text", () => {
     const before = "Some preamble.\n\n";
     const after = "\n\nMore instructions.";
-    const text = before + block({ op: "attach", handle: "cf-foo", host: "workstation-1", providerSessionId: "prov-1", worktree: "/w" }) + after;
+    const text =
+      before +
+      block({ op: "attach", runtime: "example-runtime", handle: "cf-foo", host: "workstation-1", providerSessionId: "prov-1", worktree: "/w" }) +
+      after;
     const result = parseAgentSessionDirective(text);
     expect(result).toBeDefined();
     expect(result?.directive).toEqual({
       op: "attach",
+      runtime: "example-runtime",
       handle: "cf-foo",
       host: "workstation-1",
       providerSessionId: "prov-1",
@@ -35,10 +39,12 @@ describe("parseAgentSessionDirective", () => {
   });
 
   it("parses a replace directive requiring a reason", () => {
-    const withReason = parseAgentSessionDirective(block({ op: "replace", handle: "cf-bar", host: "workstation-1", reason: "stale worktree" }));
+    const withReason = parseAgentSessionDirective(
+      block({ op: "replace", runtime: "example-runtime", handle: "cf-bar", host: "workstation-1", reason: "stale worktree" }),
+    );
     expect(withReason?.directive).toMatchObject({ op: "replace", handle: "cf-bar", reason: "stale worktree" });
 
-    const withoutReason = parseAgentSessionDirective(block({ op: "replace", handle: "cf-bar", host: "workstation-1" }));
+    const withoutReason = parseAgentSessionDirective(block({ op: "replace", runtime: "example-runtime", handle: "cf-bar", host: "workstation-1" }));
     expect(withoutReason).toBeUndefined();
   });
 
@@ -89,7 +95,10 @@ describe("parseAgentSessionDirective", () => {
   });
 
   it("only consumes the first directive block when two are present", () => {
-    const text = block({ op: "attach", handle: "cf-first", host: "workstation-1" }) + " " + block({ op: "detach", reason: "second" });
+    const text =
+      block({ op: "attach", runtime: "example-runtime", handle: "cf-first", host: "workstation-1" }) +
+      " " +
+      block({ op: "detach", reason: "second" });
     const result = parseAgentSessionDirective(text);
     expect(result?.directive).toMatchObject({ op: "attach", handle: "cf-first" });
   });
@@ -115,13 +124,13 @@ describe("parseAgentSessionDirective", () => {
     });
   });
 
-  it("rejects a malformed runtime id, and defaults an omitted one at the session layer", () => {
+  it("rejects a malformed runtime id, and rejects an omitted one rather than defaulting it", () => {
     expect(parseAgentSessionDirective(block({ op: "attach", runtime: "../evil", handle: "cf-foo", host: "workstation-1" }))).toBeUndefined();
-    // Omitted here; session.ts fills in claude-fleet, the runtime this
-    // directive shape originally described.
-    expect(parseAgentSessionDirective(block({ op: "attach", handle: "cf-foo", host: "workstation-1" }))?.directive).not.toHaveProperty(
-      "runtime",
-    );
+    // Until 2026-08-18 an omitted runtime was filled in at the session layer
+    // with "claude-fleet". ClawConnect ships no runtime, so there is nothing
+    // to fall back to, and inventing an id would have attached the session to
+    // something nobody registered. The neutral marker always required this.
+    expect(parseAgentSessionDirective(block({ op: "attach", handle: "cf-foo", host: "workstation-1" }))).toBeUndefined();
   });
 
   it("parses a continue prompt and an explicit stopRuntime on detach", () => {
@@ -182,7 +191,7 @@ describe("parseAgentSessionMarker", () => {
     expect(result?.strippedText).not.toContain("agent-session");
   });
 
-  it("accepts claude-fleet's own neutral marker unchanged", () => {
+  it("accepts a runtime's own neutral marker unchanged", () => {
     const result = parseAgentSessionMarker(
       marker({
         runtime: "claude-fleet",

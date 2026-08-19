@@ -2,8 +2,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { isDelegateBlockedTerminalReason } from "./agent-session.ts";
-import type { FleetAdapter, FleetHandoff } from "./fleet-adapter.ts";
+import { AgentSessionRuntimeRegistry, isDelegateBlockedTerminalReason } from "./agent-session.ts";
 import type { JobStore, PersistedJob } from "./job-store.ts";
 import type { GatewayEvent, Job, JobSnapshot } from "./types.ts";
 
@@ -383,7 +382,7 @@ describe("late recovery — the surfaces a caller reads", () => {
         "[[clawconnect:agent-session]]\n" +
         JSON.stringify({
           op: "attach",
-          runtime: "claude-fleet",
+          runtime: "example-runtime",
           handle: "fleet-worktree-20260804",
           providerSessionId: "provider-session-77",
           host: "build-host",
@@ -534,27 +533,44 @@ describe("late recovery — reattaching after a restart", () => {
   });
 });
 
+/** The runtime id these fixtures delegate to. Registered by the fake below; ClawConnect ships none. */
+const DELEGATE_RUNTIME_ID = "example-runtime";
+
 describe("late recovery — the ceiling never skips the recovery tiers below it", () => {
-  /** Exactly one already-known attachment is ever inspected — see FleetAdapter. */
-  function fakeFleetAdapter(handoff: FleetHandoff | null): FleetAdapter & { handoffCalls: number } {
-    const adapter = {
-      handoffCalls: 0,
-      async isLive() {
-        return false;
+  /**
+   * Exactly one already-known attachment is ever inspected — the seam defines
+   * no listing callback, so there is nothing to scan even in principle.
+   * Shaped like the local-tmux example: the session is gone, and the runtime
+   * either has a dated final answer for it or does not.
+   */
+  function fakeRuntime(handoff: { text: string; resultAt: number } | null): {
+    registry: AgentSessionRuntimeRegistry;
+    handoffCalls: number;
+  } {
+    const registry = new AgentSessionRuntimeRegistry();
+    const fake = { registry, handoffCalls: 0 };
+    registry.register({
+      id: DELEGATE_RUNTIME_ID,
+      provider: "anthropic-claude-code",
+      async inspect() {
+        fake.handoffCalls += 1;
+        if (!handoff) return { alive: false };
+        return {
+          state: "completed",
+          alive: false,
+          finalResponse: handoff.text,
+          lastEventAt: handoff.resultAt,
+        };
       },
-      async readTerminalHandoff() {
-        adapter.handoffCalls += 1;
-        return handoff;
-      },
-    };
-    return adapter;
+    });
+    return fake;
   }
 
   const attachContext = (extra: Record<string, unknown> = {}) =>
     "[[clawconnect:agent-session]]" +
     JSON.stringify({
       op: "attach",
-      runtime: "claude-fleet",
+      runtime: DELEGATE_RUNTIME_ID,
       handle: "fleet-worktree-20260804",
       host: "build-host",
       ...extra,
@@ -567,8 +583,8 @@ describe("late recovery — the ceiling never skips the recovery tiers below it"
     // run — but the work was delegated, and the delegate finished. Reaching
     // the ceiling must not skip past an answer that is already sitting there.
     const ctrl = harness(frozenAndActive);
-    const adapter = fakeFleetAdapter({ text: "the delegate's finished report", resultAt: Date.now() + 60_000 });
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
+    const adapter = fakeRuntime({ text: "the delegate's finished report", resultAt: Date.now() + 60_000 });
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter.registry);
     const job = sessions.submitTask({ task: "delegate the worktree build", context: attachContext() });
     ctrl.closeStream();
 
@@ -578,8 +594,8 @@ describe("late recovery — the ceiling never skips the recovery tiers below it"
     expect(adapter.handoffCalls).toBeGreaterThan(0);
     expect(live.status).toBe("completed");
     expect(live.summary).toBe("the delegate's finished report");
-    expect(live.resultSource).toBe("fleet-transcript");
-    expect(live.terminalReason).toBe("fleet-transcript-recovery");
+    expect(live.resultSource).toBe("agent-session");
+    expect(live.terminalReason).toBe("agent-session-recovery");
     expect(live.terminalReason).not.toBe("late-recovery-upstream-still-active");
     expect(live.error).toBeUndefined();
     expectCoherent(sessions.buildSnapshot(live), Date.now());
@@ -591,8 +607,8 @@ describe("late recovery — the ceiling never skips the recovery tiers below it"
     // nothing happened", and it is more actionable than "the parent stopped
     // watching" — so it must survive the ceiling, not be overwritten by it.
     const ctrl = harness(frozenAndActive);
-    const adapter = fakeFleetAdapter(null);
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
+    const adapter = fakeRuntime(null);
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter.registry);
     const job = sessions.submitTask({
       task: "delegate the worktree build",
       context: attachContext({ status: "needs_input" }),
@@ -619,8 +635,8 @@ describe("late recovery — the ceiling never skips the recovery tiers below it"
   it("only reaches the still-active error when neither tier had anything to say", { timeout: 30_000 }, async () => {
     vi.useFakeTimers();
     const ctrl = harness(frozenAndActive);
-    const adapter = fakeFleetAdapter(null);
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter);
+    const adapter = fakeRuntime(null);
+    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter.registry);
     const job = sessions.submitTask({ task: "delegate the worktree build", context: attachContext() });
     ctrl.closeStream();
 

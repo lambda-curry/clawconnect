@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createApp, checkTaskText } from "./app.ts";
 import { AgentSessionRuntimeRegistry } from "@clawconnect/core";
-import type { AgentRegistry, FleetAdapter, JobSnapshot } from "@clawconnect/core";
+import type { AgentRegistry, JobSnapshot } from "@clawconnect/core";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 
 /**
@@ -735,30 +735,7 @@ describe("check_task model-facing text carries the resume cursor", () => {
   });
 });
 
-describe("production entrypoint wiring — FleetAdapter", () => {
-  /**
-   * Independent-review blocker 1: recovery tier 3 (see docs/architecture/
-   * 2026-08-02-managed-fleet-attachment-plan.md) is only reachable if a real
-   * FleetAdapter is actually injected in production, not just implemented and
-   * left unwired. Proves createApp() does this by default, without spinning
-   * up a real recovery scenario — SessionManager.hasFleetAdapter() is the
-   * dedicated, minimal surface for exactly this assertion.
-   */
-  it("createApp wires a real FleetAdapter into every agent's SessionManager by default", () => {
-    const jobStoreDir = mkdtempSync(join(tmpdir(), "clawconnect-jobstore-"));
-    tmpDirs.push(jobStoreDir);
-    const { pool } = createApp(fakeRegistry(), { jobStoreDir });
-    expect(pool.forAgent("test-agent").sessions.hasFleetAdapter()).toBe(true);
-  });
-
-  it("createApp lets a caller override the FleetAdapter (e.g. a test injecting a fake)", () => {
-    const jobStoreDir = mkdtempSync(join(tmpdir(), "clawconnect-jobstore-"));
-    tmpDirs.push(jobStoreDir);
-    const fake: FleetAdapter = { isLive: async () => false, readTerminalHandoff: async () => null };
-    const { pool } = createApp(fakeRegistry(), { jobStoreDir, fleetAdapter: fake });
-    expect(pool.forAgent("test-agent").sessions.hasFleetAdapter()).toBe(true);
-  });
-
+describe("production entrypoint wiring — agent-session runtimes", () => {
   /**
    * Same failure mode, one layer up: a host's managed-agent-session runtimes
    * are only reachable if the registry actually reaches every agent's
@@ -781,12 +758,18 @@ describe("production entrypoint wiring — FleetAdapter", () => {
     );
   });
 
-  it("createApp leaves claude-fleet the only reachable runtime when no registry is supplied", () => {
+  /**
+   * The default install registers NOTHING. Core ships no runtime of its own —
+   * an entrypoint that quietly constructed one would make that claim false,
+   * which is exactly what the built-in tmux adapter did until it moved out to
+   * examples/local-tmux-runtime.
+   */
+  it("createApp registers no runtime at all when no registry is supplied", () => {
     const jobStoreDir = mkdtempSync(join(tmpdir(), "clawconnect-jobstore-"));
     tmpDirs.push(jobStoreDir);
     const { pool } = createApp(fakeRegistry(), { jobStoreDir });
-    expect(pool.forAgent("test-agent").sessions.hasAgentSessionRuntime("example-runtime")).toBe(
-      false,
-    );
+    const sessions = pool.forAgent("test-agent").sessions;
+    expect(sessions.hasAgentSessionRuntime("example-runtime")).toBe(false);
+    expect(sessions.hasAgentSessionRuntime("claude-fleet")).toBe(false);
   });
 });

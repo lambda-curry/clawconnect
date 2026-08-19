@@ -307,22 +307,32 @@ ChatGPT HTTP app — ClawConnect is exactly what it was before this seam:
 A delegation can never make a ClawConnect task fail. That is the point of
 returning structured unavailability instead of throwing.
 
-### Legacy local adapter
+### No built-in adapter
 
-One built-in adapter predates this seam and remains for backward
-compatibility: a local-only recovery path for existing `claude-fleet`
-attachments, which reads tmux liveness and a terminal transcript. It is
-**not** a runtime selector and not a general integration path:
+`packages/core` ships no runtime. There is no default, no fallback, and no
+runtime-specific constant anywhere in it — only the registry, the attachment
+model, and the callback seam.
 
-- It is consulted only for an attachment whose `runtime` is exactly
-  `claude-fleet`.
-- A host that registers `claude-fleet` itself takes precedence over it.
-- It offers `inspect` only — a tmux probe cannot deliver a turn or end a
-  session, so `continue`/`detach` report as unsupported.
-- It reports liveness and nothing else. It never claims a state, because a
-  bare liveness bit cannot distinguish "working" from "waiting on a human".
+Until 2026-08-18 that was not true. Core shipped `LocalTmuxFleetAdapter` (tmux
+liveness plus a `~/.claude-fleet/<handle>/meta.json` transcript read), both
+entrypoints constructed it by default, and a `"fleet-transcript"` value in the
+core `ResultSource` type named its provenance. So core knew about exactly one
+runtime while this document said it knew about none. That adapter now lives in
+`examples/local-tmux-runtime/` and reaches a deployment through
+`CLAWCONNECT_AGENT_SESSION_RUNTIME_MODULES` like any host module.
 
-New runtime wiring belongs in a host-supplied registry, not here.
+One consequence worth stating, because it looks like a loss and is not. A
+delegated result's `resultSource` is now always `"agent-session"`; there is no
+value naming a particular runtime's evidence. How strongly a runtime can vouch
+for what it returns is a claim made inside that runtime's module, where the
+evidence is — the example still refuses to read a transcript until the tmux
+pane has ENDED, and still skips an entry it cannot date. ClawConnect keeps its
+own checks on top (the turn must be a completed one, the answer must be
+datable, and it must post-date the job it would answer) and otherwise takes the
+module's word, because it has no way to verify the claim and restating an
+unverifiable one is worse than not making it. A reader who wants to know what
+answered reads `agentSession.runtime` on the same snapshot, which names the
+actual runtime rather than a category.
 
 ## Keeping this boundary honest
 
@@ -333,9 +343,9 @@ can contradict, and runs with the ordinary suite (`vp test`). It asserts that:
 - no document references an internal absolute path or thread/artifact id;
 - neither entry point registers a runtime of its own.
 
-Two deliberate exemptions. The legacy adapter's id `claude-fleet` is allowed
-everywhere, because it is a real exported identifier in this repository and
-banning the string would hide the code rather than clean it up. The dated
+Two deliberate exemptions. The id `claude-fleet` is allowed everywhere,
+because it is the runtime id used by `examples/local-tmux-runtime/` and
+banning the string would hide the example rather than clean it up. The dated
 documents under `docs/architecture/` and `docs/decisions/` are historical
 build records carrying their own non-normative banners; they are checked for
 internal references but not for host names, since rewriting a record to look

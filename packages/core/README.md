@@ -41,4 +41,6 @@ Relevant exports:
 | `AgentSessionStatus` / `AgentSessionState` | The normalized result and its closed state vocabulary |
 | `normalizeAgentSessionObservation`, `dispatchAgentSession` | Normalization and single-session dispatch |
 | `AgentSessionAttachment` | The durable, normalized attachment record |
-| `LocalTmuxFleetAdapter` | Legacy local-only recovery path for pre-existing `claude-fleet` attachments — not a runtime selector |
+
+Core ships no concrete runtime. `examples/local-tmux-runtime/` is a worked
+example of a host module, not part of this package.
