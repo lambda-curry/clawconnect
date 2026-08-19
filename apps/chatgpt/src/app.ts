@@ -6,13 +6,12 @@ import { Hono } from "hono";
 import { McpServer, createMcpHandler, isJsonContentType } from "@modelcontextprotocol/server";
 import type { AuthInfo, McpRequestContext } from "@modelcontextprotocol/server";
 import { toWebRequest } from "@modelcontextprotocol/node";
-import { GatewayPool, LocalTmuxFleetAdapter, buildCapabilities } from "@clawconnect/core";
+import { DEFAULT_PAYLOAD_DIR, FilePayloadStore, GatewayPool, buildCapabilities } from "@clawconnect/core";
 import { registerCapability } from "@clawconnect/mcp";
 import type {
   AgentRegistry,
   AgentSessionRuntimeRegistry,
   ContinuationState,
-  FleetAdapter,
   Identity,
   JobSnapshot,
   Scope,
@@ -43,15 +42,15 @@ export interface CreateAppOptions {
   /** Directory for per-agent job-persistence files. Defaults on — override so tests write into a scratch dir. */
   jobStoreDir?: string;
   /**
-   * Fleet-transcript recovery adapter. Defaults to a real LocalTmuxFleetAdapter
-   * so recovery tier 3 is actually reachable in production. Override in tests
-   * to inject a fake and assert on wiring.
+   * Directory for run_task's opaque payload files (see core's
+   * payload-store.ts). Defaults to `~/.clawconnect/payloads`; override so
+   * tests write into a scratch dir.
    */
-  fleetAdapter?: FleetAdapter;
+  payloadDir?: string;
   /**
    * Managed-agent-session runtimes this deployment can drive (see
-   * agent-session.ts). Omitted, claude-fleet stays the only reachable runtime
-   * and an attachment naming any other reads back as a precise
+   * agent-session.ts). Omitted — the default install — no attachment has
+   * anything to ask, and one naming any runtime reads back as a precise
    * unknown_runtime result rather than failing the task.
    */
   agentSessionRuntimes?: AgentSessionRuntimeRegistry;
@@ -132,13 +131,12 @@ export function createApp(registry: AgentRegistry, opts: CreateAppOptions = {}):
   }
 
   const hono = new Hono();
-  const fleetAdapter = opts.fleetAdapter ?? new LocalTmuxFleetAdapter();
   const pool = new GatewayPool(
     registry,
     opts.jobStoreDir ?? DEFAULT_JOB_STORE_DIR,
-    fleetAdapter,
     undefined,
     opts.agentSessionRuntimes,
+    new FilePayloadStore(opts.payloadDir ?? DEFAULT_PAYLOAD_DIR),
   );
   // Reload every configured agent's persisted jobs now, not lazily on first
   // request — otherwise an agent nobody has queried yet since the restart

@@ -114,21 +114,20 @@ export type TranscriptTransportUpdate = {
  * transcript-reconciliation paths that predate this field — and reads as the
  * implicit historical default "parent".
  *
- * The two delegated values are deliberately distinct, and both are written
- * only by the recovery fallback in session.ts, gated behind the parent's own
- * live+transcript recovery already having given up (see docs/architecture/
- * 2026-08-02-managed-fleet-attachment-plan.md §8):
+ *   agent-session — a registered runtime answered through the neutral
+ *                   callback seam (agent-session.ts), from the recovery
+ *                   fallback in session.ts and only once the parent's own
+ *                   live+transcript recovery has given up.
  *
- *   fleet-transcript — the LEGACY claude-fleet path only: a Claude Code
- *                      transcript read off disk by the FleetAdapter, with its
- *                      own stronger trust gate. Unchanged in meaning.
- *   agent-session    — a registered runtime answered through the neutral
- *                      callback seam (agent-session.ts). Kept separate because
- *                      "we read a Claude transcript" is a specific claim about
- *                      provenance that an arbitrary runtime's reply does not
- *                      support.
+ * There is deliberately no value naming a PARTICULAR runtime's provenance.
+ * How strongly a runtime can vouch for the text it returns is the runtime's
+ * own claim, made inside its module and enforced by the gate it chooses to
+ * apply before reporting a completed turn at all; ClawConnect cannot verify
+ * that claim and so does not restate it. The record already names which
+ * runtime answered — see AgentSessionAttachment.runtime, carried on the same
+ * snapshot — which is a more precise answer than a fixed enum here could be.
  */
-export type ResultSource = "parent" | "fleet-transcript" | "agent-session";
+export type ResultSource = "parent" | "agent-session";
 
 // ── Managed agent-session attachment ──────────────────────────────────────
 
@@ -166,9 +165,10 @@ export type AttachmentLiveStatus = Exclude<AgentSessionState, "unavailable" | "u
 export type AgentSessionAttachment = {
   id: string;
   /**
-   * Which system owns this session's lifecycle. "claude-fleet" is the
-   * historical value and the default for a directive that omits it, so every
-   * record written before this field could vary still reads correctly.
+   * Which system owns this session's lifecycle — a host-registered runtime
+   * id. ClawConnect has no default and no built-in value here: an id it does
+   * not recognise reads back as a normalized `unknown_runtime` result, never
+   * an error.
    */
   runtime: AgentSessionRuntimeId;
   /** Which agent/model runs inside the session, when the runtime reports it. */
@@ -274,8 +274,8 @@ export type SessionAttachmentState = {
 export type AgentSessionDirective =
   | {
       op: "attach" | "replace";
-      /** Defaults to "claude-fleet" when omitted — the runtime this directive shape originally described. */
-      runtime?: AgentSessionRuntimeId;
+      /** Required: ClawConnect has no built-in runtime to fall back to. Matches the neutral marker, which has always required it. */
+      runtime: AgentSessionRuntimeId;
       provider?: AgentSessionProviderId;
       handle: string;
       providerSessionId?: string;
@@ -461,6 +461,13 @@ export type Job = {
    * corresponds to.
    */
   parentRunId?: string;
+  /**
+   * Where this job's opaque run_task payload was materialised, if it had one
+   * (see payload-store.ts). The PATH only — the contents are never read back
+   * by ClawConnect and are returned by no tool. Recorded so a supervisor can
+   * see that a payload existed and where it went.
+   */
+  payloadPath?: string;
   /** See ResultSource. Written only by setOutcome. */
   resultSource?: ResultSource;
   /** Short diagnostic code for why the job went terminal. Written only by setOutcome. */
@@ -526,6 +533,8 @@ export type JobSnapshot = {
   parentRunId?: string;
   /** The session's CURRENT managed-session attachment, if any — not the full lineage. See AgentSessionAttachment. */
   agentSession?: AgentSessionAttachment;
+  /** Where this job's opaque payload was written, if it had one. Path only — see Job.payloadPath. */
+  payloadPath?: string;
   /**
    * OPAQUE cursor. Pass it back verbatim as the next call's `knownLogCount`
    * to resume exactly where this snapshot left off — never a duplicate,
@@ -567,6 +576,13 @@ export type ContinuationState = {
 export type TaskInput = {
   task: string;
   context?: string;
+  /**
+   * Opaque blob that is NOT addressed to the agent. Materialised to a file
+   * whose path — and only whose path — reaches the agent; the bytes never
+   * enter the conversation. Never parsed, interpreted, templated, or
+   * truncated. See payload-store.ts for what problem this exists to solve.
+   */
+  payload?: string;
   sessionKey?: string;
   /** ClawConnect agent alias. Falls back to the registry default. */
   agent?: string;
