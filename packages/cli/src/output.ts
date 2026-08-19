@@ -1,4 +1,13 @@
-import type { Job, JobSnapshot } from "@clawconnect/core";
+import type { Artifacts, Job, JobSnapshot } from "@clawconnect/core";
+
+/**
+ * An identifier scraped from summary prose is a guess about what the agent
+ * meant, not something it was observed doing — print it as such rather than
+ * beside a command-derived value a reader would take as established.
+ */
+function inferredNote(artifacts: Artifacts, field: "branchName" | "commitSha" | "prUrl"): string {
+  return artifacts.provenance?.[field] === "summary-text" ? " (inferred from summary text)" : "";
+}
 
 export function formatJobResult(job: Job, json: boolean): string {
   if (json) {
@@ -34,9 +43,9 @@ export function formatJobResult(job: Job, json: boolean): string {
     lines.push(`Files changed (${a.filesChanged.length}):`);
     for (const f of a.filesChanged) lines.push(`  ${f}`);
   }
-  if (a.branchName) lines.push(`Branch: ${a.branchName}`);
-  if (a.commitSha) lines.push(`Commit: ${a.commitSha}`);
-  if (a.prUrl) lines.push(`PR: ${a.prUrl}`);
+  if (a.branchName) lines.push(`Branch: ${a.branchName}${inferredNote(a, "branchName")}`);
+  if (a.commitSha) lines.push(`Commit: ${a.commitSha}${inferredNote(a, "commitSha")}`);
+  if (a.prUrl) lines.push(`PR: ${a.prUrl}${inferredNote(a, "prUrl")}`);
   if (a.needsHumanDecision) lines.push("\n⚠ OpenClaw is waiting for your input.");
 
   return lines.join("\n");

@@ -85,6 +85,7 @@ export {
 } from "./structured-content.ts";
 export type { TaskDetail } from "./structured-content.ts";
 export type {
+  ArtifactProvenance,
   Artifacts,
   CheckMode,
   CheckTaskOpts,
