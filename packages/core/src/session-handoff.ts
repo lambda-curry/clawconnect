@@ -53,6 +53,21 @@ export type ParsedAgentSessionDirective = {
   strippedText: string;
 };
 
+/**
+ * What the submit boundary gets back.
+ *
+ * `directive` is absent when a block was PRESENT but did not survive
+ * validation. That case still carries `strippedText`, and the distinction is
+ * the whole point: a malformed directive must be ignored as a directive AND
+ * still removed from the text. Previously it was only ignored, so the raw
+ * block — delimiters, operator metadata and all — was forwarded into the
+ * agent's prompt as prose. See parseSessionHandoff.
+ */
+export type SessionHandoff = {
+  directive?: AgentSessionDirective;
+  strippedText: string;
+};
+
 function asString(v: unknown): string | undefined {
   return typeof v === "string" && v.trim().length > 0 ? v.trim() : undefined;
 }
@@ -209,8 +224,23 @@ function stripMatch(text: string, match: RegExpExecArray): string {
  * The single parse boundary submitTask uses: an explicit
  * `[[clawconnect:agent-session]]` directive wins when present (it can express every
  * transition, not just attach), and a bare neutral marker is the fallback.
- * Both strip themselves out of the context before the agent ever sees it.
+ *
+ * A block that is present but MALFORMED — unparseable JSON, an unknown op, a
+ * missing runtime — is still stripped, and returns without a `directive`.
+ * "It did not validate" is not a reason to forward operator metadata into the
+ * agent's prompt: submitTask's contract is that buildSubmitMessage never sees
+ * a raw directive block, and until this existed that held only on the happy
+ * path. A malformed block was silently ignored by the parser and then
+ * delivered verbatim to the agent, which is the same class of defect as any
+ * other content reaching an instruction stream it was never addressed to.
+ *
+ * Returns undefined only when there is no block at all — the ordinary case,
+ * where the text is used unmodified.
  */
-export function parseSessionHandoff(text: string | undefined): ParsedAgentSessionDirective | undefined {
-  return parseAgentSessionDirective(text) ?? parseAgentSessionMarker(text);
+export function parseSessionHandoff(text: string | undefined): SessionHandoff | undefined {
+  const parsed = parseAgentSessionDirective(text) ?? parseAgentSessionMarker(text);
+  if (parsed) return parsed;
+  if (!text) return undefined;
+  const match = DIRECTIVE_RE.exec(text) ?? MARKER_RE.exec(text);
+  return match ? { strippedText: stripMatch(text, match) } : undefined;
 }
