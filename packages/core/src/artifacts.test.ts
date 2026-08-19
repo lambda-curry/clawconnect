@@ -64,6 +64,45 @@ describe("commitSha", () => {
   it("still reads a commit whose sentence happens to contain an input word", () => {
     expect(extract("The change was reviewed and committed as `a1b2c3d4`.").commitSha).toBe("a1b2c3d4");
   });
+
+  /**
+   * The input-marker rejection originally guarded only the bare-hex branch,
+   * while the commit-URL branch returned above it — so the ORIGINAL defect
+   * (a restated precondition recorded as work the job did) walked straight
+   * back in wearing a URL. A commit URL proves a commit exists; it never
+   * proves this job made it.
+   */
+  it("ignores a commit URL the prose restated as a precondition", () => {
+    const artifacts = extract("expected head https://github.com/o/r/commit/a1b2c3d4, base 8f03469");
+
+    expect(artifacts.commitSha).toBeUndefined();
+  });
+
+  it("ignores a commit URL introduced by any input marker, not just `expected`", () => {
+    for (const marker of ["base", "from commit", "was", "previous", "parent"]) {
+      expect(
+        extract(`Starting from a clean tree; ${marker} https://github.com/o/r/commit/a1b2c3d4.`).commitSha,
+        marker,
+      ).toBeUndefined();
+    }
+  });
+
+  it("still takes a commit URL the prose claims as its own work", () => {
+    expect(extract("Fixed the parser and committed as https://github.com/o/r/commit/a1b2c3d4.").commitSha).toBe(
+      "a1b2c3d4",
+    );
+  });
+
+  /**
+   * First-match-wins would have given up at the input URL and reported
+   * nothing, losing a commit the job genuinely made.
+   */
+  it("skips past an input commit URL to the one the job actually produced", () => {
+    expect(
+      extract("base https://github.com/o/r/commit/aaaaaaa; committed as https://github.com/o/r/commit/bbbbbbb")
+        .commitSha,
+    ).toBe("bbbbbbb");
+  });
 });
 
 describe("branchName", () => {
