@@ -144,9 +144,9 @@ export type ResultSource = "parent" | "agent-session";
  * only session.ts's own replace/detach transitions may set, never a directive
  * directly — see AgentSessionDirective.
  *
- * One record serves every runtime: claude-fleet (terminal success "idle")
- * and a service-style runtime (terminal success "completed") share this type
- * rather than each getting a model of its own.
+ * One record serves every runtime: a pane-based one (terminal success
+ * "idle") and a service-style one (terminal success "completed") share this
+ * type rather than each getting a model of its own.
  */
 export type AttachmentLiveStatus = Exclude<AgentSessionState, "unavailable" | "unknown">;
 
@@ -618,6 +618,15 @@ export type RunTaskResult = {
   cancellation: TaskCancellationState;
   /** ClawConnect agent alias the task was dispatched to. */
   agent?: string;
+  /**
+   * Where this task's opaque payload was materialised, when one was passed.
+   * Absent otherwise — its PRESENCE is the confirmation that the payload
+   * landed. The caller that just handed over the bytes has the strongest
+   * claim to the path, and making it call a second tool to learn where its
+   * own data went is the interpretation burden this channel exists to remove.
+   * Path only; the contents are returned by no tool. See payload-store.ts.
+   */
+  payloadPath?: string;
   /** Exact next call to make to collect the result. Always non-null immediately after run_task. */
   nextAction: NextAction;
 };
