@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { parseAgentSessionMarker, parseAgentSessionDirective, parseSessionHandoff } from "./session-handoff.ts";
+import { SessionManager, buildSubmitMessage } from "./session.ts";
+import type { OpenClawGateway } from "./gateway.ts";
 
 function block(obj: unknown): string {
   return `[[clawconnect:agent-session]]${JSON.stringify(obj)}[[/clawconnect:agent-session]]`;
@@ -249,5 +251,75 @@ describe("parseSessionHandoff", () => {
       op: "attach",
       runtime: "example-runtime",
     });
+  });
+});
+
+/**
+ * A directive that fails validation is ignored AS A DIRECTIVE — that part was
+ * always true and is deliberate (a bad directive must not fail the whole
+ * run_task). What was NOT true is that it was removed from the text: the
+ * parser returned undefined, so submitTask fell back to the unmodified
+ * context and delivered the raw block — delimiters, operator metadata and all
+ * — into the agent's prompt as prose.
+ *
+ * submitTask's own comment states the invariant ("buildSubmitMessage must
+ * never see the raw directive block ... regardless of what happens next"). It
+ * held only on the happy path.
+ */
+describe("a malformed handoff block is ignored as a directive AND still stripped", () => {
+  const malformed: [string, string][] = [
+    ["unparseable JSON", "[[clawconnect:agent-session]]{ not valid json[[/clawconnect:agent-session]]"],
+    ["an unknown op", block({ op: "delete-everything", handle: "s-1", host: "workstation-1" })],
+    ["an attach with no runtime", block({ op: "attach", handle: "s-1", host: "workstation-1" })],
+    ["an attach with an unsafe handle", block({ op: "attach", runtime: "example-runtime", handle: "../escape", host: "workstation-1" })],
+    ["a replace with no reason", block({ op: "replace", runtime: "example-runtime", handle: "s-1", host: "workstation-1" })],
+    ["a malformed marker", "<agent-session>{ not valid json}</agent-session>"],
+  ];
+
+  it.each(malformed)("strips %s while carrying no directive", (_label, text) => {
+    const handoff = parseSessionHandoff(`Before.\n\n${text}\n\nAfter.`);
+    expect(handoff).toBeDefined();
+    expect(handoff?.directive).toBeUndefined();
+    expect(handoff?.strippedText).toBe("Before.\n\n\n\nAfter.");
+    expect(handoff?.strippedText).not.toContain("clawconnect:agent-session");
+    expect(handoff?.strippedText).not.toContain("agent-session>");
+  });
+
+  it("still returns undefined when there is no block at all, so ordinary text is untouched", () => {
+    expect(parseSessionHandoff(undefined)).toBeUndefined();
+    expect(parseSessionHandoff("plain context, nothing structured here")).toBeUndefined();
+  });
+
+  /**
+   * The assertion that actually matters: on the real dispatch path, what
+   * reaches the agent. A parser unit test cannot show this — submitTask is
+   * what decides whether the stripped text is used.
+   */
+  it("never delivers a malformed block to the agent", () => {
+    const messages: string[] = [];
+    const gateway = {
+      chat: (_sessionKey: string, message: string) => {
+        messages.push(message);
+        return new Promise<string>(() => {});
+      },
+      close() {},
+    } as unknown as OpenClawGateway;
+
+    const sessions = new SessionManager(gateway, "main");
+    sessions.submitTask({
+      task: "do the thing",
+      context: `Some real context.\n\n${block({ op: "attach", handle: "s-1", host: "workstation-1" })}`,
+    });
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).not.toContain("clawconnect:agent-session");
+    expect(messages[0]).not.toContain("workstation-1");
+    expect(messages[0]).toContain("Some real context.");
+    expect(messages[0]).toContain("do the thing");
+    // The delivered message is exactly what the stripped context produces —
+    // no directive residue, and nothing else removed either.
+    expect(messages[0]).toBe(
+      buildSubmitMessage({ task: "do the thing", context: "Some real context." }),
+    );
   });
 });

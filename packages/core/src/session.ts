@@ -1401,11 +1401,13 @@ export class SessionManager {
 
     // Parse (but do not yet apply) any attachment directive — buildSubmitMessage
     // must never see the raw directive block, so it's stripped here
-    // regardless of what happens next. Application is DEFERRED until the
-    // busy check below has passed, so a directive always correlates to the
-    // REAL job it rides in on (see applyAgentSessionDirective's delegatedTurnId
-    // stamping) — a "session busy" rejection must not be able to claim or
-    // burn a delegation slot that belongs to the job actually running.
+    // regardless of what happens next, INCLUDING when the block fails to
+    // validate (parseSessionHandoff then returns strippedText with no
+    // directive). Application is DEFERRED until the busy check below has
+    // passed, so a directive always correlates to the REAL job it rides in on
+    // (see applyAgentSessionDirective's delegatedTurnId stamping) — a
+    // "session busy" rejection must not be able to claim or burn a delegation
+    // slot that belongs to the job actually running.
     const parsedDirective = parseSessionHandoff(input.context);
     const strippedContext = parsedDirective ? parsedDirective.strippedText : input.context;
     const effectiveInput: TaskInput =
@@ -1477,7 +1479,8 @@ export class SessionManager {
     const message = buildSubmitMessage(effectiveInput, payloadPath);
 
     // Apply the directive now that we know it correlates to a REAL turn.
-    if (parsedDirective)
+    // Absent when the block was present but malformed — stripped, not applied.
+    if (parsedDirective?.directive)
       this.applyAgentSessionDirective(sessionKey, jobId, parsedDirective.directive);
     const artifacts = emptyArtifacts();
     const now = Date.now();

@@ -47,7 +47,7 @@ export type {
   BlockedDelegationSnapshot,
 } from "./agent-session.ts";
 export { parseAgentSessionDirective, parseAgentSessionMarker, parseSessionHandoff } from "./session-handoff.ts";
-export type { ParsedAgentSessionDirective } from "./session-handoff.ts";
+export type { ParsedAgentSessionDirective, SessionHandoff } from "./session-handoff.ts";
 export { loadAgentRegistry, resolveAgent, REGISTRY_PATH, agentBlurb, agentDescriptor } from "./agent-registry.ts";
 export type { AgentEntry, AgentRegistry } from "./agent-registry.ts";
 export { searchMemory, getMemory, listCollections, DEFAULT_QMD_URL } from "./memory.ts";
