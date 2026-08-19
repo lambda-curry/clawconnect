@@ -63,6 +63,10 @@ export function runTask(pool: GatewayPool, input: TaskInput): RunTaskResult {
     transcript: job.transcriptState,
     cancellation: job.cancellationState,
     agent: entry.agent.id,
+    // Absent unless a payload was actually written. A dispatch that could not
+    // store its payload never reaches here — it throws above — so this is
+    // never a half-truth about where the bytes went.
+    ...(job.payloadPath ? { payloadPath: job.payloadPath } : {}),
     // args keys are check_task's own parameter names — see NextAction.
     nextAction: { tool: "check_task", args: { jobId: job.jobId, sessionKey: job.sessionKey } },
   };

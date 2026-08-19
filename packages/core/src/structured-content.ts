@@ -22,6 +22,11 @@ export function buildRunTaskStructuredContent(result: RunTaskResult) {
     transcript: result.transcript,
     cancellation: result.cancellation,
     agent: result.agent,
+    // Omitted entirely when no payload was passed, so presence is the signal.
+    // Declared in run_task's outputSchema and, until this was wired through,
+    // structurally unreachable — a declared output field a handler cannot
+    // produce is a contract that lies.
+    ...(result.payloadPath ? { payloadPath: result.payloadPath } : {}),
     nextAction: result.nextAction,
   };
 }
