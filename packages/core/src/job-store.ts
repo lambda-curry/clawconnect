@@ -1,5 +1,6 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { loadJsonArrayFile, type StoreDegradationSink } from "./store-health.ts";
 import type { JobPrompt } from "./types.ts";
 
 /**
@@ -23,6 +24,8 @@ export type PersistedJob = {
   parentRunId?: string;
   /** Durable OpenClaw transcript sequence confirmed before the connector stopped. */
   lastSeenSequence?: number;
+  /** Where this job's opaque run_task payload was materialised, if it had one. See payload-store.ts. */
+  payloadPath?: string;
 };
 
 export interface JobStore {
@@ -33,26 +36,36 @@ export interface JobStore {
 /**
  * File-backed JobStore. SessionManager overwrites the whole file on every
  * save with exactly the jobs currently status==="running" — nothing
- * terminal is ever written, so the file can't grow into a log. Best-effort:
- * a read/write failure is logged and swallowed, never thrown — job
- * persistence is a nice-to-have for restart recovery, not load-bearing for
- * run_task/check_task correctness.
+ * terminal is ever written, so the file can't grow into a log.
+ *
+ * Best-effort in one direction only. A WRITE failure is logged and swallowed:
+ * job persistence is a nice-to-have for restart recovery, not load-bearing
+ * for run_task/check_task correctness. A READ failure is not swallowed into
+ * `[]` — see store-health.ts for why that combination destroys its own
+ * evidence.
  */
 export class JsonFileJobStore implements JobStore {
-  constructor(private readonly filePath: string) {}
+  /** Set when load() could not preserve an unreadable file. While true, save() refuses to overwrite it. */
+  private blocked = false;
+
+  constructor(
+    private readonly filePath: string,
+    private readonly onDegraded?: StoreDegradationSink,
+  ) {}
 
   load(): PersistedJob[] {
-    try {
-      if (!existsSync(this.filePath)) return [];
-      const parsed = JSON.parse(readFileSync(this.filePath, "utf8"));
-      return Array.isArray(parsed) ? parsed : [];
-    } catch (err) {
-      console.error(`[job-store] failed to load ${this.filePath}: ${(err as Error).message}`);
-      return [];
-    }
+    const { entries, blocked } = loadJsonArrayFile(this.filePath, "job", this.onDegraded);
+    this.blocked = blocked;
+    return entries as PersistedJob[];
   }
 
   save(jobs: PersistedJob[]): void {
+    if (this.blocked) {
+      console.error(
+        `[job-store] refusing to overwrite ${this.filePath}: it could not be read and could not be preserved`,
+      );
+      return;
+    }
     try {
       mkdirSync(dirname(this.filePath), { recursive: true });
       // Write-then-rename so a reader never observes a half-written file —

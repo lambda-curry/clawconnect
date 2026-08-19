@@ -1,8 +1,9 @@
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { JsonFileAttachmentStore } from "./attachment-store.ts";
+import type { StoreDegradation } from "./store-health.ts";
 import type { SessionAttachmentState } from "./types.ts";
 
 let dirs: string[] = [];
@@ -65,7 +66,7 @@ describe("JsonFileAttachmentStore", () => {
     expect(store.load()).toEqual([]);
   });
 
-  it("load() on a file containing a non-array JSON value returns an empty array", () => {
+  it("load() on a file holding a non-array JSON value returns an empty array", () => {
     const filePath = tmpFilePath();
     writeFileSync(filePath, JSON.stringify({ not: "an array" }));
     const store = new JsonFileAttachmentStore(filePath);
@@ -104,5 +105,76 @@ describe("JsonFileAttachmentStore", () => {
     const reloaded = store.load();
     expect(reloaded).toEqual([withLineage]);
     expect(reloaded[0].attachments["att-1"].status).toBe("superseded");
+  });
+});
+
+/**
+ * Same rule as the job store, and it matters more here: this store holds
+ * every session that has ever attached, so a silent empty load discards
+ * lineage rather than only work currently in flight.
+ */
+describe("JsonFileAttachmentStore: an unreadable file is preserved, a missing one is not a failure", () => {
+  it("a missing file loads empty, reports no degradation, and saves normally afterwards", () => {
+    const filePath = tmpFilePath();
+    const seen: StoreDegradation[] = [];
+    const store = new JsonFileAttachmentStore(filePath, (d) => seen.push(d));
+    expect(store.load()).toEqual([]);
+    expect(seen).toEqual([]);
+    expect(existsSync(filePath)).toBe(false);
+    store.save([sample]);
+    expect(store.load()).toEqual([sample]);
+  });
+
+  it("corrupt JSON is preserved under a timestamped name, and a later save cannot destroy it", () => {
+    const filePath = tmpFilePath();
+    writeFileSync(filePath, "{ not valid json");
+    const seen: StoreDegradation[] = [];
+    const store = new JsonFileAttachmentStore(filePath, (d) => seen.push(d));
+
+    expect(store.load()).toEqual([]);
+    expect(seen).toHaveLength(1);
+    expect(seen[0].kind).toBe("attachment");
+    expect(readFileSync(seen[0].preservedAs as string, "utf8")).toBe("{ not valid json");
+    expect(existsSync(filePath)).toBe(false);
+
+    store.save([sample]);
+    expect(store.load()).toEqual([sample]);
+    expect(readFileSync(seen[0].preservedAs as string, "utf8")).toBe("{ not valid json");
+  });
+
+  it("a file holding valid JSON that is not an array is treated as unreadable too", () => {
+    const filePath = tmpFilePath();
+    writeFileSync(filePath, JSON.stringify({ not: "an array" }));
+    const seen: StoreDegradation[] = [];
+    expect(new JsonFileAttachmentStore(filePath, (d) => seen.push(d)).load()).toEqual([]);
+    expect(seen).toHaveLength(1);
+    expect(readFileSync(seen[0].preservedAs as string, "utf8")).toBe('{"not":"an array"}');
+  });
+
+  it("a valid file still loads unchanged, and reports nothing", () => {
+    const filePath = tmpFilePath();
+    writeFileSync(filePath, JSON.stringify([sample]));
+    const seen: StoreDegradation[] = [];
+    expect(new JsonFileAttachmentStore(filePath, (d) => seen.push(d)).load()).toEqual([sample]);
+    expect(seen).toEqual([]);
+  });
+
+  it("refuses to save at all when the unreadable file could not even be preserved", () => {
+    const dir = mkdtempSync(join(tmpdir(), "clawconnect-fleetstore-test-"));
+    dirs.push(dir);
+    const filePath = join(dir, "attachments.json");
+    writeFileSync(filePath, "{ not valid json");
+    chmodSync(dir, 0o500);
+
+    const seen: StoreDegradation[] = [];
+    const store = new JsonFileAttachmentStore(filePath, (d) => seen.push(d));
+    expect(store.load()).toEqual([]);
+    expect(seen[0].preservedAs).toBeUndefined();
+
+    // Writable again, so the refusal below is the store's rule rather than
+    // the filesystem's.
+    chmodSync(dir, 0o700);
+    store.save([sample]);
+    expect(readFileSync(filePath, "utf8")).toBe("{ not valid json");
   });
 });
