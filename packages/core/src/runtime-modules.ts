@@ -53,8 +53,8 @@ function toImportSpecifier(specifier: string, baseDir: string): string {
 /**
  * Loads every configured runtime module and returns the registry they
  * registered into — or undefined when nothing was configured or nothing
- * registered, which is exactly the "claude-fleet is the only reachable
- * runtime" default the factories already document.
+ * registered, which is the default install the factories already document:
+ * no runtime at all, and every MCP tool behaving identically without one.
  *
  * Never throws. A module that is missing, fails to import, exports no
  * registrar, or throws while registering is logged and skipped: a broken
@@ -92,7 +92,7 @@ export async function loadAgentSessionRuntimes(
 
   const ids = registry.ids();
   if (ids.length === 0) {
-    log(`[agent-session] ${RUNTIME_MODULES_ENV} was set but no runtime registered — claude-fleet stays the only reachable runtime`);
+    log(`[agent-session] ${RUNTIME_MODULES_ENV} was set but no runtime registered — no runtime is reachable`);
     return undefined;
   }
   log(`[agent-session] registered runtime(s): ${ids.join(", ")}`);

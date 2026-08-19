@@ -27,10 +27,10 @@
  * operation addresses exactly one already-known attachment, so there is no
  * surface through which ClawConnect could sweep a runtime's sessions — the
  * structural form of "no heuristic scanning" that the attachment model already
- * holds for claude-fleet.
+ * holds, for every runtime alike.
  */
 
-/** Which system owns a managed session's lifecycle: "claude-fleet", a host-registered id, … */
+/** Which system owns a managed session's lifecycle — always a host-registered id; ClawConnect ships none. */
 export type AgentSessionRuntimeId = string;
 
 /** Which agent/model runs *inside* that session. Distinct from the runtime: two runtimes may run the same agent. */
@@ -40,8 +40,8 @@ export type AgentSessionProviderId = string;
  * Lifecycle vocabulary, neutral across runtimes and closed — a runtime cannot
  * introduce a state no consumer knows how to branch on.
  *
- * Two runtimes disagree about which state means "the turn finished well":
- * claude-fleet's terminal success is `idle` (the tmux pane stopped working),
+ * Two runtimes disagree about which state means "the turn finished well": a
+ * pane-based runtime's terminal success is `idle` (the pane stopped working),
  * a service-style runtime's is `completed`. Both are in the union and both are treated as a
  * completed turn (see COMPLETED_TURN_STATES) rather than forcing either
  * published vocabulary to move.
@@ -446,8 +446,9 @@ export function isAgentSessionTimeout(err: unknown): boolean {
 /**
  * Runs one asynchronous operation under a deadline, aborting it (and any
  * caller-supplied signal chain) when the deadline passes. Used for every call
- * out of ClawConnect into code it does not own: the registry callbacks below,
- * and the claude-fleet adapter's transcript read in session.ts.
+ * out of ClawConnect into code it does not own — which since 2026-08-18 means
+ * exactly the registry callbacks below, no adapter of our own having survived
+ * the move to examples/.
  */
 export async function withAgentSessionTimeout<T>(
   op: (signal: AbortSignal) => Promise<T>,

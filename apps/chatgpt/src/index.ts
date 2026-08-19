@@ -78,8 +78,8 @@ try {
 // The host's managed-agent-session runtimes, if this deployment configured any
 // (CLAWCONNECT_AGENT_SESSION_RUNTIME_MODULES — see core's runtime-modules.ts).
 // Without it the registry option on createApp is decorative in production:
-// nothing in a shipped binary could ever supply one. Unset, claude-fleet stays
-// the only reachable runtime, exactly as before.
+// nothing in a shipped binary could ever supply one. Unset, no runtime is
+// reachable — the default install — and every MCP tool behaves identically.
 const agentSessionRuntimes = await loadAgentSessionRuntimes();
 
 const { requestListener } = createApp(registry, { agentSessionRuntimes });

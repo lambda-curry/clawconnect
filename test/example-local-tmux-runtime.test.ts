@@ -15,6 +15,8 @@
  */
 const spy = vi.hoisted(() => ({
   execFileArgs: [] as string[][],
+  /** The OPTIONS argument of each execFile call — where `signal` rides. The argument array alone is identical whether or not it was forwarded. */
+  execFileOptions: [] as ({ signal?: AbortSignal } | undefined)[],
   readFilePaths: [] as string[],
   /** Runs before each real readFile; lets a test abort mid-flight, deterministically. */
   onReadFile: undefined as ((path: string) => void) | undefined,
@@ -26,6 +28,15 @@ vi.mock("node:child_process", async (importOriginal) => {
     ...actual,
     execFile: (...args: unknown[]) => {
       if (Array.isArray(args[1])) spy.execFileArgs.push(args[1] as string[]);
+      // promisify calls execFile(file, args, options, callback); with no
+      // options it calls execFile(file, args, callback), so the third
+      // argument is only the options bag when it is not the callback.
+      const opts = args[2];
+      if (Array.isArray(args[1])) {
+        spy.execFileOptions.push(
+          opts && typeof opts === "object" ? (opts as { signal?: AbortSignal }) : undefined,
+        );
+      }
       return (actual.execFile as (...a: unknown[]) => unknown)(...args);
     },
   };
@@ -84,6 +95,7 @@ const HANDLE = "cf-nonexistent-handle-for-tests";
 
 beforeEach(() => {
   spy.execFileArgs = [];
+  spy.execFileOptions = [];
   spy.readFilePaths = [];
   spy.onReadFile = undefined;
 });
@@ -302,8 +314,17 @@ describe("an abandoned recovery stops immediately", () => {
 
   it("passes the signal down to the tmux liveness probe", async () => {
     const home = readableSession();
-    await inspect(home, HANDLE, new AbortController().signal);
+    const controller = new AbortController();
+    await inspect(home, HANDLE, controller.signal);
+
     expect(spy.execFileArgs).toEqual([["has-session", "-t", HANDLE]]);
+    // The assertion this test is named for. Checking only the argument array
+    // could not observe it: that array is identical whether or not the signal
+    // was forwarded, so the test passed even if the module stopped honouring
+    // the deadline — and an abandoned recovery would leave a tmux child
+    // running with nobody waiting on it.
+    expect(spy.execFileOptions).toHaveLength(1);
+    expect(spy.execFileOptions[0]?.signal).toBe(controller.signal);
   });
 });
 
