@@ -22,11 +22,6 @@ export function buildRunTaskStructuredContent(result: RunTaskResult) {
     transcript: result.transcript,
     cancellation: result.cancellation,
     agent: result.agent,
-    // Omitted entirely when no payload was passed, so presence is the signal.
-    // Declared in run_task's outputSchema and, until this was wired through,
-    // structurally unreachable — a declared output field a handler cannot
-    // produce is a contract that lies.
-    ...(result.payloadPath ? { payloadPath: result.payloadPath } : {}),
     nextAction: result.nextAction,
   };
 }
@@ -90,13 +85,6 @@ export function buildGetTaskStructuredContent(result: FoundCheckTaskResult, deta
     // needs it most.
     liveness: snapshot.liveness,
     parentRunId: snapshot.parentRunId,
-    // The PATH of this job's opaque payload, if it had one — never its
-    // contents, which ClawConnect does not read back and no tool returns.
-    // Unconditional for the same reason parentRunId is: a supervisor asking
-    // "was a payload delivered, and where did it go" needs to be able to get
-    // an answer, and the presets exist to bound payload SIZE, not to hide
-    // identifiers from the caller who needs them most.
-    payloadPath: snapshot.payloadPath,
   };
   if (d === "summary" || has("summary")) payload.summary = snapshot.summary;
   if (has("updates")) {

@@ -461,13 +461,6 @@ export type Job = {
    * corresponds to.
    */
   parentRunId?: string;
-  /**
-   * Where this job's opaque run_task payload was materialised, if it had one
-   * (see payload-store.ts). The PATH only — the contents are never read back
-   * by ClawConnect and are returned by no tool. Recorded so a supervisor can
-   * see that a payload existed and where it went.
-   */
-  payloadPath?: string;
   /** See ResultSource. Written only by setOutcome. */
   resultSource?: ResultSource;
   /** Short diagnostic code for why the job went terminal. Written only by setOutcome. */
@@ -533,8 +526,6 @@ export type JobSnapshot = {
   parentRunId?: string;
   /** The session's CURRENT managed-session attachment, if any — not the full lineage. See AgentSessionAttachment. */
   agentSession?: AgentSessionAttachment;
-  /** Where this job's opaque payload was written, if it had one. Path only — see Job.payloadPath. */
-  payloadPath?: string;
   /**
    * OPAQUE cursor. Pass it back verbatim as the next call's `knownLogCount`
    * to resume exactly where this snapshot left off — never a duplicate,
@@ -576,13 +567,6 @@ export type ContinuationState = {
 export type TaskInput = {
   task: string;
   context?: string;
-  /**
-   * Opaque blob that is NOT addressed to the agent. Materialised to a file
-   * whose path — and only whose path — reaches the agent; the bytes never
-   * enter the conversation. Never parsed, interpreted, templated, or
-   * truncated. See payload-store.ts for what problem this exists to solve.
-   */
-  payload?: string;
   sessionKey?: string;
   /** ClawConnect agent alias. Falls back to the registry default. */
   agent?: string;
@@ -618,15 +602,6 @@ export type RunTaskResult = {
   cancellation: TaskCancellationState;
   /** ClawConnect agent alias the task was dispatched to. */
   agent?: string;
-  /**
-   * Where this task's opaque payload was materialised, when one was passed.
-   * Absent otherwise — its PRESENCE is the confirmation that the payload
-   * landed. The caller that just handed over the bytes has the strongest
-   * claim to the path, and making it call a second tool to learn where its
-   * own data went is the interpretation burden this channel exists to remove.
-   * Path only; the contents are returned by no tool. See payload-store.ts.
-   */
-  payloadPath?: string;
   /** Exact next call to make to collect the result. Always non-null immediately after run_task. */
   nextAction: NextAction;
 };

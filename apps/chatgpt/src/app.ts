@@ -6,7 +6,7 @@ import { Hono } from "hono";
 import { McpServer, createMcpHandler, isJsonContentType } from "@modelcontextprotocol/server";
 import type { AuthInfo, McpRequestContext } from "@modelcontextprotocol/server";
 import { toWebRequest } from "@modelcontextprotocol/node";
-import { DEFAULT_PAYLOAD_DIR, FilePayloadStore, GatewayPool, buildCapabilities } from "@clawconnect/core";
+import { GatewayPool, buildCapabilities } from "@clawconnect/core";
 import { registerCapability } from "@clawconnect/mcp";
 import type {
   AgentRegistry,
@@ -41,12 +41,6 @@ export interface CreateAppOptions {
   widgetHtmlPath?: string;
   /** Directory for per-agent job-persistence files. Defaults on — override so tests write into a scratch dir. */
   jobStoreDir?: string;
-  /**
-   * Directory for run_task's opaque payload files (see core's
-   * payload-store.ts). Defaults to `~/.clawconnect/payloads`; override so
-   * tests write into a scratch dir.
-   */
-  payloadDir?: string;
   /**
    * Managed-agent-session runtimes this deployment can drive (see
    * agent-session.ts). Omitted — the default install — no attachment has
@@ -136,7 +130,6 @@ export function createApp(registry: AgentRegistry, opts: CreateAppOptions = {}):
     opts.jobStoreDir ?? DEFAULT_JOB_STORE_DIR,
     undefined,
     opts.agentSessionRuntimes,
-    new FilePayloadStore(opts.payloadDir ?? DEFAULT_PAYLOAD_DIR),
   );
   // Reload every configured agent's persisted jobs now, not lazily on first
   // request — otherwise an agent nobody has queried yet since the restart

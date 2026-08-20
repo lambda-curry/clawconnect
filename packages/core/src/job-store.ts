@@ -24,8 +24,6 @@ export type PersistedJob = {
   parentRunId?: string;
   /** Durable OpenClaw transcript sequence confirmed before the connector stopped. */
   lastSeenSequence?: number;
-  /** Where this job's opaque run_task payload was materialised, if it had one. See payload-store.ts. */
-  payloadPath?: string;
 };
 
 export interface JobStore {

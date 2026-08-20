@@ -76,7 +76,7 @@ Conventions the surface enforces, all covered by that test:
   `prompt` preset returns no `status` at all.
 - `run_task` is the only capability that mutates anything.
 
-## `run_task`'s payload is not a second `context`
+## A brief addressed to a manager reaches the worker too
 
 `task` and `context` reach the agent as ONE conversational message. A brief of
 the form "you are the manager; write the context to a file; then launch the
@@ -86,26 +86,13 @@ concludes it is the manager, and launches another worker. Observed on two
 independent dispatches; every status surface above the worker looked healthy
 throughout.
 
-`payload` (`packages/core/src/payload-store.ts`) is the structural fix: the
-bytes never enter the instruction stream at all. The server materialises the
-blob to a file and the agent is told only the path. Never parse, interpret,
-template, truncate, or echo a payload, and never return its contents from a
-read tool — `get_task` reports `payloadPath` and nothing more. Retention is
-**TTL-based, never terminal-based**: the worker routinely outlives the job that
-launched it, so deleting on completion pulls the file out from under a live
-reader.
-
-**A failed WRITE fails the dispatch; a failed SWEEP is invisible. Do not
-collapse the two.** A sweep is not load-bearing — nobody asked for it and
-nothing reads its result — so it must never block a task. A write is
-load-bearing by construction: the caller passed a payload, the task text names
-the file, and dispatching without it sends a task referencing data the agent
-cannot find, which reads exactly like a task that never had a payload. That is
-the same failure-rendered-as-a-state this repo keeps fixing. `write` therefore
-returns `string` and throws — there is deliberately no "returned nothing"
-branch to tempt a caller — and `submitTask` refuses through the same rejection
-path a "session busy" collision uses. A missing payload store counts as a
-failed write. No fallback, no flag.
+The fix is a convention, not a mechanism: author the prompt file yourself and
+give the manager nothing but the verbatim launch command. An opaque `payload`
+argument existed for this between 2026-08 and its removal — it wrote the bytes
+to a file on the ClawConnect host and handed the agent a path. Isolation
+worked; delivery did not, because no agent shares that filesystem. Do not
+reintroduce a host-side file channel without a fetch route the agent can
+actually reach.
 
 ## A failed store read must not destroy the store
 

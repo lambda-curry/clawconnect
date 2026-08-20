@@ -24,7 +24,6 @@ import type { AttachmentStore } from "./attachment-store.ts";
 import { parseSessionHandoff } from "./session-handoff.ts";
 import { OpenClawGateway, type RunObservation } from "./gateway.ts";
 import type { JobStore, PersistedJob } from "./job-store.ts";
-import { payloadDeliveryNote, type PayloadStore } from "./payload-store.ts";
 import { projectLogWindow } from "./log-projection.ts";
 import {
   NO_SUMMARY_SENTINEL,
@@ -307,18 +306,12 @@ function logDebug(message: string): void {
  * Build the message string sent into `gateway.chat()`. Extracted so the
  * preamble + senderName + context composition is testable without standing
  * up a live gateway.
- *
- * `payloadPath` adds a short delivery note and NOTHING else — the payload's
- * bytes never appear here, which is the entire point of the channel (see
- * payload-store.ts). It goes last, after the task, so it reads as a footer
- * about the message rather than as part of the brief.
  */
-export function buildSubmitMessage(input: TaskInput, payloadPath?: string): string {
+export function buildSubmitMessage(input: TaskInput): string {
   const body = input.context ? `${input.context}\n\n${input.task}` : input.task;
   const senderName = input.senderName?.trim();
   const withSender = senderName ? `[Message from: ${senderName}]\n\n${body}` : body;
-  const withPayload = payloadPath ? `${withSender}\n\n---\n\n${payloadDeliveryNote(payloadPath)}` : withSender;
-  return `${MESSAGE_TOOL_VETO_PREAMBLE}\n\n---\n\n${withPayload}`;
+  return `${MESSAGE_TOOL_VETO_PREAMBLE}\n\n---\n\n${withSender}`;
 }
 
 function createThreadSessionKey(agentId: string): string {
@@ -475,7 +468,6 @@ export class SessionManager {
     private readonly store?: JobStore,
     private readonly attachmentStore?: AttachmentStore,
     private readonly runtimes?: AgentSessionRuntimeRegistry,
-    private readonly payloads?: PayloadStore,
   ) {
     if (store) this.rehydrateFromStore(store);
     if (attachmentStore) this.rehydrateAttachmentsFromStore(attachmentStore);
@@ -506,7 +498,6 @@ export class SessionManager {
         prompt: pj.prompt,
         parentRunId: pj.parentRunId,
         lastSeenSequence: pj.lastSeenSequence,
-        ...(pj.payloadPath ? { payloadPath: pj.payloadPath } : {}),
         upstreamState: "reconnecting",
         transcriptState: "replaying",
         cancellationState: "none",
@@ -599,7 +590,6 @@ export class SessionManager {
         prompt: j.prompt,
         parentRunId: j.parentRunId,
         lastSeenSequence: j.lastSeenSequence,
-        payloadPath: j.payloadPath,
       }));
     this.store.save(active);
   }
@@ -1435,48 +1425,10 @@ export class SessionManager {
 
     const jobId = randomUUID();
 
-    // Materialised only now, for the same reason the directive is applied
-    // only now: the file is named by job id, and a submit rejected as "session
-    // busy" never became a turn, so it must not leave a payload behind for
-    // nobody.
-    //
-    // NOT best-effort. A caller that passed a payload made it load-bearing by
-    // construction — the task text routinely names the file — so dispatching
-    // without it sends a task that references data the agent cannot find, and
-    // that is indistinguishable from a task which never had a payload. The
-    // whole point of this channel is that a failed operation must not render
-    // as a state of the world. A refused submit is recoverable (the caller
-    // retries); an agent hunting for a file nobody wrote is not, and the only
-    // trace would be a stderr line nobody reads. Contrast the payload STORE's
-    // sweep, which is genuinely best-effort and must never fail a dispatch.
-    let payloadPath: string | undefined;
-    if (input.payload !== undefined) {
-      try {
-        if (!this.payloads) {
-          // Accepting the argument and producing no file is the same silent
-          // degradation as a failed write, so it gets the same answer. This is
-          // reachable: createMcpServer deliberately does not default a payload
-          // directory (see its options), and only the shipped bin passes one.
-          throw new Error("no payload store is configured for this deployment");
-        }
-        payloadPath = this.payloads.write(jobId, input.payload);
-      } catch (err) {
-        return this.rejectSubmit(
-          sessionKey,
-          `The task was not dispatched: its payload could not be stored. ${(err as Error).message}. ` +
-            `Nothing is running, so retrying is not a duplicate submit.`,
-          "payload could not be stored",
-          "Make the payload directory writable (or configure one), then retry the same submit — no task was created, so nothing needs cancelling first.",
-          effectiveInput,
-        );
-      }
-    }
-
     // buildSubmitMessage prepends the `message`-tool veto preamble, the
     // sender identity, and optional context block in the canonical order
-    // tested in session.test.ts, and appends the payload delivery note (the
-    // PATH — never the payload's contents).
-    const message = buildSubmitMessage(effectiveInput, payloadPath);
+    // tested in session.test.ts.
+    const message = buildSubmitMessage(effectiveInput);
 
     // Apply the directive now that we know it correlates to a REAL turn.
     // Absent when the block was present but malformed — stripped, not applied.
@@ -1503,7 +1455,6 @@ export class SessionManager {
       upstreamState: "reconnecting",
       transcriptState: "detached",
       cancellationState: "none",
-      ...(payloadPath ? { payloadPath } : {}),
     };
     if (!input.sessionKey) {
       pushLog(job, {
@@ -2876,7 +2827,6 @@ export class SessionManager {
       nextAction: buildNextAction(job),
       resultSource: job.resultSource,
       terminalReason: job.terminalReason,
-      ...(job.payloadPath ? { payloadPath: job.payloadPath } : {}),
       // The upstream run this turn dispatched. Absent until chat.send answers,
       // and on a job reloaded from a store written before it existed. Exposed
       // because a diagnostic that names no run cannot be checked against

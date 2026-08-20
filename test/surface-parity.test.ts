@@ -152,30 +152,33 @@ describe("read/write separation is stated in prose, not only in annotations", ()
   });
 });
 
-describe("the opaque payload channel is declared once, and reaches both transports", () => {
+describe("run_task's argument list", () => {
   /**
-   * `payload` exists because `task`/`context` reach the agent as one
-   * conversational message: a brief addressed to a manager is passed onward
-   * verbatim to the worker, which reads the manager instructions and
-   * concludes it is the manager. A transport that served run_task WITHOUT
-   * this argument would silently drop callers back into that defect, which is
-   * exactly the class of drift this file exists to catch.
+   * Pinned as an exact set on BOTH transports, because a tool surface grows
+   * by accident: an argument added to one projection and not the other is the
+   * class of drift this file exists to catch, and one that lingers after the
+   * mechanism behind it is gone is worse — it documents a capability the
+   * server no longer has.
    */
-  it("run_task declares payload on both transports, described as data rather than instructions", async () => {
+  it("declares exactly task/agent/context/sessionKey/senderName on both transports", async () => {
     const [viaStdio, viaHttp] = await Promise.all([stdioTools(), httpTools()]);
     for (const [label, tools] of [["stdio", viaStdio], ["http", viaHttp]] as const) {
-      const payload = (
+      const properties = (
         tools.find((t) => t.name === "run_task")?.inputSchema as
-          | { properties?: { payload?: { type?: string; description?: string } } }
+          | { properties?: Record<string, unknown> }
           | undefined
-      )?.properties?.payload;
-      expect(payload?.type, `${label} payload type`).toBe("string");
-      expect(payload?.description, `${label} payload description`).toMatch(/NOT addressed to the agent/);
-      expect(payload?.description, `${label} payload description`).toMatch(/only the path/i);
+      )?.properties;
+      expect(Object.keys(properties ?? {}).sort(), `${label} run_task properties`).toEqual([
+        "agent",
+        "context",
+        "senderName",
+        "sessionKey",
+        "task",
+      ]);
     }
   });
 
-  it("payload is optional, so every existing caller keeps working unchanged", async () => {
+  it("requires only task, so every existing caller keeps working unchanged", async () => {
     const tools = await stdioTools();
     const required = (tools.find((t) => t.name === "run_task")?.inputSchema as { required?: string[] } | undefined)?.required;
     expect(required).toEqual(["task"]);
