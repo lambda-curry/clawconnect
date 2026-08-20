@@ -6,8 +6,6 @@ export type { JobStore, PersistedJob } from "./job-store.ts";
 export { JsonFileAttachmentStore } from "./attachment-store.ts";
 export type { AttachmentStore } from "./attachment-store.ts";
 export type { StoreDegradation, StoreDegradationSink, StoreKind } from "./store-health.ts";
-export { FilePayloadStore, payloadDeliveryNote, DEFAULT_PAYLOAD_DIR, PAYLOAD_TTL_MS } from "./payload-store.ts";
-export type { PayloadStore } from "./payload-store.ts";
 export {
   AgentSessionRuntimeRegistry,
   dispatchAgentSession,

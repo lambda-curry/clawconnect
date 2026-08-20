@@ -1,7 +1,6 @@
 import { join } from "node:path";
 import type { AgentSessionRuntimeRegistry } from "./agent-session.ts";
 import { JsonFileAttachmentStore } from "./attachment-store.ts";
-import type { PayloadStore } from "./payload-store.ts";
 import type { StoreDegradation } from "./store-health.ts";
 import { OpenClawGateway } from "./gateway.ts";
 import { SessionManager } from "./session.ts";
@@ -47,18 +46,12 @@ export class GatewayPool {
    * purpose — a runtime is a property of the deployment, not of an OpenClaw
    * agent — and omitting it means no attachment has anything to ask, which is
    * the default install: every MCP tool behaves identically without one.
-   *
-   * `payloads` is where run_task's opaque payload channel materialises its
-   * files (see payload-store.ts). Shared across agents for the same reason
-   * `runtimes` is, and omitted in-memory (tests, the stdio server) so
-   * constructing a pool never writes to disk as a side effect.
    */
   constructor(
     private readonly registry: AgentRegistry,
     private readonly jobStoreDir?: string,
     private readonly attachmentStoreDir: string | undefined = jobStoreDir,
     private readonly runtimes?: AgentSessionRuntimeRegistry,
-    private readonly payloads?: PayloadStore,
   ) {}
 
   /** Stores that failed a load this process lifetime. Empty is the healthy answer. See `degradations`. */
@@ -92,7 +85,6 @@ export class GatewayPool {
       store,
       attachmentStore,
       this.runtimes,
-      this.payloads,
     );
     const entry: PoolEntry = { agent, gateway, sessions };
     this.entries.set(agent.id, entry);

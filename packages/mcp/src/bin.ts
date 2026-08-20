@@ -38,11 +38,6 @@ const agentSessionRuntimes = await loadAgentSessionRuntimes();
 const attachmentStoreDir =
   process.env.CLAWCONNECT_ATTACHMENT_STORE_DIR?.trim() ||
   join(homedir(), ".clawconnect", "attachments");
-// Where run_task's opaque payload channel materialises its files (see core's
-// payload-store.ts). Passed here rather than defaulted in the factory so
-// constructing a server in a test never writes to a real home directory.
-const payloadDir =
-  process.env.CLAWCONNECT_PAYLOAD_DIR?.trim() || join(homedir(), ".clawconnect", "payloads");
 
 // serveStdio owns the opening exchange: a 2026-07-28 server/discover probe
 // selects the modern per-request-envelope era, while initialize (or another
@@ -50,7 +45,7 @@ const payloadDir =
 // One factory instance is then pinned for the lifetime of this stdio
 // connection, preserving the server-owned task pool across calls.
 serveClawConnectStdio(
-  { registry, agentSessionRuntimes, attachmentStoreDir, payloadDir },
+  { registry, agentSessionRuntimes, attachmentStoreDir },
   {
     onerror: (error) => console.error("[mcp] stdio serving error:", error),
   },

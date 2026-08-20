@@ -1,6 +1,5 @@
 import { McpServer, fromJsonSchema } from "@modelcontextprotocol/server";
 import {
-  FilePayloadStore,
   GatewayPool,
   buildCapabilities,
   buildCheckTaskStructuredContent,
@@ -204,21 +203,6 @@ export interface CreateMcpServerOptions {
    */
   agentSessionRuntimes?: AgentSessionRuntimeRegistry;
   /**
-   * Directory for run_task's opaque payload files (see core's
-   * payload-store.ts).
-   *
-   * Deliberately NOT defaulted here, for the same reason attachmentStoreDir
-   * is not: this factory is what tests and embedders construct, and a default
-   * would have them writing files as a side effect of construction. The
-   * shipped `clawconnect-mcp` bin passes one — that is the deployed path.
-   *
-   * Without it, a run_task carrying a `payload` is REFUSED rather than
-   * dispatched without one: accepting the argument and silently producing no
-   * file is the same failure-rendered-as-a-state the payload channel exists to
-   * prevent. Tasks that pass no payload are unaffected.
-   */
-  payloadDir?: string;
-  /**
    * Directory for per-agent attachment-lineage files (`<agentId>.attachments.json`,
    * see attachment-store.ts). Attachment lineage is durable state the
    * managed-session model depends on — which conversation is delegated to
@@ -304,7 +288,6 @@ export function createMcpServer(config: CreateMcpServerOptions) {
     undefined,
     config.attachmentStoreDir,
     config.agentSessionRuntimes,
-    config.payloadDir ? new FilePayloadStore(config.payloadDir) : undefined,
   );
   // Rehydrate every configured agent's persisted attachment lineage now, not
   // lazily on the first request that happens to touch one — an agent nobody

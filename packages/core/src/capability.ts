@@ -281,20 +281,13 @@ The result is what the user wants — not the jobId. Call check_task in a loop u
 
 Skip the polling loop only for explicit fire-and-forget, or when parallel-dispatching to several agents (dispatch all first, then poll each).
 
-Pass a sessionKey from a previous task to continue the same thread.
-
-Use \`payload\` for content that is data rather than instructions — a spec, a file to hand onward, a brief meant for something further down the chain. It is written to a file and only the PATH is given to the agent, so its contents never become part of what the agent is being asked to do. \`task\`/\`context\` are read as instructions; \`payload\` is not.`,
+Pass a sessionKey from a previous task to continue the same thread.`,
       inputSchema: {
         type: "object",
         properties: {
           task: { type: "string", description: "The task to perform" },
           agent: agentProp,
           context: { type: "string", description: "Additional context for the task" },
-          payload: {
-            type: "string",
-            description:
-              "Opaque content that is NOT addressed to the agent. Written to a file; the agent is told only the path, so these bytes never enter the conversation and are never read as instructions. Use it for anything meant to be handed onward rather than acted on.",
-          },
           sessionKey: {
             type: "string",
             description:
@@ -312,7 +305,6 @@ Use \`payload\` for content that is data rather than instructions — a spec, a 
           taskId: { type: "string" },
           sessionKey: { type: "string" },
           status: { type: "string", enum: ["running"] },
-          payloadPath: { type: "string" },
           execution: { type: "string", enum: ["running"] },
           upstream: { type: "string", enum: ["connected", "reconnecting", "unavailable"] },
           transcript: { type: "string", enum: ["live", "replaying", "detached"] },
@@ -353,8 +345,6 @@ Use \`payload\` for content that is data rather than instructions — a spec, a 
             task: str(args.task) ?? "",
             agent: requestedAgent,
             context: str(args.context),
-            // Passed straight through and never inspected — see payload-store.ts.
-            payload: str(args.payload),
             sessionKey: str(args.sessionKey),
             // The credential's identity is ground truth; a model-supplied
             // senderName only fills in when the connection is anonymous.
