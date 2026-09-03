@@ -432,7 +432,7 @@ export class OpenClawGateway {
   private _connect(): Promise<void> {
     return new Promise<void>((resolve, reject) => {
       const device = loadOrCreateDevice();
-      const ws = new WebSocket(this.wsUrl());
+      const ws = new WebSocket(this.wsUrl(), { headers: this.config.headers });
       const connectId = randomUUID();
 
       const timeout = setTimeout(() => {

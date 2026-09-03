@@ -14,6 +14,37 @@ interface PoolEntry {
   sessions: SessionManager;
 }
 
+/**
+ * Extra HTTP headers merged into every gateway WS connect, parsed once from
+ * CLAWCONNECT_GATEWAY_HEADERS (JSON object). Gateways in trusted-proxy auth
+ * mode (Cloudflare Access ingress) reject connects whose upgrade lacks the
+ * configured identity headers — this lets the deployment admit the MCP
+ * server without touching agents.json. Invalid JSON warns once and disables
+ * the merge rather than blocking startup.
+ */
+let cachedConnectHeaders: Record<string, string> | undefined | null = null;
+function gatewayConnectHeaders(): Record<string, string> | undefined {
+  if (cachedConnectHeaders === null) {
+    const raw = process.env.CLAWCONNECT_GATEWAY_HEADERS?.trim();
+    if (!raw) {
+      cachedConnectHeaders = undefined;
+    } else {
+      try {
+        const parsed = JSON.parse(raw) as Record<string, unknown>;
+        const headers: Record<string, string> = {};
+        for (const [key, value] of Object.entries(parsed)) {
+          if (key.trim() && typeof value === "string") headers[key.trim()] = value;
+        }
+        cachedConnectHeaders = Object.keys(headers).length ? headers : undefined;
+      } catch {
+        console.warn("CLAWCONNECT_GATEWAY_HEADERS is not valid JSON — ignoring");
+        cachedConnectHeaders = undefined;
+      }
+    }
+  }
+  return cachedConnectHeaders;
+}
+
 export class GatewayPool {
   private entries = new Map<string, PoolEntry>();
   private jobIndex = new Map<string, string>();
@@ -71,7 +102,11 @@ export class GatewayPool {
     const existing = this.entries.get(agentId);
     if (existing) return existing;
     const agent = resolveAgent(this.registry, agentId);
-    const gateway = new OpenClawGateway({ url: agent.url, token: agent.password });
+    const gateway = new OpenClawGateway({
+      url: agent.url,
+      token: agent.password,
+      headers: gatewayConnectHeaders(),
+    });
     const onDegraded = (d: StoreDegradation) => this.degradations.push(d);
     const store = this.jobStoreDir
       ? new JsonFileJobStore(join(this.jobStoreDir, `${agent.id}.json`), onDegraded)

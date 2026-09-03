@@ -585,6 +585,12 @@ export type GatewayConfig = {
   url: string;
   token: string;
   agentId?: string;
+  /**
+   * Extra HTTP headers for the WS upgrade (e.g. trusted-proxy identity headers
+   * when the gateway runs in trusted-proxy auth mode behind Cloudflare Access).
+   * Empty/undefined sends no extra headers.
+   */
+  headers?: Record<string, string>;
 };
 
 // ── Tool handler types ────────────────────────────────────────────────────
