@@ -22,25 +22,44 @@ interface PoolEntry {
  * server without touching agents.json. Invalid JSON warns once and disables
  * the merge rather than blocking startup.
  */
+/**
+ * Sentinel client address sent alongside trusted-proxy identity headers. An
+ * OpenClaw gateway that admits this service as a trusted proxy resolves the
+ * client from X-Forwarded-For and rejects the upgrade as "unattributable
+ * proxy-shaped traffic" (HTTP 403) when it is absent. One pooled WebSocket
+ * per agent serves every MCP user, so there is no single real caller address
+ * to forward; TEST-NET-1 (RFC 5737) is reserved for documentation and can
+ * never be a routable client, which makes it an honest "synthetic client"
+ * marker in gateway logs. Set x-forwarded-for explicitly to override.
+ */
+export const SYNTHETIC_CLIENT_ADDRESS = "192.0.2.1";
+
+export function parseGatewayConnectHeaders(raw: string | undefined): Record<string, string> | undefined {
+  const trimmed = raw?.trim();
+  if (!trimmed) return undefined;
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(trimmed) as Record<string, unknown>;
+  } catch {
+    console.warn("CLAWCONNECT_GATEWAY_HEADERS is not valid JSON — ignoring");
+    return undefined;
+  }
+  const headers: Record<string, string> = {};
+  for (const [key, value] of Object.entries(parsed)) {
+    if (key.trim() && typeof value === "string") headers[key.trim().toLowerCase()] = value;
+  }
+  if (!Object.keys(headers).length) return undefined;
+  const carriesIdentity = Object.keys(headers).some((k) => k.startsWith("cf-access-"));
+  if (carriesIdentity && !headers["x-forwarded-for"]) {
+    headers["x-forwarded-for"] = SYNTHETIC_CLIENT_ADDRESS;
+  }
+  return headers;
+}
+
 let cachedConnectHeaders: Record<string, string> | undefined | null = null;
 function gatewayConnectHeaders(): Record<string, string> | undefined {
   if (cachedConnectHeaders === null) {
-    const raw = process.env.CLAWCONNECT_GATEWAY_HEADERS?.trim();
-    if (!raw) {
-      cachedConnectHeaders = undefined;
-    } else {
-      try {
-        const parsed = JSON.parse(raw) as Record<string, unknown>;
-        const headers: Record<string, string> = {};
-        for (const [key, value] of Object.entries(parsed)) {
-          if (key.trim() && typeof value === "string") headers[key.trim()] = value;
-        }
-        cachedConnectHeaders = Object.keys(headers).length ? headers : undefined;
-      } catch {
-        console.warn("CLAWCONNECT_GATEWAY_HEADERS is not valid JSON — ignoring");
-        cachedConnectHeaders = undefined;
-      }
-    }
+    cachedConnectHeaders = parseGatewayConnectHeaders(process.env.CLAWCONNECT_GATEWAY_HEADERS);
   }
   return cachedConnectHeaders;
 }
