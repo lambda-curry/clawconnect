@@ -3,7 +3,7 @@ import {
   isDelegateBlockedTerminalReason,
   type BlockedDelegation,
 } from "./agent-session.ts";
-import { GatewayPool } from "./gateway-pool.ts";
+import type { GatewayPoolView } from "./gateway-pool.ts";
 import { recordTelemetry } from "./telemetry.ts";
 import type {
   CheckTaskOpts,
@@ -29,9 +29,12 @@ function measurePayloadBytes(snapshot: unknown): number {
   return Buffer.byteLength(JSON.stringify(snapshot), "utf8");
 }
 
-export function runTask(pool: GatewayPool, input: TaskInput): RunTaskResult {
+export function runTask(pool: GatewayPoolView, input: TaskInput): RunTaskResult {
   const start = Date.now();
   const entry = pool.forAgent(input.agent);
+  if (input.sessionKey && !entry.sessions.getLatestJobForSession(input.sessionKey)) {
+    throw new Error("Session not found.");
+  }
   const job = entry.sessions.submitTask({
     task: input.task,
     context: input.context,
@@ -166,7 +169,7 @@ function toTaskSummary(
   };
 }
 
-export function listTasks(pool: GatewayPool): TaskSummary[] {
+export function listTasks(pool: GatewayPoolView): TaskSummary[] {
   const start = Date.now();
   const items: TaskSummary[] = [];
   for (const entry of pool.allEntries()) {
@@ -194,7 +197,7 @@ function notFound(): CheckTaskResult {
 
 /** Shared entry-resolution logic for checkTask/getTask/getTaskPrompt. */
 function resolvePoolEntry(
-  pool: GatewayPool,
+  pool: GatewayPoolView,
   opts: { jobId?: string; sessionKey?: string; agent?: string },
 ) {
   let entry = opts.agent ? pool.forAgent(opts.agent) : undefined;
@@ -218,7 +221,7 @@ function resolvePoolEntry(
  * 45s, clamped) and returns early on a terminal status. A timeout return is
  * non-terminal — continuePolling is true and nextAction says to call again.
  */
-export async function checkTask(pool: GatewayPool, opts: CheckTaskOpts): Promise<CheckTaskResult> {
+export async function checkTask(pool: GatewayPoolView, opts: CheckTaskOpts): Promise<CheckTaskResult> {
   const start = Date.now();
   const entry = resolvePoolEntry(pool, opts);
   if (!entry) {
@@ -287,7 +290,7 @@ export async function checkTask(pool: GatewayPool, opts: CheckTaskOpts): Promise
  * what distinguishes it from check_task (contract decision 6).
  */
 export function getTask(
-  pool: GatewayPool,
+  pool: GatewayPoolView,
   opts: { jobId?: string; sessionKey?: string; agent?: string; knownLogCount?: number },
 ): CheckTaskResult {
   const start = Date.now();
@@ -348,7 +351,7 @@ export function getTask(
  * (enforced by the caller, same as any other out-of-scope job access).
  */
 export function getTaskPrompt(
-  pool: GatewayPool,
+  pool: GatewayPoolView,
   opts: { jobId?: string; sessionKey?: string; agent?: string },
 ): TaskPromptResult {
   const entry = resolvePoolEntry(pool, opts);
@@ -367,7 +370,7 @@ export function getTaskPrompt(
  * of asking would be a promise this layer cannot keep.
  */
 export async function cancelTask(
-  pool: GatewayPool,
+  pool: GatewayPoolView,
   opts: { jobId?: string; sessionKey?: string; agent?: string },
 ): Promise<{ found: boolean; alreadyTerminal?: boolean; status?: string; jobId?: string }> {
   const start = Date.now();
@@ -395,7 +398,7 @@ export async function cancelTask(
  * restarts, so completed threads stay listed — that's what makes the
  * sessionKey re-usable for a follow-up task.
  */
-export function listSessions(pool: GatewayPool): ContinuationState[] {
+export function listSessions(pool: GatewayPoolView): ContinuationState[] {
   const all: ContinuationState[] = [];
   for (const entry of pool.allEntries()) {
     for (const session of entry.sessions.listSessions()) {
@@ -416,7 +419,7 @@ export function listSessions(pool: GatewayPool): ContinuationState[] {
  * and are NOT interchangeable with check_task/get_task's `logCursor`.
  */
 export function getSession(
-  pool: GatewayPool,
+  pool: GatewayPoolView,
   opts: {
     sessionId: string;
     mode?: SessionInspectMode;

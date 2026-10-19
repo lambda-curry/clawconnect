@@ -1,6 +1,6 @@
 import { agentBlurb, agentDescriptor, type AgentEntry, type AgentRegistry } from "./agent-registry.ts";
 import { SERVER_VERSION, buildSha, toolsetVersion } from "./build-info.ts";
-import type { GatewayPool } from "./gateway-pool.ts";
+import type { GatewayPool, HumanPrincipal } from "./gateway-pool.ts";
 import { getMemory, listCollections, searchMemory } from "./memory.ts";
 import {
   buildCheckTaskStructuredContent,
@@ -59,7 +59,8 @@ export interface Scope {
  * Who the caller is, established from the credential rather than from
  * anything the model said.
  *
- * `user` is set when a personal token matched; `legacy` marks the shared
+ * `principal` binds a personal token to a gateway login and storage namespace.
+ * `user` is its display label (also set by label-only legacy tokens); `legacy` marks the shared
  * pass, which authenticates but identifies nobody. A model-supplied
  * `senderName` is only ever consulted when `user` is null — identity derives
  * from the credential, so a model cannot claim to be someone else.
@@ -67,6 +68,7 @@ export interface Scope {
 export interface Identity {
   user: string | null;
   legacy?: boolean;
+  principal?: HumanPrincipal;
 }
 
 export interface CapabilityContext {
@@ -224,10 +226,14 @@ const TASK_SUMMARY_SCHEMA: Record<string, unknown> = {
 // ── The capabilities ────────────────────────────────────────────────────────
 
 export function buildCapabilities(ctx: CapabilityContext): Capability[] {
-  const { pool, registry, scope, identity } = ctx;
+  const { registry, scope, identity } = ctx;
+  const pool = ctx.pool.forPrincipal(identity.principal);
   const agentsById = new Map<string, AgentEntry>(registry.agents.map((a) => [a.id, a]));
   const scopedAgents = () =>
     scope.allowedIds.map((id) => agentsById.get(id)).filter((a): a is AgentEntry => Boolean(a));
+
+  // Agent-level QMD credentials cannot vouch for human transcript isolation.
+  const memoryAgents = () => identity.principal ? [] : scopedAgents();
 
   const blurbs = scope.allowedIds
     .map((id) => agentBlurb(agentsById.get(id) ?? { id, url: "", password: "", openclawAgentId: "" }))
@@ -816,7 +822,7 @@ At detail levels that include it, \`updates\` is a bounded recent-activity windo
       },
       handler: async (args) =>
         jsonResult(
-          await searchMemory(scopedAgents(), {
+          await searchMemory(memoryAgents(), {
             query: str(args.query) ?? "",
             limit: num(args.limit),
             collections: Array.isArray(args.collections) ? (args.collections as string[]) : undefined,
@@ -855,7 +861,7 @@ At detail levels that include it, \`updates\` is a bounded recent-activity windo
         openWorldHint: false,
       },
       handler: async (args) => {
-        const result = await getMemory(scopedAgents(), str(args.file) ?? "");
+        const result = await getMemory(memoryAgents(), str(args.file) ?? "");
         return jsonResult(result, !result.found);
       },
     },
@@ -879,7 +885,7 @@ At detail levels that include it, \`updates\` is a bounded recent-activity windo
         idempotentHint: true,
         openWorldHint: false,
       },
-      handler: () => jsonResult({ collections: listCollections(scopedAgents()) }),
+      handler: () => jsonResult({ collections: listCollections(memoryAgents()) }),
     },
   ];
 
@@ -966,7 +972,7 @@ It also reports \`degradedStores\` when a persistence file could not be read at 
         // Omitted entirely when nothing degraded, so its PRESENCE is the
         // signal — a field that is always there, usually empty, is one a
         // reader learns to skip.
-        ...(ctx.pool.storeHealth().length ? { degradedStores: ctx.pool.storeHealth() } : {}),
+        ...(pool.storeHealth().length ? { degradedStores: pool.storeHealth() } : {}),
       }),
   });
 

@@ -2869,10 +2869,14 @@ export class SessionManager {
     return [...this.sessions.values()];
   }
 
+  hasRunningJobs(): boolean {
+    return [...this.jobs.values()].some((job) => job.status === "running");
+  }
+
   resolveJob(jobId?: string, sessionKey?: string): Job | undefined {
     if (jobId) {
       const job = this.jobs.get(jobId);
-      if (job) return job;
+      return job && (!sessionKey || job.sessionKey === sessionKey) ? job : undefined;
     }
     if (sessionKey) {
       return this.getLatestJobForSession(sessionKey);

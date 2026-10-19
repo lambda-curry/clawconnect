@@ -210,46 +210,51 @@ ChatGPT will call `run_task`, then poll with `check_task` until the task complet
 - The widget is a read-only "task center": session-first rows (one per `sessionKey`), collapsing to a focused single-task view when only one session has active work, expandable into per-session task history. It polls `get_task`/`list_tasks`/`get_session` directly (never `check_task`) on an attention-shaped cadence that stops entirely once everything in scope is terminal — the assistant's own `check_task(mode:"wait")` loop is unaffected by and independent of whether the widget is mounted, enabled, or even loads successfully. See `docs/architecture/2026-07-27-chatgpt-ui-reconciliation.md` for the full design.
 - Task titles are generated from non-sensitive fields (summary/artifacts/status) by default; the original submitted prompt is never shown unless you explicitly use the "Show original request" action (`get_task detail:"prompt"`, same authorization boundary as the API)
 - If the widget causes issues, set `ENABLE_CHATGPT_UI_WIDGET=false` and restart — `run_task`/`check_task` correctness never depends on it
-- In-flight jobs survive a connector restart: each agent's currently-`running` jobs (jobId/sessionKey/prompt plus the confirmed upstream run/transcript cursors — no logs, nothing terminal) are written to `apps/chatgpt/.job-store/<agentId>.json` and reloaded on boot, then reattached through durable transcript replay. A job that was already terminal before the restart is never written, so the file can't grow into a log; delete the directory any time to reset to pre-persistence behavior (a restart during that job just re-derives from scratch instead of reattaching)
+- In-flight jobs survive a connector restart: each agent's currently-`running` jobs (jobId/sessionKey/prompt plus the confirmed upstream run/transcript cursors — no logs, nothing terminal) are written to `apps/chatgpt/.job-store/<agentId>.json` on the service path or its `principals/<principal-hash>/` subdirectory for a personal principal, and reloaded on boot, then reattached through durable transcript replay. A job that was already terminal before the restart is never written, so the file can't grow into a log; delete the directory any time to reset to pre-persistence behavior (a restart during that job just re-derives from scratch instead of reattaching)
 - **Not verified against live ChatGPT rendering** — this is a local, test-ready prototype (unit-tested state logic + HTTP-integration-tested server wiring), not a deployed/live-tested one. See the Local Testing coverage table below
 
 #### Authentication & user identity
 
-The HTTP server (`apps/chatgpt`) gates `/mcp` with tokens supplied via `?pass=<token>` on the connector URL or `Authorization: Bearer <token>`. Two env vars control it:
+The HTTP server (`apps/chatgpt`) gates `/mcp` with tokens supplied via `?pass=<token>` on the connector URL or `Authorization: Bearer <token>`. If both are supplied, the bearer credential takes precedence.
 
 ```env
-# Personal tokens — token authenticates AND identifies the caller.
-MCP_USER_TOKENS=Jake:a1b2c3...,Mohsen:d4e5f6...
-
 # Optional runtime-editable JSON token file. Changes are picked up without restart.
 MCP_USER_TOKENS_FILE=/data/clawconnect/user-tokens.json
 
-# Legacy shared pass — still accepted, but resolves to an anonymous caller.
+# Alternatively, supply the same JSON record format through MCP_USER_TOKENS.
+# Legacy shared pass — still accepted on the existing service identity path.
 PUBLIC_MCP_PASS=shared-secret
 ```
 
-When a request authenticates with a personal token:
-
-- every `run_task` is stamped with that person's name (`[Message from: Jake]` in the task the agent receives) — the model-supplied `senderName` argument is ignored, so identity derives from the credential rather than from anything spoofable
-- `serverInfo.name` becomes `ClawConnect (Jake)` so multiple people's connectors are distinguishable
-
-`MCP_USER_TOKENS_FILE` is additive with `MCP_USER_TOKENS` and supports these JSON shapes:
+A personal token record binds a display name to a stable `principalId` and the person's gateway login email:
 
 ```json
-{ "Faraz": "cc-faraz-...", "Junaid": "cc-junaid-..." }
+{
+  "Alice": {
+    "token": "<personal-token>",
+    "principalId": "p-alice",
+    "loginEmail": "alice@example.test"
+  }
+}
 ```
 
-```json
-{ "tokens": { "Faraz": "cc-faraz-...", "Junaid": "cc-junaid-..." } }
-```
+The file and `MCP_USER_TOKENS` accept that object, a `{ "tokens": { ... } }` wrapper, or an array of `{ "name": "Alice", "token": "<personal-token>", "principalId": "p-alice", "loginEmail": "alice@example.test" }` records. File records are additive with environment records; duplicate credentials or conflicting login emails for one principal are rejected. Principal IDs contain 1–128 letters, digits, dots, underscores or hyphens, start with a letter or digit, and cannot be `service`. Keep the principal ID and login email unchanged when rotating the token; replace only `token`.
 
-```json
-[{ "name": "Faraz", "token": "cc-faraz-..." }]
-```
+For a bound personal token:
 
-When a request authenticates with the legacy `PUBLIC_MCP_PASS`, tasks arrive unattributed (unless the model passes `senderName`) and tool responses nudge the caller to get a personal token. Revoking one person = removing their entry from `MCP_USER_TOKENS` or the runtime token file; the shared pass never needs rotating for that.
+- gateway sessions are created under that person's login identity, using the gateway's existing private/draft defaults and sharing rules
+- each principal gets separate gateway connections, persisted jobs, attachment records, and task/session lookups; IDs copied from another principal return not-found
+- every `run_task` is stamped with the configured name (`[Message from: Alice]`), ignoring model-supplied `senderName`; `serverInfo.name` becomes `ClawConnect (Alice)`
 
-If neither env var is set, `/mcp` is open (no gate) — only do that on a private network.
+The gateway must trust this connector's proxy headers on its private network. Personal connections override the global gateway email/assertion headers with the bound email, a non-empty assertion placeholder, and `x-forwarded-for: 192.0.2.1`. Service connections retain `CLAWCONNECT_GATEWAY_HEADERS`. Idle personal connections close after `CLAWCONNECT_PRINCIPAL_IDLE_TIMEOUT_MS` (default 300000 milliseconds), after running work has finished.
+
+Existing label-only CSV (`MCP_USER_TOKENS=Alice:<legacy-token>`), JSON string values (`{ "Alice": "<legacy-token>" }`), and array records containing only `name`/`token` remain supported on the service path. They do not acquire human-owned sessions or personal state. A structured object record with a missing or invalid binding is rejected. The legacy `PUBLIC_MCP_PASS` also uses the service path; tasks are unattributed unless the model supplies `senderName`.
+
+Removing a file record revokes it on the next request. Unknown/revoked tokens, invalid bindings, and missing, unreadable, or malformed configured token files reject personal authentication without falling back to open access, the shared pass, or service credentials. A supplied unknown credential is rejected even when no auth settings exist. Only when all auth settings are absent and no credential is supplied is `/mcp` open; restrict that mode to a private network. Existing shared persistence files stay on the service path and are never imported into personal stores.
+
+Personal persistence lives in a directory derived from a hash of `principalId`, with a `principal.json` manifest containing the principal ID and login email, never the bearer token. Restart recovery uses that binding's personal connection; invalid or unreadable bindings are never recovered with service credentials.
+
+Memory tools use the agent-level QMD credential, whose accessible collections are restricted by the optional agent collection list. Without that list, requests can reach any collection authorized for that credential, so ClawConnect cannot assume private transcripts are excluded. For personal principals, `search_memory` and `list_collections` return empty results and `get_memory` returns not-found without sending a QMD request. Legacy/service callers retain the configured agent-level memory access.
 
 ## Usage
 

@@ -47,6 +47,19 @@ The core package owns all communication with OpenClaw. Nothing else speaks WebSo
 Key design decisions:
 - Gateway accepts config explicitly — no environment variable reads in core
 - SessionManager is stateful but does not own the gateway (receives it as a dependency)
+- HTTP personal tokens bind a stable `principalId` to a gateway `loginEmail`.
+  `GatewayPool` owns a separate socket, SessionManager, job index, and persistence
+  namespace for each `(agentId, principalId)`. Personal upgrades carry that human's
+  trusted-proxy identity; legacy credentials retain the service path. Personal
+  stores live under `principals/<sha256(principalId)>/`, with a validated
+  `principal.json` binding for restart recovery. Shared files are never imported.
+  Idle personal sockets close after `CLAWCONNECT_PRINCIPAL_IDLE_TIMEOUT_MS`
+  (default five minutes); active jobs keep their connection. Tool declarations
+  and wire response shapes remain unchanged.
+- QMD memory uses each agent's `qmdToken`, independently of the gateway identity.
+  Collection filters cannot prove those credentials exclude private transcripts,
+  so personal principals receive no memory hits, documents, or collection names.
+  Legacy service access keeps its existing QMD behavior.
 - Device identity stored at `~/.openclaw/clawd-ui-device.json`
 
 ## Runtime boundary (optional extension)
