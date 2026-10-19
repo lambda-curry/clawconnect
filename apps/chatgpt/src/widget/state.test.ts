@@ -880,8 +880,8 @@ describe("shouldRenderImmediately — lifecycle/terminal changes render now, cos
 
 describe("collectFollowUpWakes — once-per-transition host nudges", () => {
   it("seeds first sight without waking (hydrate of an already-terminal card stays quiet)", () => {
-    const priorGroups = new Map();
-    const alreadyWoken = new Set();
+    const priorGroups = new Map<string, ReturnType<typeof groupStatus>>();
+    const alreadyWoken = new Set<string>();
     const first = collectFollowUpWakes({
       tasks: [task({ taskId: "t1", status: "completed" })],
       priorGroups,
@@ -892,8 +892,8 @@ describe("collectFollowUpWakes — once-per-transition host nudges", () => {
   });
 
   it("wakes once when a seeded task enters needs_attention, completed, or failed", () => {
-    const priorGroups = new Map([["t1", "active"]]);
-    const alreadyWoken = new Set();
+    const priorGroups = new Map<string, ReturnType<typeof groupStatus>>([["t1", "active"]]);
+    const alreadyWoken = new Set<string>();
     for (const [status, group] of [
       ["needs-human", "needs_attention"],
       ["completed", "completed"],
@@ -913,8 +913,8 @@ describe("collectFollowUpWakes — once-per-transition host nudges", () => {
   });
 
   it("does not re-wake the same taskId+group, and ignores same-group status renames", () => {
-    const priorGroups = new Map([["t1", "active"]]);
-    const alreadyWoken = new Set();
+    const priorGroups = new Map<string, ReturnType<typeof groupStatus>>([["t1", "active"]]);
+    const alreadyWoken = new Set<string>();
     const intoNeeds = collectFollowUpWakes({
       tasks: [task({ taskId: "t1", status: "needs-human" })],
       priorGroups,
@@ -930,7 +930,7 @@ describe("collectFollowUpWakes — once-per-transition host nudges", () => {
     expect(stillNeeds.wakes).toEqual([]);
     const replay = collectFollowUpWakes({
       tasks: [task({ taskId: "t1", status: "needs-human" })],
-      priorGroups: new Map([["t1", "active"]]),
+      priorGroups: new Map<string, ReturnType<typeof groupStatus>>([["t1", "active"]]),
       alreadyWoken,
     });
     expect(replay.wakes).toEqual([]);
@@ -939,8 +939,8 @@ describe("collectFollowUpWakes — once-per-transition host nudges", () => {
   it("does not wake on active-only transitions", () => {
     const { wakes } = collectFollowUpWakes({
       tasks: [task({ taskId: "t1", status: "queued" })],
-      priorGroups: new Map([["t1", "active"]]),
-      alreadyWoken: new Set(),
+      priorGroups: new Map<string, ReturnType<typeof groupStatus>>([["t1", "active"]]),
+      alreadyWoken: new Set<string>(),
     });
     expect(wakes).toEqual([]);
   });

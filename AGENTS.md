@@ -185,8 +185,7 @@ cannot perform is the exact bug that mechanism exists to fix.
 pnpm install
 pnpm run ready                    # build + typecheck, all packages
 ./node_modules/.bin/vp test       # full suite
-./node_modules/.bin/vp lint       # 7 pre-existing TS2322 in apps/chatgpt/src/widget/state.test.ts are baseline
-                                  # (collectFollowUpWakes' Map/Set literals; count last checked 2026-08-10)
+./node_modules/.bin/vp lint       # lint + typecheck, tests included
 ```
 
 Assert behavior, not text. An earlier version of the hygiene test grepped the
