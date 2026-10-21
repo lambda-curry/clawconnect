@@ -1,4 +1,5 @@
 import { McpServer, fromJsonSchema } from "@modelcontextprotocol/server";
+import { AjvJsonSchemaValidator } from "@modelcontextprotocol/server/validators/ajv";
 import {
   GatewayPool,
   buildCapabilities,
@@ -227,6 +228,8 @@ export interface CreateMcpServerOptions {
   protocol?: { era: "legacy" | "modern"; version?: string };
 }
 
+const schemaValidators = new WeakMap<McpServer, AjvJsonSchemaValidator>();
+
 /**
  * Register one capability on an McpServer. Shared by every transport: the
  * declaration is CONVERTED, never restated, and the handler is the
@@ -242,13 +245,19 @@ export function registerCapability(
     renderText?: (structuredContent: unknown) => string | undefined;
   } = {},
 ): void {
+  // The SDK's default validator caches every schema for the life of the process.
+  let validator = schemaValidators.get(server);
+  if (!validator) {
+    validator = new AjvJsonSchemaValidator();
+    schemaValidators.set(server, validator);
+  }
   server.registerTool(
     capability.name,
     {
       description: capability.description,
-      inputSchema: fromJsonSchema<Record<string, unknown>>(capability.inputSchema as never),
+      inputSchema: fromJsonSchema<Record<string, unknown>>(capability.inputSchema as never, validator),
       ...(capability.outputSchema
-        ? { outputSchema: fromJsonSchema(capability.outputSchema as never) }
+        ? { outputSchema: fromJsonSchema(capability.outputSchema as never, validator) }
         : {}),
       annotations: capability.annotations,
       ...(opts.meta ? { _meta: opts.meta } : {}),
