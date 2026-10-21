@@ -6,4 +6,7 @@ export default defineConfig({
   run: {
     cache: true,
   },
+  test: {
+    globalSetup: ["./test/build.ts"],
+  },
 });
