@@ -5,7 +5,7 @@ export default function build() {
   // Rebuild before test imports so artifact-based checks cannot exercise stale code.
   execFileSync("pnpm", ["exec", "vp", "run", "-r", "--no-cache", "build"], {
     cwd: fileURLToPath(new URL("../", import.meta.url)),
-    encoding: "utf8",
+    stdio: "inherit",
     timeout: 60_000,
   });
 }
