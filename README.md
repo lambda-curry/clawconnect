@@ -53,13 +53,80 @@ A typical 3-minute task with `check_task mode: "wait"` at the 45s default needs 
 
 ## Configuration
 
-The MCP server reads three environment variables:
+The gateway connection uses these environment variables:
 
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `OPENCLAW_URL` | Yes | WebSocket URL for your OpenClaw instance (e.g., `ws://127.0.0.1:18789`) |
 | `OPENCLAW_PASSWORD` | Yes | OpenClaw gateway password |
 | `OPENCLAW_AGENT_ID` | No | Agent name to connect to (default: `main`) |
+
+Long-running stdio and HTTP servers also apply these memory limits. Values are
+positive integers; unset, zero, negative, fractional, or invalid values use the
+defaults. Limits are read when a session manager or gateway is constructed.
+
+| Variable | Default | Bound |
+|----------|---------|-------|
+| `CLAWCONNECT_FINISHED_JOB_MAX_COUNT` | `100` | Finished jobs retained per agent, oldest completion evicted first |
+| `CLAWCONNECT_FINISHED_JOB_MAX_AGE_MS` | `86400000` (24 hours) | Time from a job's first terminal outcome |
+| `CLAWCONNECT_RUNNING_LOG_MAX_ENTRIES` | `2000` | Retained log entries per running job, including the truncation marker |
+| `CLAWCONNECT_RUNNING_LOG_MAX_BYTES` | `2097152` (2 MiB) | Serialized UTF-8 log bytes per running job, including metadata and marker |
+| `CLAWCONNECT_FINISHED_LOG_MAX_ENTRIES` | `200` | Retained log entries per finished job |
+| `CLAWCONNECT_FINISHED_LOG_MAX_BYTES` | `262144` (256 KiB) | Serialized UTF-8 log bytes per finished job |
+| `CLAWCONNECT_ATTACHMENT_MAX_COUNT` | `1000` | Attachment records per agent across all conversations and replacement lineage |
+| `CLAWCONNECT_ATTACHMENT_MAX_AGE_MS` | `2592000000` (30 days) | Time since retention-clock initialization, attachment creation, refresh, observation, replacement, or detachment |
+| `CLAWCONNECT_TRANSCRIPT_MAX_MESSAGES` | `10000` | Messages accumulated by one replay, and unsequenced message identities per watch |
+| `CLAWCONNECT_TRANSCRIPT_MAX_BYTES` | `16777216` (16 MiB) | Serialized UTF-8 message bytes accumulated by one replay |
+| `CLAWCONNECT_TRANSCRIPT_MAX_PAGES` | `100` | History pages requested by one replay |
+| `CLAWCONNECT_TRANSCRIPT_QUEUE_MAX_ITEMS` | `1000` | Running plus queued transcript operations per watch |
+| `CLAWCONNECT_TRANSCRIPT_QUEUE_MAX_BYTES` | `8388608` (8 MiB) | Serialized UTF-8 event payload bytes held by those operations |
+
+Finished jobs expire when either retention limit is reached. Eviction also
+removes their logs, continuation state, session history, and routing indexes;
+reads of evicted tasks return the existing not-found response. Running jobs
+are preserved. Busy submission errors are returned without retaining a job,
+so retries cannot evict completed results. Maintenance runs every minute and on job reads and writes, so
+idle processes release expired state too. Embedders should call
+`GatewayPool.closeAll()` or `SessionManager.close()` when disposing instances.
+
+Attachment pruning runs at startup, on writes, and during maintenance, and
+saves the pruned set to disk. Current pointers can expire as well as historical
+records. Count eviction removes superseded/detached history before current
+pointers, oldest first within each group. Legacy records without a
+`retentionUpdatedAt` clock start aging at first load; the clock is persisted
+so subsequent restarts do not extend it. Before the first overwrite of an
+existing attachment file, its original bytes are copied to
+`<file>.pre-retention`; that backup is never overwritten. If backup creation
+fails, saving is refused and store degradation is reported.
+Attachments required by a running job are preserved and can temporarily
+exceed the count cap; records with only a stale runtime status have no such
+exemption. Old lineage links may name records that have expired. Pruning does
+not stop the runtime session itself.
+
+A replay, identity, or queue overflow pauses transcript projection with the
+distinct `limit_exceeded` reason, keeping reconnect handlers registered. One
+bounded head recovery skips the backlog and resumes live projection, explicitly
+logging skipped sequence positions and known ignored live records (the counts
+can overlap), with a `limit_recovered` update in the job log. If a safe head
+cannot be read, the watch stays paused and retries on reconnect. Upstream
+execution continues; full history remains in the upstream transcript.
+Sequenced streams deduplicate with the sequence cursor; legacy unsequenced
+streams keep bounded identities.
+These limits bound retained replay state, not the size of a single upstream
+WebSocket frame. HTTP responses stream with backpressure and cancel their body
+reader when the client disconnects.
+
+`get_connection_info` includes aggregate `retained` counters, also available
+from HTTP `/health/retention`: jobs, finished jobs, session/history/routing and
+auxiliary index sizes, attachment records/sessions, and gateway replay bytes,
+messages, queue depth/bytes, deduplication identities, paused watches, skipped
+records/sequence positions, limit failures, and retained serialized log bytes.
+Logs retain the most recent entries within both entry and byte budgets, with
+an explicit truncation marker and monotonic event cursors. Terminal transitions
+immediately apply the finished-job budget. Log entry settings below 2 and byte
+settings below 256 use defaults so a marker and recent entry fit. Summaries and
+artifacts remain independent of log truncation. These bounds do not impose a
+global process RSS limit.
 
 ## Setup
 

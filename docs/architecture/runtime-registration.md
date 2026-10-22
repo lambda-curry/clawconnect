@@ -100,6 +100,18 @@ invocations.
 
 ## Restart invariant
 
+Attachment history is retained within the count and age limits documented in
+the README (`CLAWCONNECT_ATTACHMENT_MAX_COUNT` and
+`CLAWCONNECT_ATTACHMENT_MAX_AGE_MS`). Legacy records start their durable retention
+clock at first load, preserving the original creation and observation timestamps.
+The file store preserves original bytes in `<file>.pre-retention` before its
+first overwrite, refusing saves if that backup cannot be made. Count eviction
+prioritizes superseded/detached history over current pointers. Startup and periodic maintenance prune
+stale current pointers as well as superseded and detached lineage, then persist
+the remaining records. A running ClawConnect job protects the attachments it
+depends on; an old stored runtime status alone does not. Eviction only removes
+connector bookkeeping and never stops a runtime session.
+
 `SessionManager.observationSeq` resumes above the highest `observationToken`
 found in any reloaded record, current or superseded. The token is durable and
 its counter is not, so a process that restarted at zero would mint tokens the

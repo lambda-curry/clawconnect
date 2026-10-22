@@ -70,10 +70,9 @@ export type ErrorInfo = {
 /**
  * `seq` is a 1-based, monotonically increasing, per-job event id — the
  * explicit cursor unit for the log-projection window (see
- * log-projection.ts). It happens to equal the entry's position in
- * `Job.logs` today (append-only, never trimmed from the front), but callers
- * must treat it as an opaque cursor, not an array index: that's what lets
- * storage strategy change later without moving the client contract. Absent
+ * log-projection.ts). Retention trims `Job.logs` while preserving these
+ * numbers. Callers must treat it as an opaque cursor, not an array index,
+ * so storage changes do not move the client contract. Absent
  * only on entries constructed before this field existed (defensive; every
  * current write path stamps it).
  */
@@ -103,6 +102,11 @@ export type TaskCancellationState = "none" | "requested" | "acknowledged" | "rec
 
 /** Transport observation emitted by the resumable OpenClaw transcript reader. */
 export type TranscriptTransportUpdate = {
+  reason?: "limit_exceeded" | "limit_recovered";
+  /** Known live records ignored; may overlap the skipped sequence range. */
+  skippedEvents?: number;
+  /** Cursor distance intentionally skipped when resuming from the head. */
+  skippedSequenceCount?: number;
   upstream: TaskUpstreamState;
   transcript: TaskTranscriptState;
   lastSeenSequence?: number;
@@ -152,8 +156,8 @@ export type AttachmentLiveStatus = Exclude<AgentSessionState, "unavailable" | "u
 
 /**
  * One conversation may have at most one CURRENT managed-session
- * attachment at a time, but every attachment it has ever had is kept (see
- * SessionAttachmentState) — `id` is ClawConnect's own identifier for this record,
+ * attachment at a time, with historical records kept within the configured
+ * retention bounds (see SessionAttachmentState) — `id` is ClawConnect's own identifier for this record,
  * distinct from `handle` (the session's own id in its runtime's namespace), so
  * replacement lineage can chain through `replacesAttachmentId` even if a
  * handle were ever reused.
@@ -163,6 +167,8 @@ export type AttachmentLiveStatus = Exclude<AgentSessionState, "unavailable" | "u
  * vocabulary, written only through the guarded write-back in session.ts.
  */
 export type AgentSessionAttachment = {
+  /** Connector retention clock; legacy records start at load time, independent of original attachment/observation timestamps. */
+  retentionUpdatedAt?: number;
   id: string;
   /**
    * Which system owns this session's lifecycle — a host-registered runtime
@@ -253,9 +259,8 @@ export type AgentSessionAttachment = {
 
 /**
  * Session-scoped, not job-scoped: survives across every job submitted on the
- * same sessionKey. `attachments` never drops a record — replacement and
- * detachment both leave their prior record in place with an updated status,
- * so the full lineage is always readable.
+ * same sessionKey. Replacement and detachment preserve prior records until
+ * count or age retention evicts them; lineage pointers may outlive a record.
  */
 export type SessionAttachmentState = {
   sessionKey: string;
@@ -428,6 +433,10 @@ export type Job = {
   startedAt: number;
   lastEventAt: number;
   logs: LogEntry[];
+  /** Total original events, independent of the bounded retained log window. */
+  logEventCount?: number;
+  /** UTF-8 JSON bytes retained in logs, maintained by the log budget helper. */
+  logBytes?: number;
   artifacts: Artifacts;
   recovery?: JobRecoveryState;
   upstreamState: TaskUpstreamState;
@@ -501,8 +510,8 @@ export type JobSnapshot = {
    * entries when the caller passed no cursor (or 0), at most 5 when it
    * passed a cursor with new activity beyond it. Consecutive tool/tool-result
    * pairs may be collapsed and entry text is truncated (see log-projection.ts).
-   * The server retains the full history internally; nothing here ever
-   * reflects that history's true size — read `logEventCount` for that.
+   * A truncation entry marks a prefix evicted by server retention. Cursors
+   * and `logEventCount` still count all original events, including that prefix.
    */
   logs: LogEntry[];
   artifacts: Artifacts;
@@ -538,7 +547,7 @@ export type JobSnapshot = {
    */
   logCursor: number;
   /** Total events ever recorded for this job server-side — the full,
-   *  uncapped authoritative count (Job.logs is never trimmed) — for
+   *  uncapped original event count, including evicted log entries — for
    *  telemetry/UI awareness of how much was omitted from the bounded `logs`
    *  projection above. */
   logEventCount: number;

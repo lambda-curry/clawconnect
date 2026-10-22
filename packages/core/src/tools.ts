@@ -441,7 +441,7 @@ export function getSession(
   const mode = opts.mode ?? "snapshot";
   const limit = Math.max(1, Math.min(200, opts.limit ?? 50));
   const after = Math.max(0, opts.after ?? 0);
-  const events = job.logs.slice(after, after + limit);
+  const events = job.logs.filter((event) => (event.seq ?? 0) > after).slice(0, limit);
 
   const agentSession = entry.sessions.getAgentSessionAttachment(opts.sessionId);
 
@@ -463,7 +463,7 @@ export function getSession(
     summary: job.summary,
     error: job.error,
     ...(mode === "snapshot" || mode === "tasks" ? {} : { events }),
-    ...(mode === "tail" ? { nextAfter: after + events.length } : {}),
+    ...(mode === "tail" ? { nextAfter: events.at(-1)?.seq ?? after } : {}),
     ...(tasks ? { tasks } : {}),
     ...(agentSession ? { agentSession } : {}),
   };

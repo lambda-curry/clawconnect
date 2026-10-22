@@ -24,6 +24,8 @@ import {
   UI_RESOURCE_MIME_TYPE,
 } from "./ui-meta.js";
 
+import { streamResponseBody } from "./http-stream.js";
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // scripts/build-widget.mjs always writes to <package root>/dist/widget.html.
 // Resolving via "../dist" (not the running module's own directory) finds it
@@ -508,33 +510,10 @@ export function createApp(registry: AgentRegistry, opts: CreateAppOptions = {}):
   hono.get("/", (c) => c.text("OK"));
   hono.get("/health", (c) => c.json({ ok: true }));
 
-  // What this process is holding, so a climbing RSS can be attributed instead of
-  // guessed at. Jobs are retained in memory for the life of the process and their
-  // logs are never trimmed, so `retained` is the number that separates "busy day"
-  // from "leak": memory that rises while these counts stay flat is somewhere else,
-  // and memory that rises with them is exactly this retention.
-  //
-  // Aggregate only — no ids, no session keys, no log text — because this port may
-  // sit behind a public ingress. Same reason it is a plain GET and not a tool: a
-  // new tool declaration would need every connected client to re-approve its
-  // frozen catalog (see AGENTS.md), which is a heavy price for a counter.
+  // Aggregate only: this endpoint can sit behind public ingress.
   hono.get("/health/retention", (c) => {
     const usage = process.memoryUsage();
-    const retained = pool.allEntries().reduce(
-      (total, entry) => {
-        const stats = entry.sessions.retentionStats();
-        return {
-          jobs: total.jobs + stats.jobs,
-          logEntries: total.logEntries + stats.logEntries,
-          logTextChars: total.logTextChars + stats.logTextChars,
-          oldestJobStartedAt:
-            stats.oldestJobStartedAt === undefined
-              ? total.oldestJobStartedAt
-              : Math.min(total.oldestJobStartedAt ?? stats.oldestJobStartedAt, stats.oldestJobStartedAt),
-        };
-      },
-      { jobs: 0, logEntries: 0, logTextChars: 0, oldestJobStartedAt: undefined as number | undefined },
-    );
+    const retained = pool.retentionStats();
     return c.json({
       ok: true,
       uptimeSeconds: Math.round(process.uptime()),
@@ -604,10 +583,9 @@ export function createApp(registry: AgentRegistry, opts: CreateAppOptions = {}):
       const webResponse = await mcpHandler.fetch(webRequest, { authInfo: authInfoFor(identity) });
       const headers = Object.fromEntries(webResponse.headers.entries());
       res.writeHead(webResponse.status, { ...corsHeaders(req), ...headers });
-      if (webResponse.body) {
-        for await (const chunk of webResponse.body) res.write(chunk);
-      }
-      res.end();
+      await streamResponseBody(webResponse.body, res).catch((error: unknown) => {
+        console.error("[http] response stream failed:", error);
+      });
       console.log(`[mcp] -> ${res.statusCode}`);
       return;
     }
@@ -620,8 +598,9 @@ export function createApp(registry: AgentRegistry, opts: CreateAppOptions = {}):
     const webRes = await hono.fetch(webReq);
 
     res.writeHead(webRes.status, Object.fromEntries(webRes.headers.entries()));
-    const buf = await webRes.arrayBuffer();
-    res.end(Buffer.from(buf));
+    await streamResponseBody(webRes.body, res).catch((error: unknown) => {
+      console.error("[http] response stream failed:", error);
+    });
   }
 
   return { requestListener, pool };

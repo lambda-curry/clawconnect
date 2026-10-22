@@ -139,6 +139,7 @@ export class GatewayPool {
       store,
       attachmentStore,
       this.runtimes,
+      (jobId) => this.jobIndex.delete(jobId),
     );
     const entry: PoolEntry = { agent, gateway, sessions };
     this.entries.set(agent.id, entry);
@@ -164,13 +165,18 @@ export class GatewayPool {
   }
 
   rememberJob(jobId: string, agentId: string): void {
-    this.jobIndex.set(jobId, agentId);
+    if (this.entries.get(agentId)?.sessions.getJob(jobId)) this.jobIndex.set(jobId, agentId);
   }
 
   forJob(jobId: string): PoolEntry | undefined {
     const agentId = this.jobIndex.get(jobId);
     if (!agentId) return undefined;
-    return this.entries.get(agentId);
+    const entry = this.entries.get(agentId);
+    if (!entry?.sessions.getJob(jobId)) {
+      this.jobIndex.delete(jobId);
+      return undefined;
+    }
+    return entry;
   }
 
   forSession(sessionKey: string): PoolEntry | undefined {
@@ -184,8 +190,42 @@ export class GatewayPool {
     return [...this.entries.values()];
   }
 
+  retentionStats() {
+    const entries = this.allEntries();
+    const agents = entries.map((entry) => entry.sessions.retentionStats());
+    const retained = {
+      jobs: 0, finishedJobs: 0, logEntries: 0, logTextChars: 0, logBytes: 0,
+      latestJobIndex: 0, sessionStates: 0, historySessions: 0, historyEntries: 0,
+      provisionalOutcomes: 0, recheckSettled: 0, cancelRequested: 0, cancelInFlight: 0,
+      upstreamRunIds: 0, reconcilers: 0, attachmentSessions: 0, attachments: 0,
+    };
+    for (const stats of agents) {
+      for (const key of Object.keys(retained) as (keyof typeof retained)[]) retained[key] += stats[key];
+    }
+    const gateway = {
+      pendingTranscriptWork: 0, pendingTranscriptBytes: 0,
+      transcriptReplayMessages: 0, transcriptReplayBytes: 0, transcriptSeenIds: 0,
+      transcriptLimitFailures: 0, transcriptWatches: 0, pendingRpcs: 0, subscribers: 0,
+      transcriptPausedWatches: 0, transcriptSkippedEvents: 0, transcriptSkippedSequences: 0,
+    };
+    for (const entry of entries) {
+      const stats = entry.gateway.diagnostics();
+      for (const key of Object.keys(gateway) as (keyof typeof gateway)[]) gateway[key] += stats[key];
+    }
+    const starts = agents.flatMap((stats) => stats.oldestJobStartedAt === undefined ? [] : [stats.oldestJobStartedAt]);
+    return {
+      ...retained,
+      gateway,
+      jobRoutingIndex: this.jobIndex.size,
+      ...(starts.length ? { oldestJobStartedAt: Math.min(...starts) } : {}),
+    };
+  }
+
   closeAll(): void {
-    for (const entry of this.entries.values()) entry.gateway.close();
+    for (const entry of this.entries.values()) {
+      entry.sessions.close();
+      entry.gateway.close();
+    }
     this.entries.clear();
     this.jobIndex.clear();
   }
