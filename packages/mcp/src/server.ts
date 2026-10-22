@@ -298,6 +298,7 @@ export function createMcpServer(config: CreateMcpServerOptions) {
     config.attachmentStoreDir,
     config.agentSessionRuntimes,
   );
+  server.server.onclose = () => pool.closeAll();
   // Rehydrate every configured agent's persisted attachment lineage now, not
   // lazily on the first request that happens to touch one — an agent nobody
   // has queried since the restart would otherwise look unattached.

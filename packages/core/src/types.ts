@@ -152,8 +152,8 @@ export type AttachmentLiveStatus = Exclude<AgentSessionState, "unavailable" | "u
 
 /**
  * One conversation may have at most one CURRENT managed-session
- * attachment at a time, but every attachment it has ever had is kept (see
- * SessionAttachmentState) — `id` is ClawConnect's own identifier for this record,
+ * attachment at a time, with historical records kept within the configured
+ * retention bounds (see SessionAttachmentState) — `id` is ClawConnect's own identifier for this record,
  * distinct from `handle` (the session's own id in its runtime's namespace), so
  * replacement lineage can chain through `replacesAttachmentId` even if a
  * handle were ever reused.
@@ -253,9 +253,8 @@ export type AgentSessionAttachment = {
 
 /**
  * Session-scoped, not job-scoped: survives across every job submitted on the
- * same sessionKey. `attachments` never drops a record — replacement and
- * detachment both leave their prior record in place with an updated status,
- * so the full lineage is always readable.
+ * same sessionKey. Replacement and detachment preserve prior records until
+ * count or age retention evicts them; lineage pointers may outlive a record.
  */
 export type SessionAttachmentState = {
   sessionKey: string;

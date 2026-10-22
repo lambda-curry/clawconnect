@@ -449,7 +449,7 @@ describe("Fleet attachment restart persistence", () => {
       runtime: "claude-fleet",
       handle: "cf-good",
       host: "workstation-1",
-      attachedAt: 1000,
+      attachedAt: Date.now(),
       status: "running",
     };
     const validState: SessionAttachmentState = {
@@ -475,7 +475,7 @@ describe("Fleet attachment restart persistence", () => {
       runtime: "claude-fleet",
       handle: "cf-good",
       host: "workstation-1",
-      attachedAt: 1000,
+      attachedAt: Date.now(),
       status: "running",
     };
     const mixed = {
@@ -1596,7 +1596,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
         provider: "anthropic-claude-code",
         handle: "thr-abc123",
         host: "workstation-1",
-        attachedAt: 1_000,
+        attachedAt: Date.now(),
         status: "running",
         observationToken: 42,
         ...overrides,
@@ -1624,7 +1624,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
         id: "att-current",
         runtime: "example-runtime",
         handle: "thr-abc123",
-        attachedAt: 2_000,
+        attachedAt: Date.now(),
         status: "running",
         observationToken: 3,
       };
@@ -1632,7 +1632,7 @@ describe("managed agent sessions on a host-registered runtime", () => {
         id: "att-old",
         runtime: "example-runtime",
         handle: "thr-older",
-        attachedAt: 1_000,
+        attachedAt: Date.now(),
         status: "superseded",
         observationToken: 99,
       };

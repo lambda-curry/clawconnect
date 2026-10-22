@@ -361,7 +361,14 @@ describe("MCP 2026-07-28 over the SDK v2 handler", () => {
     expect(modernInfo.structuredContent).toMatchObject({
       protocolEra: "modern",
       protocolVersion: "2026-07-28",
+      retained: {
+        jobs: 0, jobRoutingIndex: 0, historyEntries: 0, attachments: 0,
+        gateway: { pendingTranscriptWork: 0, pendingTranscriptBytes: 0 },
+      },
     });
+    const health = await fetch(new URL("/health/retention", url));
+    const healthBody = await health.json();
+    expect(modernInfo.structuredContent).toHaveProperty("retained", healthBody.retained);
 
     const legacyInfo = await rpc(url, "tools/call", {
       name: "get_connection_info",

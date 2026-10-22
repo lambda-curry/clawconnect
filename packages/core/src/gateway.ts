@@ -24,6 +24,13 @@ const STREAM_CLOSE_GRACE_MS = (() => {
   return Number.isFinite(raw) && raw > 0 ? raw : 15_000;
 })();
 
+function positiveLimit(name: string, fallback: number): number {
+  const value = Number(process.env[name]);
+  return Number.isSafeInteger(value) && value > 0 ? value : fallback;
+}
+
+class TranscriptLimitError extends Error {}
+
 function logDebug(message: string, ...args: unknown[]): void {
   console.error(message, ...args);
 }
@@ -406,6 +413,31 @@ export class OpenClawGateway {
   private static readonly RECONNECT_BASE_MS = 1_000;
   private static readonly RECONNECT_MAX_MS = 30_000;
 
+  private readonly transcriptLimits = {
+    messages: positiveLimit("CLAWCONNECT_TRANSCRIPT_MAX_MESSAGES", 10_000),
+    bytes: positiveLimit("CLAWCONNECT_TRANSCRIPT_MAX_BYTES", 16 * 1024 * 1024),
+    pages: positiveLimit("CLAWCONNECT_TRANSCRIPT_MAX_PAGES", 100),
+    queueItems: positiveLimit("CLAWCONNECT_TRANSCRIPT_QUEUE_MAX_ITEMS", 1_000),
+    queueBytes: positiveLimit("CLAWCONNECT_TRANSCRIPT_QUEUE_MAX_BYTES", 8 * 1024 * 1024),
+  };
+  private transcriptCounters = {
+    pendingTranscriptWork: 0,
+    pendingTranscriptBytes: 0,
+    transcriptReplayMessages: 0,
+    transcriptReplayBytes: 0,
+    transcriptSeenIds: 0,
+    transcriptLimitFailures: 0,
+  };
+
+  diagnostics() {
+    return {
+      ...this.transcriptCounters,
+      transcriptWatches: this.transcriptWatches.size,
+      pendingRpcs: this.pendingRpcs.size,
+      subscribers: this.subscribers.size,
+    };
+  }
+
   constructor(private readonly config: GatewayConfig) {}
 
   private wsUrl(): string {
@@ -674,37 +706,56 @@ export class OpenClawGateway {
   ): Promise<Record<string, unknown>[]> {
     const collected: Record<string, unknown>[] = [];
     let offset = 0;
-    for (;;) {
-      const page = (await this.sendRpc(
-        "chat.history",
-        { sessionKey, limit: 1_000, offset, maxChars: 500_000 },
-        20_000,
-      )) as HistoryPage;
-      const messages = Array.isArray(page.messages)
-        ? page.messages.filter(
-            (message): message is Record<string, unknown> =>
-              Boolean(message) && typeof message === "object" && !Array.isArray(message),
-          )
-        : [];
-      collected.push(...messages);
-      const sequences = messages
-        .map((message) => transcriptMessageIdentity(message).sequence)
-        .filter((sequence): sequence is number => sequence !== undefined);
-      if (
-        page.hasMore !== true ||
-        typeof page.nextOffset !== "number" ||
-        page.nextOffset <= offset ||
-        (sequences.length > 0 && Math.min(...sequences) <= afterSequence)
-      ) {
-        break;
+    let bytes = 0;
+    let pages = 0;
+    try {
+      for (;;) {
+        if (++pages > this.transcriptLimits.pages) {
+          throw new TranscriptLimitError("Transcript replay page limit exceeded");
+        }
+        const page = (await this.sendRpc(
+          "chat.history",
+          { sessionKey, limit: 1_000, offset, maxChars: 500_000 },
+          20_000,
+        )) as HistoryPage;
+        const messages = Array.isArray(page.messages)
+          ? page.messages.filter(
+              (message): message is Record<string, unknown> =>
+                Boolean(message) && typeof message === "object" && !Array.isArray(message),
+            )
+          : [];
+        for (const message of messages) {
+          const size = Buffer.byteLength(JSON.stringify(message));
+          if (collected.length >= this.transcriptLimits.messages || bytes + size > this.transcriptLimits.bytes) {
+            throw new TranscriptLimitError("Transcript replay message/byte limit exceeded");
+          }
+          collected.push(message);
+          bytes += size;
+          this.transcriptCounters.transcriptReplayMessages++;
+          this.transcriptCounters.transcriptReplayBytes += size;
+        }
+        const sequences = messages
+          .map((message) => transcriptMessageIdentity(message).sequence)
+          .filter((sequence): sequence is number => sequence !== undefined);
+        if (
+          page.hasMore !== true ||
+          typeof page.nextOffset !== "number" ||
+          page.nextOffset <= offset ||
+          (sequences.length > 0 && Math.min(...sequences) <= afterSequence)
+        ) {
+          break;
+        }
+        offset = page.nextOffset;
       }
-      offset = page.nextOffset;
+      return collected.sort((left, right) => {
+        const a = transcriptMessageIdentity(left).sequence ?? Number.MAX_SAFE_INTEGER;
+        const b = transcriptMessageIdentity(right).sequence ?? Number.MAX_SAFE_INTEGER;
+        return a - b;
+      });
+    } finally {
+      this.transcriptCounters.transcriptReplayMessages -= collected.length;
+      this.transcriptCounters.transcriptReplayBytes -= bytes;
     }
-    return collected.sort((left, right) => {
-      const a = transcriptMessageIdentity(left).sequence ?? Number.MAX_SAFE_INTEGER;
-      const b = transcriptMessageIdentity(right).sequence ?? Number.MAX_SAFE_INTEGER;
-      return a - b;
-    });
   }
 
   /**
@@ -736,13 +787,24 @@ export class OpenClawGateway {
       ...(lastSeenSequence > 0 ? { lastSeenSequence } : {}),
     });
 
+    const legacyKey = (id: string) => createHash("sha256").update(id).digest("hex");
+    const rememberLegacyId = (id: string) => {
+      const key = legacyKey(id);
+      if (seenIds.has(key)) return;
+      if (seenIds.size >= this.transcriptLimits.messages) {
+        throw new TranscriptLimitError("Transcript identity limit exceeded");
+      }
+      seenIds.add(key);
+      this.transcriptCounters.transcriptSeenIds++;
+    };
+
     const accept = (message: Record<string, unknown>, payload?: SessionMessagePayload) => {
       const identity = transcriptMessageIdentity(message);
       const sequence = payload?.messageSeq ?? identity.sequence;
       const id = payload?.messageId ?? identity.id ?? transcriptMessageFallbackId(message);
       if (sequence !== undefined && sequence <= lastSeenSequence) return;
-      if (id && seenIds.has(id)) return;
-      if (id) seenIds.add(id);
+      if (sequence === undefined && seenIds.has(legacyKey(id))) return;
+      if (sequence === undefined) rememberLegacyId(id);
       if (sequence !== undefined) lastSeenSequence = Math.max(lastSeenSequence, sequence);
       for (const event of transcriptMessageEvents(message)) onEvent?.(event);
     };
@@ -755,10 +817,13 @@ export class OpenClawGateway {
         sessionKey,
         baseline ? Number.MAX_SAFE_INTEGER : lastSeenSequence,
       );
+      if (stopped) return;
       if (baseline) {
         for (const message of messages) {
           const identity = transcriptMessageIdentity(message);
-          seenIds.add(identity.id ?? transcriptMessageFallbackId(message));
+          if (identity.sequence === undefined) {
+            rememberLegacyId(identity.id ?? transcriptMessageFallbackId(message));
+          }
           if (identity.sequence !== undefined) {
             lastSeenSequence = Math.max(lastSeenSequence, identity.sequence);
           }
@@ -778,22 +843,49 @@ export class OpenClawGateway {
       await replay(baseline);
       if (stopped) return;
       await this.sendRpc("sessions.messages.subscribe", { key: sessionKey }, 20_000);
+      if (stopped) return;
       await replay(false);
       if (stopped) return;
       report("connected", "live");
     };
 
-    const enqueueRecovery = (baseline: boolean) => {
-      work = work.then(() => recover(baseline)).catch((err: unknown) => {
-        if (stopped) return;
-        report("unavailable", "detached");
-        logDebug(
-          `[openclaw-gateway] transcript recovery failed for ${sessionKey}: ` +
-            `${err instanceof Error ? err.message : String(err)}`,
-        );
-      });
+    const failed = (err: unknown) => {
+      if (stopped) return;
+      report("unavailable", "detached");
+      logDebug(`[openclaw-gateway] transcript work failed for ${sessionKey}:`, err);
+      if (err instanceof TranscriptLimitError) {
+        this.transcriptCounters.transcriptLimitFailures++;
+        stop();
+      }
+    };
+    let pendingItems = 0;
+    let pendingBytes = 0;
+    const enqueue = (action: () => void | Promise<void>, bytes = 0) => {
+      if (stopped) return work;
+      if (pendingItems >= this.transcriptLimits.queueItems || pendingBytes + bytes > this.transcriptLimits.queueBytes) {
+        failed(new TranscriptLimitError("Transcript pending-work limit exceeded"));
+        return work;
+      }
+      pendingItems++;
+      pendingBytes += bytes;
+      this.transcriptCounters.pendingTranscriptWork++;
+      this.transcriptCounters.pendingTranscriptBytes += bytes;
+      work = work.then(async () => {
+        try {
+          if (!stopped) {
+            const result = action();
+            if (result) await result;
+          }
+        } finally {
+          pendingItems--;
+          pendingBytes -= bytes;
+          this.transcriptCounters.pendingTranscriptWork--;
+          this.transcriptCounters.pendingTranscriptBytes -= bytes;
+        }
+      }).catch(failed);
       return work;
     };
+    const enqueueRecovery = (baseline: boolean) => enqueue(() => recover(baseline));
 
     const onReconnect = () => {
       if (stopped) return;
@@ -811,6 +903,8 @@ export class OpenClawGateway {
     const stop = () => {
       if (stopped) return;
       stopped = true;
+      this.transcriptCounters.transcriptSeenIds -= seenIds.size;
+      seenIds.clear();
       if (unavailableTimer) clearTimeout(unavailableTimer);
       this.subscribers.delete(subId);
       this.reconnectListeners.delete(onReconnect);
@@ -826,18 +920,27 @@ export class OpenClawGateway {
       if (frame.type !== "event" || frame.event !== "session.message") return;
       const payload = frame.payload as SessionMessagePayload;
       if (payload.sessionKey !== sessionKey || !payload.message) return;
-      work = work.then(async () => {
-        const sequence = payload.messageSeq ?? transcriptMessageIdentity(payload.message!).sequence;
-        if (sequence !== undefined && sequence > lastSeenSequence + 1) {
-          report("connected", "replaying");
-          await replay(false);
-        }
+      const acceptLive = () => {
+        if (stopped) return;
         accept(payload.message!, payload);
         report("connected", "live");
-      }).catch((err: unknown) => {
-        report("unavailable", "detached");
-        logDebug("[openclaw-gateway] live transcript gap-fill failed:", err);
-      });
+      };
+      const sequence = payload.messageSeq ?? transcriptMessageIdentity(payload.message).sequence;
+      if (pendingItems === 0 && (sequence === undefined || sequence <= lastSeenSequence + 1)) {
+        try {
+          acceptLive();
+        } catch (err) {
+          failed(err);
+        }
+        return;
+      }
+      void enqueue(() => {
+        if (sequence !== undefined && sequence > lastSeenSequence + 1) {
+          report("connected", "replaying");
+          return replay(false).then(acceptLive);
+        }
+        acceptLive();
+      }, Buffer.byteLength(JSON.stringify(payload)));
     });
 
     await enqueueRecovery(resumeAfterSequence === undefined);

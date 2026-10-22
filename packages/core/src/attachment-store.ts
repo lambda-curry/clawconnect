@@ -12,10 +12,9 @@ export interface AttachmentStore {
  * File-backed AttachmentStore, same shape and atomicity as
  * job-store.ts's JsonFileJobStore. Unlike the job store — which only ever
  * holds currently-running jobs and prunes on every terminal transition — this
- * store holds every session that has ever had an attachment, including
- * superseded/detached lineage: it's bounded by "how many sessions have ever
- * attached, times a handful of attachments each", not by event volume, so
- * keeping full history here doesn't risk unbounded growth the way logs would.
+ * store holds retained current and historical attachments. SessionManager
+ * applies count/age retention before saving and after loading, so stale lineage
+ * cannot accumulate across restarts.
  * Write failures are logged and swallowed — restart recovery is a
  * nice-to-have, not load-bearing for the attach/continue/replace/detach
  * transitions themselves, which always succeed in memory first. Read failures

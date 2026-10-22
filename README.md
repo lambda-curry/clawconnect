@@ -53,13 +53,58 @@ A typical 3-minute task with `check_task mode: "wait"` at the 45s default needs 
 
 ## Configuration
 
-The MCP server reads three environment variables:
+The gateway connection uses these environment variables:
 
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `OPENCLAW_URL` | Yes | WebSocket URL for your OpenClaw instance (e.g., `ws://127.0.0.1:18789`) |
 | `OPENCLAW_PASSWORD` | Yes | OpenClaw gateway password |
 | `OPENCLAW_AGENT_ID` | No | Agent name to connect to (default: `main`) |
+
+Long-running stdio and HTTP servers also apply these memory limits. Values are
+positive integers; unset, zero, negative, fractional, or invalid values use the
+defaults. Limits are read when a session manager or gateway is constructed.
+
+| Variable | Default | Bound |
+|----------|---------|-------|
+| `CLAWCONNECT_FINISHED_JOB_MAX_COUNT` | `100` | Finished jobs retained per agent, oldest completion evicted first |
+| `CLAWCONNECT_FINISHED_JOB_MAX_AGE_MS` | `86400000` (24 hours) | Time from a job's first terminal outcome |
+| `CLAWCONNECT_ATTACHMENT_MAX_COUNT` | `1000` | Attachment records per agent across all conversations and replacement lineage |
+| `CLAWCONNECT_ATTACHMENT_MAX_AGE_MS` | `2592000000` (30 days) | Time since attachment creation, refresh, observation, replacement, or detachment |
+| `CLAWCONNECT_TRANSCRIPT_MAX_MESSAGES` | `10000` | Messages accumulated by one replay, and unsequenced message identities per watch |
+| `CLAWCONNECT_TRANSCRIPT_MAX_BYTES` | `16777216` (16 MiB) | Serialized UTF-8 message bytes accumulated by one replay |
+| `CLAWCONNECT_TRANSCRIPT_MAX_PAGES` | `100` | History pages requested by one replay |
+| `CLAWCONNECT_TRANSCRIPT_QUEUE_MAX_ITEMS` | `1000` | Running plus queued transcript operations per watch |
+| `CLAWCONNECT_TRANSCRIPT_QUEUE_MAX_BYTES` | `8388608` (8 MiB) | Serialized UTF-8 event payload bytes held by those operations |
+
+Finished jobs expire when either retention limit is reached. Eviction also
+removes their logs, continuation state, session history, and routing indexes;
+reads of evicted tasks return the existing not-found response. Running jobs
+are preserved. Maintenance runs every minute and on job reads and writes, so
+idle processes release expired state too. Embedders should call
+`GatewayPool.closeAll()` or `SessionManager.close()` when disposing instances.
+
+Attachment pruning runs at startup, on writes, and during maintenance, and
+saves the pruned set to disk. Current pointers can expire as well as historical
+records. Attachments required by a running job are preserved and can temporarily
+exceed the count cap; records with only a stale runtime status have no such
+exemption. Old lineage links may name records that have expired. Pruning does
+not stop the runtime session itself.
+
+A replay or queue overflow detaches that transcript watch and reports upstream
+unavailable, preserving the last confirmed sequence for recovery. It does not
+silently skip events or stop the upstream task. Sequenced streams deduplicate
+with the sequence cursor; legacy unsequenced streams keep bounded identities.
+These limits bound retained replay state, not the size of a single upstream
+WebSocket frame. HTTP responses stream with backpressure and cancel their body
+reader when the client disconnects.
+
+`get_connection_info` includes aggregate `retained` counters, also available
+from HTTP `/health/retention`: jobs, finished jobs, session/history/routing and
+auxiliary index sizes, attachment records/sessions, and gateway replay bytes,
+messages, queue depth/bytes, deduplication identities, and limit failures.
+Running jobs still retain their event history until they finish and expire;
+these bounds do not impose a global process RSS limit.
 
 ## Setup
 

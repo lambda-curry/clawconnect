@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { once } from "node:events";
 import type { AddressInfo } from "node:net";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocketServer, type WebSocket as ServerSocket } from "ws";
 import type { GatewayEvent } from "./types.ts";
 
@@ -116,6 +116,7 @@ let cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => {
   for (const fn of cleanup) await fn();
   cleanup = [];
+  vi.unstubAllEnvs();
 });
 
 async function harness(onRequest: RequestHandler, autoTranscript = true) {
@@ -159,6 +160,19 @@ describe("OpenClawGateway.chat — run correlation across the send boundary", ()
 
     expect(reply).toBe("done");
     expect(seen.map((e) => e.type === "tool" && e.toolName)).toEqual(["Bash", "Read"]);
+  });
+
+  it("projects a batch of contiguous transcript events before terminal cleanup", async () => {
+    const gateway = await harness((frame, socket) => {
+      if (frame.method !== "chat.send") return;
+      for (let i = 1; i <= 100; i++) socket.send(sessionToolEvent(i, `Tool${i}`));
+      socket.send(chatEvent("batch-run", "final", "done"));
+      socket.send(sendAck(frame.id, "batch-run"));
+    });
+    const seen: GatewayEvent[] = [];
+    await expect(gateway.chat("agent:main:main:thread:test", "hi", 10_000, (event) => seen.push(event))).resolves.toBe("done");
+    expect(seen).toHaveLength(100);
+    expect(seen.at(-1)).toMatchObject({ toolName: "Tool100" });
   });
 
   it("ignores buffered frames belonging to a different run", async () => {
@@ -471,5 +485,101 @@ describe("OpenClawGateway.reconcileRun — bounded read of upstream truth", () =
     await expect(gateway.reconcileRun("agent:main:main:thread:test", { intervalMs: 1 })).resolves.toMatchObject({
       ok: false,
     });
+  });
+});
+
+describe("bounded transcript replay and pending work", () => {
+  const sessionKey = "agent:main:main:thread:test";
+  const row = (sequence: number, text = "progress") => ({
+    role: "assistant", content: [{ type: "text", text }],
+    __openclaw: { id: `row-${sequence}`, seq: sequence },
+  });
+
+  it.each([
+    ["CLAWCONNECT_TRANSCRIPT_MAX_MESSAGES", "2", [row(1), row(2), row(3)]],
+    ["CLAWCONNECT_TRANSCRIPT_MAX_BYTES", "100", [row(1, "x".repeat(200))]],
+  ])("stops explicitly when replay exceeds %s", async (name, value, messages) => {
+    vi.stubEnv(name as string, value as string);
+    const states: string[] = [];
+    const events: GatewayEvent[] = [];
+    const gateway = await harness((frame, socket) => {
+      if (frame.method === "chat.history") {
+        socket.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: { messages } }));
+      }
+    }, false);
+    await gateway.resumeTranscript(sessionKey, 0, (event) => events.push(event), (state) => states.push(state.transcript));
+    expect(states.at(-1)).toBe("detached");
+    expect(events).toEqual([]);
+    expect(gateway.diagnostics()).toMatchObject({
+      transcriptLimitFailures: 1, transcriptWatches: 0,
+      transcriptReplayMessages: 0, transcriptReplayBytes: 0, pendingTranscriptWork: 0,
+    });
+  });
+
+  it("caps pagination even when an upstream keeps returning empty pages", async () => {
+    vi.stubEnv("CLAWCONNECT_TRANSCRIPT_MAX_PAGES", "2");
+    let reads = 0;
+    const gateway = await harness((frame, socket) => {
+      if (frame.method === "chat.history") {
+        reads++;
+        socket.send(JSON.stringify({ type: "res", id: frame.id, ok: true,
+          payload: { messages: [], hasMore: true, nextOffset: reads } }));
+      }
+    }, false);
+    await gateway.resumeTranscript(sessionKey, 0, undefined, undefined);
+    expect(reads).toBe(2);
+    expect(gateway.diagnostics()).toMatchObject({ transcriptWatches: 0, transcriptLimitFailures: 1 });
+  });
+
+  it.each([
+    ["CLAWCONNECT_TRANSCRIPT_QUEUE_MAX_ITEMS", "2", 3],
+    ["CLAWCONNECT_TRANSCRIPT_QUEUE_MAX_BYTES", "100", 1],
+  ])("bounds pending work with %s while recovery is blocked", async (name, value, count) => {
+    vi.stubEnv(name, value);
+    let release: (() => void) | undefined;
+    let socket: ServerSocket | undefined;
+    const states: string[] = [];
+    const events: GatewayEvent[] = [];
+    const gateway = await harness((frame, connection) => {
+      if (frame.method === "chat.history") {
+        connection.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: { messages: [] } }));
+      }
+      if (frame.method === "sessions.messages.subscribe") {
+        socket = connection;
+        release = () => connection.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: {} }));
+      }
+    }, false);
+    const resuming = gateway.resumeTranscript(sessionKey, 0, (event) => events.push(event), (state) => states.push(state.transcript));
+    await waitFor(() => Boolean(release), 1_000);
+    for (let i = 1; i <= count; i++) socket!.send(sessionToolEvent(i, "Bash"));
+    await waitFor(() => gateway.diagnostics().transcriptLimitFailures === 1, 1_000);
+    expect(gateway.diagnostics().pendingTranscriptWork).toBeLessThanOrEqual(2);
+    expect(gateway.diagnostics().pendingTranscriptBytes).toBeLessThanOrEqual(8 * 1024 * 1024);
+    expect(states.at(-1)).toBe("detached");
+    release!();
+    await resuming;
+    await waitFor(() => gateway.diagnostics().pendingTranscriptWork === 0, 1_000);
+    expect(events).toEqual([]);
+    expect(gateway.diagnostics()).toMatchObject({ transcriptWatches: 0, pendingTranscriptBytes: 0 });
+  });
+
+  it("keeps sequenced live messages out of the identity index and bounds legacy identities", async () => {
+    vi.stubEnv("CLAWCONNECT_TRANSCRIPT_MAX_MESSAGES", "2");
+    let socket: ServerSocket | undefined;
+    const gateway = await harness((frame, connection) => {
+      socket = connection;
+      connection.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: { messages: [] } }));
+    }, false);
+    await gateway.resumeTranscript(sessionKey, 0, undefined, undefined);
+    for (let i = 1; i <= 5; i++) socket!.send(sessionToolEvent(i, "Bash"));
+    await waitFor(() => gateway.diagnostics().pendingTranscriptWork === 0, 1_000);
+    expect(gateway.diagnostics().transcriptSeenIds).toBe(0);
+    for (let i = 1; i <= 3; i++) {
+      socket!.send(JSON.stringify({ type: "event", event: "session.message", payload: {
+        sessionKey, messageId: `legacy-${i}`, message: { role: "assistant", content: `legacy ${i}` },
+      } }));
+    }
+    await waitFor(() => gateway.diagnostics().transcriptLimitFailures === 1, 1_000);
+    expect(gateway.diagnostics()).toMatchObject({ transcriptSeenIds: 0, transcriptWatches: 0 });
   });
 });

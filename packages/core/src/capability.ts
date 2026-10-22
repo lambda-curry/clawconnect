@@ -963,6 +963,7 @@ It also reports \`degradedStores\` when a persistence file could not be read at 
         tools: capabilities.map((c) => c.name).sort(),
         identity: { user: identity.user, ...(identity.legacy ? { legacy: true } : {}) },
         agents: { allowed: scope.allowedIds, default: scope.defaultId },
+        retained: ctx.pool.retentionStats(),
         // Omitted entirely when nothing degraded, so its PRESENCE is the
         // signal — a field that is always there, usually empty, is one a
         // reader learns to skip.
