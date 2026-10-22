@@ -194,7 +194,7 @@ export class GatewayPool {
     const entries = this.allEntries();
     const agents = entries.map((entry) => entry.sessions.retentionStats());
     const retained = {
-      jobs: 0, finishedJobs: 0, logEntries: 0, logTextChars: 0,
+      jobs: 0, finishedJobs: 0, logEntries: 0, logTextChars: 0, logBytes: 0,
       latestJobIndex: 0, sessionStates: 0, historySessions: 0, historyEntries: 0,
       provisionalOutcomes: 0, recheckSettled: 0, cancelRequested: 0, cancelInFlight: 0,
       upstreamRunIds: 0, reconcilers: 0, attachmentSessions: 0, attachments: 0,
@@ -206,6 +206,7 @@ export class GatewayPool {
       pendingTranscriptWork: 0, pendingTranscriptBytes: 0,
       transcriptReplayMessages: 0, transcriptReplayBytes: 0, transcriptSeenIds: 0,
       transcriptLimitFailures: 0, transcriptWatches: 0, pendingRpcs: 0, subscribers: 0,
+      transcriptPausedWatches: 0, transcriptSkippedEvents: 0, transcriptSkippedSequences: 0,
     };
     for (const entry of entries) {
       const stats = entry.gateway.diagnostics();

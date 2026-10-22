@@ -360,6 +360,29 @@ describe("list_tasks summary bounds vs get_task's full read", () => {
 });
 
 describe("get_session tail is forward pagination", () => {
+  it("uses stable sequence cursors after the log prefix is evicted", () => {
+    vi.stubEnv("CLAWCONNECT_RUNNING_LOG_MAX_ENTRIES", "3");
+    const pool = freshPool();
+    try {
+      const run = runTask(pool, { task: "trim prefix" });
+      const first = getSession(pool, { sessionId: run.sessionKey, mode: "tail", limit: 1, after: 0 });
+      if (!first.found) throw new Error("expected a session");
+      expect(first.events?.[0]).toMatchObject({ type: "truncation", seq: 2 });
+      expect(first.nextAfter).toBe(2);
+      const second = getSession(pool, { sessionId: run.sessionKey, mode: "tail", limit: 2, after: first.nextAfter });
+      if (!second.found) throw new Error("expected a session");
+      expect(second.events?.map((event) => event.seq)).toEqual([3, 4]);
+      expect(second.nextAfter).toBe(4);
+      const end = getSession(pool, { sessionId: run.sessionKey, mode: "tail", after: second.nextAfter });
+      if (!end.found) throw new Error("expected a session");
+      expect(end.events).toEqual([]);
+      expect(end.nextAfter).toBe(4);
+    } finally {
+      pool.closeAll();
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("pages oldest-first from `after`, and exhaustion shows as a short page with a non-advancing nextAfter", () => {
     const pool = freshPool();
     const run = runTask(pool, { task: "do it" });

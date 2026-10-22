@@ -1,4 +1,4 @@
-import { mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { constants, copyFileSync, existsSync, mkdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { loadJsonArrayFile, type StoreDegradationSink } from "./store-health.ts";
 import type { SessionAttachmentState } from "./types.ts";
@@ -25,6 +25,7 @@ export interface AttachmentStore {
 export class JsonFileAttachmentStore implements AttachmentStore {
   /** Set when load() could not preserve an unreadable file. While true, save() refuses to overwrite it. */
   private blocked = false;
+  private backupReady = false;
 
   constructor(
     private readonly filePath: string,
@@ -44,6 +45,7 @@ export class JsonFileAttachmentStore implements AttachmentStore {
       );
       return;
     }
+    if (!this.preserveBeforeOverwrite()) return;
     try {
       mkdirSync(dirname(this.filePath), { recursive: true });
       const tmpPath = `${this.filePath}.tmp`;
@@ -51,6 +53,27 @@ export class JsonFileAttachmentStore implements AttachmentStore {
       renameSync(tmpPath, this.filePath);
     } catch (err) {
       console.error(`[attachment-store] failed to save ${this.filePath}: ${(err as Error).message}`);
+    }
+  }
+
+  /** Keep the original bytes once, including legacy timestamps and malformed rows. */
+  private preserveBeforeOverwrite(): boolean {
+    if (this.backupReady || !existsSync(this.filePath)) return true;
+    const target = `${this.filePath}.pre-retention`;
+    try {
+      try {
+        copyFileSync(this.filePath, target, constants.COPYFILE_EXCL);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST" || !statSync(target).isFile()) throw error;
+      }
+      this.backupReady = true;
+      return true;
+    } catch (error) {
+      this.blocked = true;
+      const message = `could not preserve ${this.filePath} before retention (${(error as Error).message}); refusing to overwrite it`;
+      console.error(`[attachment-store] ${message}`);
+      this.onDegraded?.({ kind: "attachment", filePath: this.filePath, message, at: Date.now() });
+      return false;
     }
   }
 }

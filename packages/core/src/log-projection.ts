@@ -1,10 +1,9 @@
 import type { LogEntry } from "./types.ts";
 
 /**
- * Turns `Job.logs` (the authoritative, unbounded-in-principle server-side
- * history) into the small window that actually goes out on a check_task/
- * get_task response. The server never forgets history here — this module
- * only decides what fraction of it a given poll is worth sending. See
+ * Turns the bounded retained `Job.logs` history into the small window that
+ * goes out on a check_task/get_task response. Sequence numbers survive
+ * retention, so cursors continue to refer to the original event stream. See
  * docs/decisions/2026-07-27-task-contract.md and the widget simplification
  * work that motivated this file: recurring payloads carry a status/current-
  * activity projection, not a full-session transcript.
@@ -53,12 +52,12 @@ export type LogWindow = {
   /** Cursor to hand back to the caller — always the current head, even when
    *  `events` had to drop older entries to stay bounded (see DELTA_WINDOW_MAX). */
   cursor: number;
-  /** Total events recorded server-side (== logs.length; the true, unbounded count). */
+  /** Total original events recorded server-side, including evicted entries. */
   totalCount: number;
 };
 
 /**
- * Projects `logs` (assumed append-only, ascending `seq`) into the window a
+ * Projects `logs` (ascending `seq`, potentially trimmed) into the window a
  * check_task/get_task response should carry.
  *
  * - `cursor` undefined or 0: "initial" read (mount/reconnect/remount) — the
@@ -80,15 +79,20 @@ export function projectLogWindow(
   const initialMax = opts.initialMax ?? INITIAL_WINDOW_MAX;
   const deltaMax = opts.deltaMax ?? DELTA_WINDOW_MAX;
   const textMax = opts.textMax ?? EVENT_TEXT_MAX;
-  const totalCount = logs.length;
-  const head = totalCount > 0 ? (logs[totalCount - 1].seq ?? totalCount) : (cursor ?? 0);
+  const head = logs.at(-1)?.seq ?? (logs.length || cursor || 0);
+  const totalCount = head;
+  const marker = logs[0]?.type === "truncation" ? logs[0] : undefined;
+  const keepMarker = (entries: LogEntry[], max: number): LogEntry[] => {
+    if (!marker || (cursor && (marker.seq ?? 0) <= cursor)) return entries.slice(-max);
+    return [marker, ...entries.filter((entry) => entry !== marker).slice(-Math.max(0, max - 1))].slice(0, max);
+  };
 
   if (!cursor) {
-    const windowed = collapseToolPairs(logs).slice(-initialMax);
+    const windowed = keepMarker(collapseToolPairs(logs), initialMax);
     return { events: boundText(windowed, textMax), cursor: head, totalCount };
   }
 
   const fresh = logs.filter((e) => (e.seq ?? 0) > cursor);
-  const windowed = collapseToolPairs(fresh).slice(-deltaMax);
+  const windowed = keepMarker(collapseToolPairs(fresh), deltaMax);
   return { events: boundText(windowed, textMax), cursor: head, totalCount };
 }

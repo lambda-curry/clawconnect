@@ -511,7 +511,7 @@ describe("bounded transcript replay and pending work", () => {
     expect(states.at(-1)).toBe("detached");
     expect(events).toEqual([]);
     expect(gateway.diagnostics()).toMatchObject({
-      transcriptLimitFailures: 1, transcriptWatches: 0,
+      transcriptLimitFailures: 1, transcriptWatches: 1,
       transcriptReplayMessages: 0, transcriptReplayBytes: 0, pendingTranscriptWork: 0,
     });
   });
@@ -528,7 +528,7 @@ describe("bounded transcript replay and pending work", () => {
     }, false);
     await gateway.resumeTranscript(sessionKey, 0, undefined, undefined);
     expect(reads).toBe(2);
-    expect(gateway.diagnostics()).toMatchObject({ transcriptWatches: 0, transcriptLimitFailures: 1 });
+    expect(gateway.diagnostics()).toMatchObject({ transcriptWatches: 1, transcriptLimitFailures: 1 });
   });
 
   it.each([
@@ -537,6 +537,7 @@ describe("bounded transcript replay and pending work", () => {
   ])("bounds pending work with %s while recovery is blocked", async (name, value, count) => {
     vi.stubEnv(name, value);
     let release: (() => void) | undefined;
+    let subscriptions = 0;
     let socket: ServerSocket | undefined;
     const states: string[] = [];
     const events: GatewayEvent[] = [];
@@ -546,7 +547,9 @@ describe("bounded transcript replay and pending work", () => {
       }
       if (frame.method === "sessions.messages.subscribe") {
         socket = connection;
-        release = () => connection.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: {} }));
+        const acknowledge = () => connection.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: {} }));
+        if (++subscriptions === 1) release = acknowledge;
+        else acknowledge();
       }
     }, false);
     const resuming = gateway.resumeTranscript(sessionKey, 0, (event) => events.push(event), (state) => states.push(state.transcript));
@@ -560,7 +563,7 @@ describe("bounded transcript replay and pending work", () => {
     await resuming;
     await waitFor(() => gateway.diagnostics().pendingTranscriptWork === 0, 1_000);
     expect(events).toEqual([]);
-    expect(gateway.diagnostics()).toMatchObject({ transcriptWatches: 0, pendingTranscriptBytes: 0 });
+    expect(gateway.diagnostics()).toMatchObject({ transcriptWatches: 1, pendingTranscriptBytes: 0 });
   });
 
   it("keeps sequenced live messages out of the identity index and bounds legacy identities", async () => {
@@ -580,6 +583,69 @@ describe("bounded transcript replay and pending work", () => {
       } }));
     }
     await waitFor(() => gateway.diagnostics().transcriptLimitFailures === 1, 1_000);
-    expect(gateway.diagnostics()).toMatchObject({ transcriptSeenIds: 0, transcriptWatches: 0 });
+    expect(gateway.diagnostics()).toMatchObject({ transcriptSeenIds: 0, transcriptWatches: 1 });
+  });
+});
+
+describe("transcript limit recovery", () => {
+  const sessionKey = "agent:main:main:thread:test";
+  const row = (sequence: number, text = "progress") => ({
+    role: "assistant", content: [{ type: "text", text }],
+    __openclaw: { id: `row-${sequence}`, seq: sequence },
+  });
+
+  it("resumes at a bounded current head, reports the sequence gap, and accepts subsequent events", async () => {
+    vi.stubEnv("CLAWCONNECT_TRANSCRIPT_MAX_MESSAGES", "2");
+    const states: Array<{ reason?: string; skippedSequenceCount?: number; lastSeenSequence?: number }> = [];
+    const events: GatewayEvent[] = [];
+    let socket: ServerSocket | undefined;
+    const gateway = await harness((frame, connection) => {
+      socket = connection;
+      const messages = frame.params?.limit === 1 ? [row(20)] : [row(18), row(19), row(20)];
+      connection.send(JSON.stringify({ type: "res", id: frame.id, ok: true,
+        payload: frame.method === "chat.history" ? { messages } : {} }));
+    }, false);
+    await gateway.resumeTranscript(sessionKey, 0, (event) => events.push(event), (state) => states.push(state));
+    await waitFor(() => states.some((state) => state.reason === "limit_recovered"), 1_000);
+    expect(states.find((state) => state.reason === "limit_recovered")).toMatchObject({
+      skippedSequenceCount: 20, lastSeenSequence: 20,
+    });
+    socket!.send(sessionToolEvent(21, "AfterLimit"));
+    await waitFor(() => events.length === 1, 1_000);
+    expect(events[0]).toMatchObject({ toolName: "AfterLimit" });
+    expect(gateway.diagnostics()).toMatchObject({ transcriptPausedWatches: 0, transcriptSkippedSequences: 20 });
+  });
+
+  it("coalesces overload while paused and retries head recovery on a real reconnect", async () => {
+    vi.stubEnv("CLAWCONNECT_TRANSCRIPT_MAX_BYTES", "250");
+    let healthy = false;
+    let headReads = 0;
+    let socket: ServerSocket | undefined;
+    const events: GatewayEvent[] = [];
+    const reasons: string[] = [];
+    const gateway = await harness((frame, connection) => {
+      socket = connection;
+      if (frame.method === "chat.history") {
+        if (frame.params?.limit === 1) headReads++;
+        connection.send(JSON.stringify({ type: "res", id: frame.id, ok: true,
+          payload: { messages: [row(100, healthy ? "head" : "x".repeat(1_000))] } }));
+      } else connection.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: {} }));
+    }, false);
+    await gateway.resumeTranscript(sessionKey, 0, (event) => events.push(event), (state) => {
+      if (state.reason) reasons.push(state.reason);
+    });
+    await waitFor(() => headReads === 1 && gateway.diagnostics().pendingRpcs === 0, 1_000);
+    for (let i = 1; i <= 100; i++) socket!.send(sessionToolEvent(i, "Skipped"));
+    await waitFor(() => gateway.diagnostics().transcriptSkippedEvents === 100, 1_000);
+    expect(headReads).toBe(1);
+    expect(gateway.diagnostics()).toMatchObject({ pendingTranscriptWork: 0, transcriptPausedWatches: 1, transcriptWatches: 1 });
+    healthy = true;
+    socket!.terminate();
+    await waitFor(() => reasons.includes("limit_recovered"), 4_000);
+    expect(headReads).toBe(3);
+    socket!.send(sessionToolEvent(101, "AfterReconnect"));
+    await waitFor(() => events.length === 1, 1_000);
+    expect(events[0]).toMatchObject({ toolName: "AfterReconnect" });
+    expect(gateway.diagnostics()).toMatchObject({ transcriptPausedWatches: 0, transcriptSkippedEvents: 100, transcriptSkippedSequences: 100 });
   });
 });

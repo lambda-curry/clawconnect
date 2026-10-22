@@ -59,7 +59,7 @@ function seededFleetStore(): string {
             runtime: "example-runtime",
             provider: "anthropic-claude-code",
             handle: "thr-abc123",
-            attachedAt: Date.now(),
+            attachedAt: 1,
             status: "needs_input",
             observationToken: 7,
           },

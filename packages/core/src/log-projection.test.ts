@@ -38,6 +38,19 @@ describe("collapseToolPairs", () => {
 });
 
 describe("projectLogWindow", () => {
+  it("preserves a retention gap marker in bounded initial/delta windows until acknowledged", () => {
+    const logs = [entry(90, "truncation", "90 events omitted"), ...Array.from({ length: 20 }, (_, i) => entry(91 + i, "lifecycle", "recent"))];
+    const initial = projectLogWindow(logs, undefined);
+    expect(initial.events).toHaveLength(INITIAL_WINDOW_MAX);
+    expect(initial.events[0].type).toBe("truncation");
+    expect(initial.cursor).toBe(110);
+    expect(initial.totalCount).toBe(110);
+    const delta = projectLogWindow(logs, 20);
+    expect(delta.events).toHaveLength(DELTA_WINDOW_MAX);
+    expect(delta.events[0].type).toBe("truncation");
+    expect(projectLogWindow(logs, 90).events.every((event) => event.type !== "truncation")).toBe(true);
+    expect(projectLogWindow(logs, delta.cursor).events).toEqual([]);
+  });
   it("no cursor: returns at most INITIAL_WINDOW_MAX of the most recent entries, cursor at head", () => {
     const logs = Array.from({ length: 30 }, (_, i) => entry(i + 1, "lifecycle", `event ${i + 1}`));
     const window = projectLogWindow(logs, undefined);

@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -6,7 +6,7 @@ import { JsonFileAttachmentStore } from "./attachment-store.ts";
 import { GatewayPool } from "./gateway-pool.ts";
 import type { OpenClawGateway } from "./gateway.ts";
 import { SessionManager } from "./session.ts";
-import type { SessionAttachmentState } from "./types.ts";
+import type { GatewayEvent, SessionAttachmentState, TranscriptTransportUpdate } from "./types.ts";
 
 const managers: SessionManager[] = [];
 const directories: string[] = [];
@@ -14,14 +14,29 @@ const pools: GatewayPool[] = [];
 
 function manager(attachmentStore?: JsonFileAttachmentStore) {
   const replies: ((value: string) => void)[] = [];
+  const emitters: (((event: GatewayEvent) => void) | undefined)[] = [];
+  const updates: (((update: TranscriptTransportUpdate) => void) | undefined)[] = [];
   const gateway = {
-    chat: vi.fn(() => new Promise<string>((resolve) => replies.push(resolve))),
+    chat: vi.fn(
+      (
+        _key: string,
+        _message: string,
+        _timeout: number,
+        onEvent?: (event: GatewayEvent) => void,
+        _runId?: unknown,
+        onState?: (update: TranscriptTransportUpdate) => void,
+      ) => {
+        emitters.push(onEvent);
+        updates.push(onState);
+        return new Promise<string>((resolve) => replies.push(resolve));
+      },
+    ),
     abort: vi.fn(async () => ({ aborted: true })),
     stopTranscriptWatch: vi.fn(),
   } as unknown as OpenClawGateway;
   const sessions = new SessionManager(gateway, "main", undefined, attachmentStore);
   managers.push(sessions);
-  return { sessions, replies };
+  return { sessions, replies, emitters, updates };
 }
 
 async function finish(reply: (value: string) => void) {
@@ -32,13 +47,20 @@ async function finish(reply: (value: string) => void) {
 function attachmentState(
   key: string,
   at: number,
-  status: "completed" | "detached" = "completed",
+  status: "completed" | "detached" | "superseded" = "completed",
 ): SessionAttachmentState {
   return {
     sessionKey: key,
-    currentAttachmentId: status === "detached" ? undefined : key,
+    currentAttachmentId: status === "completed" ? key : undefined,
     attachments: {
-      [key]: { id: key, runtime: "example", handle: key, attachedAt: at, status },
+      [key]: {
+        id: key,
+        runtime: "example",
+        handle: key,
+        attachedAt: at,
+        retentionUpdatedAt: at,
+        status,
+      },
     },
   };
 }
@@ -57,6 +79,60 @@ afterEach(() => {
 });
 
 describe("finished job retention", () => {
+  it("bounds live and finished logs while polling cursors continue across truncation", async () => {
+    vi.stubEnv("CLAWCONNECT_RUNNING_LOG_MAX_ENTRIES", "8");
+    vi.stubEnv("CLAWCONNECT_RUNNING_LOG_MAX_BYTES", "1024");
+    vi.stubEnv("CLAWCONNECT_FINISHED_LOG_MAX_ENTRIES", "3");
+    vi.stubEnv("CLAWCONNECT_FINISHED_LOG_MAX_BYTES", "512");
+    const { sessions, replies, emitters } = manager();
+    const job = sessions.submitTask({ task: "many events", sessionKey: "log-budget-session" });
+    for (let i = 1; i <= 100; i++)
+      emitters[0]?.({ type: "lifecycle", text: `${i}: ${"😀".repeat(50)}` });
+    expect(job.logs.length).toBeLessThanOrEqual(8);
+    expect(job.logBytes).toBeLessThanOrEqual(1024);
+    const snapshot = sessions.buildSnapshot(job);
+    expect(snapshot.logs[0].type).toBe("truncation");
+    expect(snapshot.logCursor).toBe(100);
+    expect(snapshot.logEventCount).toBe(100);
+    const waiting = sessions.waitForJob(job.jobId, snapshot.logCursor, undefined, "poll", 10_000);
+    emitters[0]?.({ type: "lifecycle", text: "new state" });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(await waiting).toBe(job);
+    expect(sessions.buildSnapshot(job, snapshot.logCursor).logs.map((entry) => entry.seq)).toEqual([
+      101,
+    ]);
+    await finish(replies[0]);
+    expect(job.logs.length).toBeLessThanOrEqual(3);
+    expect(job.logBytes).toBeLessThanOrEqual(512);
+    expect(job.logs[0].type).toBe("truncation");
+    expect(sessions.buildSnapshot(job).logCursor).toBe(101);
+    expect(job.summary).toBe("done");
+  });
+
+  it("distinguishes transcript limits from transport failure in job logs", () => {
+    const { sessions, updates } = manager();
+    const job = sessions.submitTask({ task: "watch me" });
+    updates[0]?.({
+      upstream: "connected",
+      transcript: "detached",
+      reason: "limit_exceeded",
+      skippedEvents: 2,
+    });
+    expect(job.logs.at(-1)?.text).toContain("Transcript memory limit reached");
+    expect(job.logs.at(-1)?.text).toContain("2 known live records");
+    updates[0]?.({
+      upstream: "connected",
+      transcript: "live",
+      reason: "limit_recovered",
+      skippedEvents: 2,
+      skippedSequenceCount: 10,
+      lastSeenSequence: 10,
+    });
+    expect(job.logs.at(-1)?.text).toContain("skipped 10 sequence positions");
+    expect(job.lastSeenSequence).toBe(10);
+    expect(job.status).toBe("running");
+  });
+
   it("evicts oldest finished jobs and every session index while preserving active turns", async () => {
     vi.stubEnv("CLAWCONNECT_FINISHED_JOB_MAX_COUNT", "2");
     const { sessions, replies } = manager();
@@ -108,20 +184,25 @@ describe("finished job retention", () => {
     });
   });
 
-  it("bounds busy rejections without changing the real session history", () => {
+  it("100 busy retries do not evict a completed unread job or its continuation", async () => {
     vi.stubEnv("CLAWCONNECT_FINISHED_JOB_MAX_COUNT", "2");
-    const { sessions } = manager();
+    const { sessions, replies } = manager();
+    const unread = sessions.submitTask({ task: "keep this result" });
+    await finish(replies[0]);
     const job = sessions.submitTask({ task: "active" });
-    const rejected = Array.from({ length: 10 }, () =>
+    const rejected = Array.from({ length: 100 }, () =>
       sessions.submitTask({ task: "collision", sessionKey: job.sessionKey }),
     );
     expect(sessions.getJob(rejected[0].jobId)).toBeUndefined();
     expect(sessions.getLatestJobForSession(job.sessionKey)).toBe(job);
     expect(sessions.getJobHistory(job.sessionKey)).toEqual([job]);
+    expect(sessions.getJob(unread.jobId)?.summary).toBe("done");
+    expect(sessions.getSessionState(unread.sessionKey)?.lastJobId).toBe(unread.jobId);
+    expect(rejected.every((entry) => entry.errorInfo?.message === "session busy")).toBe(true);
     expect(sessions.retentionStats()).toMatchObject({
-      jobs: 3,
-      finishedJobs: 2,
-      historyEntries: 1,
+      jobs: 2,
+      finishedJobs: 1,
+      historyEntries: 2,
     });
   });
 
@@ -182,6 +263,48 @@ describe("durable attachment retention", () => {
     return new JsonFileAttachmentStore(join(directory, "attachments.json"));
   }
 
+  it("starts legacy age at first load, preserves original bytes, and does not reset age on restart", () => {
+    vi.stubEnv("CLAWCONNECT_ATTACHMENT_MAX_AGE_MS", "1000");
+    const directory = mkdtempSync(join(tmpdir(), "clawconnect-retention-"));
+    directories.push(directory);
+    const file = join(directory, "attachments.json");
+    const legacy = attachmentState("legacy-current", 1);
+    delete legacy.attachments["legacy-current"].retentionUpdatedAt;
+    const original = JSON.stringify([legacy], null, 2);
+    writeFileSync(file, original);
+    const loadedAt = Date.now();
+    const disk = new JsonFileAttachmentStore(file);
+    const first = manager(disk).sessions;
+    expect(first.getAgentSessionAttachment("legacy-current")).toMatchObject({
+      attachedAt: 1,
+      retentionUpdatedAt: loadedAt,
+    });
+    expect(readFileSync(`${file}.pre-retention`, "utf8")).toBe(original);
+    vi.setSystemTime(loadedAt + 999);
+    const restarted = manager(new JsonFileAttachmentStore(file)).sessions;
+    expect(restarted.getAgentSessionAttachment("legacy-current")?.retentionUpdatedAt).toBe(
+      loadedAt,
+    );
+    vi.setSystemTime(loadedAt + 1000);
+    expect(restarted.retentionStats().attachments).toBe(0);
+    expect(disk.load()).toEqual([]);
+    expect(readFileSync(`${file}.pre-retention`, "utf8")).toBe(original);
+  });
+
+  it("evicts newer superseded and detached records before an idle current pointer", () => {
+    vi.stubEnv("CLAWCONNECT_ATTACHMENT_MAX_COUNT", "1");
+    const disk = store();
+    disk.save([
+      attachmentState("old-current", Date.now() - 100),
+      attachmentState("recent-superseded", Date.now() - 2, "superseded"),
+      attachmentState("recent-detached", Date.now() - 1, "detached"),
+    ]);
+    const sessions = manager(disk).sessions;
+    expect(sessions.getAgentSessionAttachment("old-current")?.handle).toBe("old-current");
+    expect(sessions.retentionStats().attachments).toBe(1);
+    expect(disk.load().map((state) => state.sessionKey)).toEqual(["old-current"]);
+  });
+
   it("prunes expired current and detached records on load and persists the bounded set across restart", () => {
     vi.stubEnv("CLAWCONNECT_ATTACHMENT_MAX_AGE_MS", "1000");
     const disk = store();
@@ -220,11 +343,11 @@ describe("durable attachment retention", () => {
     });
     expect(sessions.getAgentSessionAttachment(third.sessionKey)?.handle).toBe("third");
     expect(sessions.getAgentSessionLineage(job.sessionKey).map((record) => record.handle)).toEqual([
-      "second",
       "third",
     ]);
     expect(disk.load().flatMap((state) => Object.values(state.attachments))).toHaveLength(2);
-    expect(sessions.retentionStats()).toMatchObject({ attachments: 2, attachmentSessions: 1 });
+    expect(sessions.getAgentSessionAttachment("newer")?.handle).toBe("newer");
+    expect(sessions.retentionStats()).toMatchObject({ attachments: 2, attachmentSessions: 2 });
   });
 
   it("keeps attachments required by running jobs until those jobs finish", async () => {
