@@ -3,7 +3,7 @@ import { defineConfig } from "vite-plus";
 export default defineConfig({
   pack: {
     dts: {
-      tsgo: true,
+      tsgo: false,
     },
     // Name the binary explicitly — see the note in packages/mcp/vite.config.ts:
     // auto-detect derives it from the package name (@clawconnect/cli -> "cli")
