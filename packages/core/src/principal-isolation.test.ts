@@ -302,8 +302,7 @@ describe("principal ownership", () => {
     await vi.advanceTimersByTimeAsync(1_000);
     expect(mocks.connections[2].close).toHaveBeenCalledTimes(1);
     expect(vi.getTimerCount()).toBeGreaterThan(0);
-    const timerCount = vi.getTimerCount();
     value.closeAll();
-    expect(vi.getTimerCount()).toBe(timerCount - 1);
+    expect(vi.getTimerCount()).toBe(0);
   });
 });

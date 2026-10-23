@@ -449,7 +449,7 @@ describe("Fleet attachment restart persistence", () => {
       runtime: "claude-fleet",
       handle: "cf-good",
       host: "workstation-1",
-      attachedAt: 1000,
+      attachedAt: 1_000,
       status: "running",
     };
     const validState: SessionAttachmentState = {
@@ -465,8 +465,8 @@ describe("Fleet attachment restart persistence", () => {
     expect(sessions.getAgentSessionLineage(missingAttachmentsField.sessionKey)).toEqual([]);
 
     // The OTHER session's valid record in the same store load is untouched.
-    expect(sessions.getAgentSessionAttachment(validState.sessionKey)).toEqual(validRecord);
-    expect(sessions.getAgentSessionLineage(validState.sessionKey)).toEqual([validRecord]);
+    expect(sessions.getAgentSessionAttachment(validState.sessionKey)).toEqual({ ...validRecord, retentionUpdatedAt: expect.any(Number) });
+    expect(sessions.getAgentSessionLineage(validState.sessionKey)).toEqual([{ ...validRecord, retentionUpdatedAt: expect.any(Number) }]);
   });
 
   it("a currentAttachmentId that IS resolvable, alongside other malformed entries in the same session's attachments, preserves the valid lineage", () => {
@@ -475,7 +475,7 @@ describe("Fleet attachment restart persistence", () => {
       runtime: "claude-fleet",
       handle: "cf-good",
       host: "workstation-1",
-      attachedAt: 1000,
+      attachedAt: 1_000,
       status: "running",
     };
     const mixed = {
@@ -490,8 +490,8 @@ describe("Fleet attachment restart persistence", () => {
     const store: AttachmentStore = { load: () => [mixed], save: () => {} };
     const sessions = new SessionManager(fakeGateway().gateway, "main", undefined, store);
 
-    expect(sessions.getAgentSessionAttachment(mixed.sessionKey)).toEqual(validRecord);
-    expect(sessions.getAgentSessionLineage(mixed.sessionKey)).toEqual([validRecord]);
+    expect(sessions.getAgentSessionAttachment(mixed.sessionKey)).toEqual({ ...validRecord, retentionUpdatedAt: expect.any(Number) });
+    expect(sessions.getAgentSessionLineage(mixed.sessionKey)).toEqual([{ ...validRecord, retentionUpdatedAt: expect.any(Number) }]);
   });
 
   it("buildSnapshot for a job on a session with malformed persisted fleet state never throws and simply omits agentSession", () => {

@@ -52,7 +52,13 @@ export function principalNamespace(principalId: string): string {
 
 export type GatewayPoolView = Pick<
   GatewayPool,
-  "forAgent" | "forJob" | "forSession" | "allEntries" | "rememberJob" | "storeHealth"
+  | "forAgent"
+  | "forJob"
+  | "forSession"
+  | "allEntries"
+  | "rememberJob"
+  | "storeHealth"
+  | "retentionStats"
 >;
 
 export interface GatewayPoolOptions {
@@ -241,6 +247,7 @@ export class GatewayPool {
       allEntries: () => this.allEntries(owner),
       rememberJob: (id, agent) => this.rememberJob(id, agent, owner),
       storeHealth: () => this.storeHealth(owner),
+      retentionStats: () => this.retentionStatsFor(this.allEntries(owner)),
     };
   }
 
@@ -311,6 +318,7 @@ export class GatewayPool {
       store,
       attachmentStore,
       this.runtimes,
+      (jobId) => this.jobIndex.delete(this.key(jobId, principal)),
     );
     const entry: PoolEntry = {
       agent,
@@ -363,14 +371,22 @@ export class GatewayPool {
   }
 
   rememberJob(jobId: string, agentId: string, principal?: HumanPrincipal): void {
-    this.jobIndex.set(this.key(jobId, principal), this.key(agentId, principal));
+    const agentKey = this.key(agentId, principal);
+    if (this.entries.get(agentKey)?.sessions.getJob(jobId)) {
+      this.jobIndex.set(this.key(jobId, principal), agentKey);
+    }
   }
 
   forJob(jobId: string, principal?: HumanPrincipal): PoolEntry | undefined {
-    const agentId = this.jobIndex.get(this.key(jobId, principal));
-    if (!agentId) return undefined;
-    const entry = this.entries.get(agentId);
-    return entry ? this.touch(entry) : undefined;
+    const jobKey = this.key(jobId, principal);
+    const agentKey = this.jobIndex.get(jobKey);
+    if (!agentKey) return undefined;
+    const entry = this.entries.get(agentKey);
+    if (!entry?.sessions.getJob(jobId)) {
+      this.jobIndex.delete(jobKey);
+      return undefined;
+    }
+    return this.touch(entry);
   }
 
   forSession(sessionKey: string, principal?: HumanPrincipal): PoolEntry | undefined {
@@ -390,9 +406,72 @@ export class GatewayPool {
     return [...this.entries.values()];
   }
 
+  retentionStats() {
+    return this.retentionStatsFor(this.allPrincipalEntries());
+  }
+
+  private retentionStatsFor(entries: PoolEntry[]) {
+    const agents = entries.map((entry) => entry.sessions.retentionStats());
+    const retained = {
+      jobs: 0,
+      finishedJobs: 0,
+      logEntries: 0,
+      logTextChars: 0,
+      logBytes: 0,
+      latestJobIndex: 0,
+      sessionStates: 0,
+      historySessions: 0,
+      historyEntries: 0,
+      provisionalOutcomes: 0,
+      recheckSettled: 0,
+      cancelRequested: 0,
+      cancelInFlight: 0,
+      upstreamRunIds: 0,
+      reconcilers: 0,
+      attachmentSessions: 0,
+      attachments: 0,
+    };
+    for (const stats of agents) {
+      for (const key of Object.keys(retained) as (keyof typeof retained)[])
+        retained[key] += stats[key];
+    }
+    const gateway = {
+      pendingTranscriptWork: 0,
+      pendingTranscriptBytes: 0,
+      transcriptReplayMessages: 0,
+      transcriptReplayBytes: 0,
+      transcriptSeenIds: 0,
+      transcriptLimitFailures: 0,
+      transcriptWatches: 0,
+      pendingRpcs: 0,
+      subscribers: 0,
+      transcriptPausedWatches: 0,
+      transcriptSkippedEvents: 0,
+      transcriptSkippedSequences: 0,
+    };
+    for (const entry of entries) {
+      const stats = entry.gateway.diagnostics();
+      for (const key of Object.keys(gateway) as (keyof typeof gateway)[])
+        gateway[key] += stats[key];
+    }
+    const entryKeys = new Set(entries.map((entry) => this.key(entry.agent.id, entry.principal)));
+    const starts = agents.flatMap((stats) =>
+      stats.oldestJobStartedAt === undefined ? [] : [stats.oldestJobStartedAt],
+    );
+    return {
+      ...retained,
+      gateway,
+      jobRoutingIndex: [...this.jobIndex.values()].filter((key) => entryKeys.has(key)).length,
+      ...(starts.length ? { oldestJobStartedAt: Math.min(...starts) } : {}),
+    };
+  }
+
   closeAll(): void {
     clearInterval(this.idleTimer);
-    for (const entry of this.entries.values()) entry.gateway.close();
+    for (const entry of this.entries.values()) {
+      entry.sessions.close();
+      entry.gateway.close();
+    }
     this.entries.clear();
     this.jobIndex.clear();
   }

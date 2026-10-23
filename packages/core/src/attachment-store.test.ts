@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -56,7 +56,36 @@ describe("JsonFileAttachmentStore", () => {
     store.save([sample]);
     expect(store.load()).toEqual([sample]);
     store.save([]);
+    expect(JSON.parse(readFileSync(`${filePath}.pre-retention`, "utf8"))).toEqual([sample]);
     expect(store.load()).toEqual([]);
+  });
+
+  it("preserves the original bytes once across subsequent saves and restarts", () => {
+    const filePath = tmpFilePath();
+    const original = JSON.stringify([sample], null, 2);
+    writeFileSync(filePath, original);
+    const store = new JsonFileAttachmentStore(filePath);
+    store.load();
+    store.save([]);
+    expect(readFileSync(`${filePath}.pre-retention`, "utf8")).toBe(original);
+    new JsonFileAttachmentStore(filePath).save([sample]);
+    expect(readFileSync(`${filePath}.pre-retention`, "utf8")).toBe(original);
+  });
+
+  it("refuses a destructive save and reports degradation if the backup cannot be written", () => {
+    const filePath = tmpFilePath();
+    const original = JSON.stringify([sample]);
+    writeFileSync(filePath, original);
+    mkdirSync(`${filePath}.pre-retention`);
+    const seen: StoreDegradation[] = [];
+    const store = new JsonFileAttachmentStore(filePath, (event) => seen.push(event));
+    store.load();
+    store.save([]);
+    expect(readFileSync(filePath, "utf8")).toBe(original);
+    expect(seen).toHaveLength(1);
+    expect(seen[0].message).toContain("refusing to overwrite");
+    store.save([]);
+    expect(readFileSync(filePath, "utf8")).toBe(original);
   });
 
   it("load() on corrupt JSON returns an empty array instead of throwing", () => {
