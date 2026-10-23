@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -8,6 +8,7 @@ import type { AuthInfo, McpRequestContext } from "@modelcontextprotocol/server";
 import { toWebRequest } from "@modelcontextprotocol/node";
 import { GatewayPool, buildCapabilities } from "@clawconnect/core";
 import { registerCapability } from "@clawconnect/mcp";
+import { createIdentityResolver } from "./identity.js";
 import type {
   AgentRegistry,
   AgentSessionRuntimeRegistry,
@@ -132,6 +133,11 @@ export function createApp(registry: AgentRegistry, opts: CreateAppOptions = {}):
     opts.jobStoreDir ?? DEFAULT_JOB_STORE_DIR,
     undefined,
     opts.agentSessionRuntimes,
+    {
+      principalIdleTimeoutMs: process.env.CLAWCONNECT_PRINCIPAL_IDLE_TIMEOUT_MS
+        ? Number(process.env.CLAWCONNECT_PRINCIPAL_IDLE_TIMEOUT_MS)
+        : undefined,
+    },
   );
   // Reload every configured agent's persisted jobs now, not lazily on first
   // request — otherwise an agent nobody has queried yet since the restart
@@ -229,156 +235,7 @@ export function createApp(registry: AgentRegistry, opts: CreateAppOptions = {}):
     return { allowedIds: allowed, defaultId, serverName };
   }
 
-  // ── Credentials ───────────────────────────────────────────────────────────
-
-  const PUBLIC_MCP_PASS = process.env.PUBLIC_MCP_PASS ?? "";
-
-  /**
-   * Personal tokens: MCP_USER_TOKENS="Name:tok1,Other:tok2,...". A personal
-   * token both authenticates the request and identifies the person — identity
-   * derives from the credential, not from a spoofable query param — so the
-   * server can stamp the sender on every dispatched task and a single
-   * person's token can be revoked without rotating everyone.
-   *
-   * PUBLIC_MCP_PASS (the legacy shared pass) keeps working but resolves to an
-   * anonymous identity; those connections get a nudge to switch to a personal
-   * token so agents know who they're working with.
-   *
-   * MCP_USER_TOKENS_FILE can point at a runtime-editable JSON file for adding
-   * or revoking tokens without restarting the process. Supported shapes:
-   *   { "Name": "tok1", "Other": "tok2" }
-   *   { "tokens": { "Name": "tok1" } }
-   *   [{ "name": "Name", "token": "tok1" }]
-   */
-  const MCP_USER_TOKENS_FILE = process.env.MCP_USER_TOKENS_FILE?.trim();
-
-  function addToken(target: Map<string, string>, name: string, token: string, source: string) {
-    const cleanName = name.trim();
-    const cleanToken = token.trim();
-    if (!cleanName || !cleanToken) return;
-    if (target.has(cleanToken)) {
-      console.warn(
-        `[mcp] ${source}: duplicate token for "${cleanName}" collides with "${target.get(cleanToken)}" — skipped`,
-      );
-      return;
-    }
-    target.set(cleanToken, cleanName);
-  }
-
-  function parseTokenCsv(raw: string | undefined, source: string): Map<string, string> {
-    const tokens = new Map<string, string>();
-    for (const pair of (raw ?? "").split(",")) {
-      const trimmed = pair.trim();
-      if (!trimmed) continue;
-      const sep = trimmed.indexOf(":");
-      const name = sep > 0 ? trimmed.slice(0, sep).trim() : "";
-      const token = sep > 0 ? trimmed.slice(sep + 1).trim() : "";
-      if (!name || !token) {
-        console.warn(
-          `[mcp] ${source} entry "${trimmed.slice(0, 16)}..." is not "Name:token" — skipped`,
-        );
-        continue;
-      }
-      addToken(tokens, name, token, source);
-    }
-    return tokens;
-  }
-
-  function parseTokenJson(raw: string, source: string): Map<string, string> {
-    const parsed = JSON.parse(raw) as unknown;
-    const tokens = new Map<string, string>();
-    if (Array.isArray(parsed)) {
-      for (const entry of parsed) {
-        if (!entry || typeof entry !== "object") continue;
-        const { name, token } = entry as Record<string, unknown>;
-        if (typeof name === "string" && typeof token === "string")
-          addToken(tokens, name, token, source);
-      }
-      return tokens;
-    }
-    if (!parsed || typeof parsed !== "object") return tokens;
-    const obj = parsed as Record<string, unknown>;
-    const record =
-      obj.tokens && typeof obj.tokens === "object" && !Array.isArray(obj.tokens)
-        ? (obj.tokens as Record<string, unknown>)
-        : obj;
-    for (const [name, token] of Object.entries(record)) {
-      if (typeof token === "string") addToken(tokens, name, token, source);
-    }
-    return tokens;
-  }
-
-  const ENV_USER_TOKENS = parseTokenCsv(process.env.MCP_USER_TOKENS, "MCP_USER_TOKENS");
-  if (ENV_USER_TOKENS.size > 0) {
-    console.log(
-      `[mcp] env personal tokens loaded for: ${[...ENV_USER_TOKENS.values()].join(", ")}`,
-    );
-  }
-  if (MCP_USER_TOKENS_FILE) {
-    console.log(`[mcp] runtime token file enabled: ${MCP_USER_TOKENS_FILE}`);
-  }
-
-  let fileTokenCache = new Map<string, string>();
-  let fileTokenMtimeMs: number | null = null;
-
-  function loadFileTokens(): Map<string, string> {
-    if (!MCP_USER_TOKENS_FILE) return fileTokenCache;
-    try {
-      if (!existsSync(MCP_USER_TOKENS_FILE)) {
-        if (fileTokenMtimeMs !== null || fileTokenCache.size > 0) {
-          console.warn(`[mcp] token file disappeared: ${MCP_USER_TOKENS_FILE}`);
-        }
-        fileTokenMtimeMs = null;
-        fileTokenCache = new Map();
-        return fileTokenCache;
-      }
-      const mtimeMs = statSync(MCP_USER_TOKENS_FILE).mtimeMs;
-      if (fileTokenMtimeMs === mtimeMs) return fileTokenCache;
-      fileTokenCache = parseTokenJson(
-        readFileSync(MCP_USER_TOKENS_FILE, "utf8"),
-        MCP_USER_TOKENS_FILE,
-      );
-      fileTokenMtimeMs = mtimeMs;
-      console.log(
-        `[mcp] runtime personal tokens loaded for: ${[...fileTokenCache.values()].join(", ") || "(none)"}`,
-      );
-    } catch (err) {
-      console.warn(
-        `[mcp] failed to read token file ${MCP_USER_TOKENS_FILE}: ${(err as Error).message}`,
-      );
-    }
-    return fileTokenCache;
-  }
-
-  function getUserTokens(): Map<string, string> {
-    const merged = new Map(ENV_USER_TOKENS);
-    for (const [token, name] of loadFileTokens())
-      addToken(merged, name, token, MCP_USER_TOKENS_FILE ?? "token file");
-    return merged;
-  }
-
-  /**
-   * Resolve the caller's identity from the supplied credential (?pass=<v> or
-   * Authorization: Bearer <v>). Returns:
-   *   { user: "<name>" }                — personal token matched
-   *   { user: null, legacy: true }      — legacy shared pass matched
-   *   { user: null }                    — no auth configured at all (open mode)
-   *   null                              — credential missing or wrong → 403
-   */
-  function resolveIdentity(url: URL, req: IncomingMessage): Identity | null {
-    const userTokens = getUserTokens();
-    if (!PUBLIC_MCP_PASS && userTokens.size === 0) return { user: null }; // no gate configured
-    const fromQuery = url.searchParams.get("pass");
-    const auth = req.headers.authorization ?? (req.headers["authorization"] as string | undefined);
-    const fromHeader = auth?.match(/^Bearer\s+(.+)$/i)?.[1]?.trim();
-    for (const supplied of [fromQuery, fromHeader]) {
-      if (!supplied) continue;
-      const name = userTokens.get(supplied);
-      if (name) return { user: name };
-      if (PUBLIC_MCP_PASS && supplied === PUBLIC_MCP_PASS) return { user: null, legacy: true };
-    }
-    return null;
-  }
+  const { resolve: resolveIdentity } = createIdentityResolver();
 
   function authInfoFor(identity: Identity): AuthInfo {
     return {

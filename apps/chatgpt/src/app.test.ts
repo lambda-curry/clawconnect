@@ -39,6 +39,8 @@ afterEach(() => {
   for (const d of tmpDirs) rmSync(d, { recursive: true, force: true });
   tmpDirs = [];
   delete process.env.PUBLIC_MCP_PASS;
+  delete process.env.MCP_USER_TOKENS;
+  delete process.env.MCP_USER_TOKENS_FILE;
 });
 
 async function startTestApp(
@@ -47,12 +49,18 @@ async function startTestApp(
     widgetHtmlPath?: string;
     registry?: AgentRegistry;
     authPass?: string;
+    userTokens?: string;
+    userTokensFile?: string;
   } = {},
 ) {
   if (opts.widgetEnabled) process.env.ENABLE_CHATGPT_UI_WIDGET = "true";
   else delete process.env.ENABLE_CHATGPT_UI_WIDGET;
   if (opts.authPass) process.env.PUBLIC_MCP_PASS = opts.authPass;
   else delete process.env.PUBLIC_MCP_PASS;
+  if (opts.userTokens !== undefined) process.env.MCP_USER_TOKENS = opts.userTokens;
+  else delete process.env.MCP_USER_TOKENS;
+  if (opts.userTokensFile !== undefined) process.env.MCP_USER_TOKENS_FILE = opts.userTokensFile;
+  else delete process.env.MCP_USER_TOKENS_FILE;
 
   // Scratch dir, never the real default — a test run must never read or
   // write apps/chatgpt/.job-store.
@@ -739,6 +747,94 @@ describe("check_task model-facing text carries the resume cursor", () => {
         true,
       ),
     ).toBe("the answer");
+  });
+});
+
+describe("personal-token HTTP authentication", () => {
+  const alice = { token: "test-alice-token", principalId: "p-alice", loginEmail: "alice@example.test" };
+  const bob = { token: "test-bob-token", principalId: "p-bob", loginEmail: "bob@example.test" };
+
+  async function probe(url: string, token: string) {
+    return fetch(url, { method: "GET", headers: { Authorization: `Bearer ${token}` } });
+  }
+
+  it("rejects revoked file tokens without falling back to open access", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "clawconnect-token-config-"));
+    tmpDirs.push(directory);
+    const file = join(directory, "tokens.json");
+    writeFileSync(file, JSON.stringify({ Alice: alice }));
+    const { url } = await startTestApp({ userTokensFile: file });
+    const initialized = await rpc(url, "initialize", INIT_PARAMS("2025-03-26"), {
+      Authorization: `Bearer ${alice.token}`,
+    });
+    expect(initialized.result.serverInfo.name).toBe("ClawConnect (Alice)");
+    writeFileSync(file, "{}");
+    expect((await probe(url, alice.token)).status).toBe(403);
+    expect((await fetch(url)).status).toBe(403);
+  });
+
+  it("rejects unknown credentials when token configuration is absent", async () => {
+    const { url } = await startTestApp();
+    expect((await probe(url, "test-unknown-token")).status).toBe(403);
+  });
+
+  it("rejects a missing binding and refuses a shared-pass fallback", async () => {
+    const { url } = await startTestApp({
+      userTokens: JSON.stringify({ Alice: { token: alice.token } }),
+      authPass: "test-shared-pass",
+    });
+    expect((await probe(`${url}?pass=test-shared-pass`, alice.token)).status).toBe(403);
+    expect((await probe(url, "test-revoked-token")).status).toBe(403);
+    const legacy = await rpc(`${url}?pass=test-shared-pass`, "initialize", INIT_PARAMS("2025-03-26"));
+    expect(legacy.result.serverInfo.name).toBe("ClawConnect");
+  });
+
+  it("rejects personal auth when the configured token file is missing", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "clawconnect-token-config-"));
+    tmpDirs.push(directory);
+    const { url } = await startTestApp({ userTokensFile: join(directory, "missing.json") });
+    expect((await probe(url, alice.token)).status).toBe(403);
+    expect((await fetch(url)).status).toBe(403);
+  });
+
+  it("carries the authenticated principal through dispatch and ignores senderName", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "clawconnect-token-config-"));
+    tmpDirs.push(directory);
+    const file = join(directory, "tokens.json");
+    writeFileSync(file, JSON.stringify({ Alice: alice, Bob: bob }));
+    const { url, pool } = await startTestApp({
+      userTokensFile: file,
+      authPass: "test-shared-pass",
+    });
+    const headers = { Authorization: `Bearer ${alice.token}` };
+    const run = await rpc(url, "tools/call", {
+      name: "run_task",
+      arguments: { task: "inspect ownership", senderName: "Bob" },
+    }, headers);
+    const taskId = run.result.structuredContent.jobId;
+    expect(taskId).toBeTruthy();
+    const prompt = await rpc(url, "tools/call", {
+      name: "get_task",
+      arguments: { taskId, detail: "prompt" },
+    }, headers);
+    expect(prompt.result.structuredContent.prompt.senderName).toBe("Alice");
+    expect(pool.forPrincipal(alice).forJob(taskId)).toBeDefined();
+    expect(pool.forPrincipal(bob).forJob(taskId)).toBeUndefined();
+    expect(pool.forJob(taskId)).toBeUndefined();
+    const copied = await rpc(url, "tools/call", {
+      name: "get_task",
+      arguments: { taskId, detail: "prompt" },
+    }, { Authorization: `Bearer ${bob.token}` });
+    expect(copied.result.structuredContent.error).toMatch(/not found/i);
+
+    writeFileSync(file, JSON.stringify({ Alice: { ...alice, token: "test-rotated-alice-token" }, Bob: bob }));
+    expect((await probe(url, alice.token)).status).toBe(403);
+    const afterRotation = await rpc(url, "tools/call", {
+      name: "get_task",
+      arguments: { taskId, detail: "prompt" },
+    }, { Authorization: "Bearer test-rotated-alice-token" });
+    expect(afterRotation.result.structuredContent.prompt.senderName).toBe("Alice");
+    expect(afterRotation.result.structuredContent.prompt.task).toBe("inspect ownership");
   });
 });
 

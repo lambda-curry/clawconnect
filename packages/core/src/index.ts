@@ -1,6 +1,7 @@
 export { OpenClawGateway } from "./gateway.ts";
 export { SessionManager } from "./session.ts";
-export { GatewayPool } from "./gateway-pool.ts";
+export { GatewayPool, isValidHumanPrincipal, principalNamespace } from "./gateway-pool.ts";
+export type { GatewayPoolView, GatewayPoolOptions, HumanPrincipal } from "./gateway-pool.ts";
 export { JsonFileJobStore } from "./job-store.ts";
 export type { JobStore, PersistedJob } from "./job-store.ts";
 export { JsonFileAttachmentStore } from "./attachment-store.ts";

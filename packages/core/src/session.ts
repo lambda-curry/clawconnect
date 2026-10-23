@@ -288,17 +288,33 @@ export function buildSubmitMessage(input: TaskInput): string {
   return `${MESSAGE_TOOL_VETO_PREAMBLE}\n\n---\n\n${withSender}`;
 }
 
-function createThreadSessionKey(agentId: string): string {
-  return `agent:${agentId}:main:thread:mcp-${Date.now()}-${randomUUID().slice(0, 8)}`;
+const PERSONAL_THREAD_PREFIX = "clawconnect-personal-";
+
+function threadSessionPrefix(agentId: string, namespace?: string): string {
+  return `agent:${agentId}:main:thread:${namespace ? `${PERSONAL_THREAD_PREFIX}${namespace}-` : ""}`;
+}
+
+function isPersonalSessionKey(sessionKey: string): boolean {
+  const parts = sessionKey.trim().toLowerCase().split(":");
+  return parts.some(
+    (part, index) => part === "thread" && parts[index + 1]?.startsWith(PERSONAL_THREAD_PREFIX),
+  );
+}
+
+function createThreadSessionKey(agentId: string, namespace?: string): string {
+  return `${threadSessionPrefix(agentId, namespace)}mcp-${Date.now()}-${randomUUID().slice(0, 8)}`;
 }
 
 function resolveSessionKey(
   input: string | undefined,
   agentId: string,
+  namespace?: string,
 ): { sessionKey: string; migratedFromLegacy: boolean } {
-  if (!input) return { sessionKey: createThreadSessionKey(agentId), migratedFromLegacy: false };
+  if (!input) {
+    return { sessionKey: createThreadSessionKey(agentId, namespace), migratedFromLegacy: false };
+  }
   if (input.startsWith(LEGACY_CHATGPT_SESSION_PREFIX)) {
-    return { sessionKey: createThreadSessionKey(agentId), migratedFromLegacy: true };
+    return { sessionKey: createThreadSessionKey(agentId, namespace), migratedFromLegacy: true };
   }
   return { sessionKey: input, migratedFromLegacy: false };
 }
@@ -467,6 +483,7 @@ export class SessionManager {
     private readonly attachmentStore?: AttachmentStore,
     private readonly runtimes?: AgentSessionRuntimeRegistry,
     private readonly onJobEvicted?: (jobId: string) => void,
+    private readonly sessionKeyNamespace?: string,
   ) {
     if (store) this.rehydrateFromStore(store);
     if (attachmentStore) this.rehydrateAttachmentsFromStore(attachmentStore);
@@ -1477,7 +1494,26 @@ export class SessionManager {
 
   submitTask(input: TaskInput): Job {
     this.sweepRetention();
-    const { sessionKey, migratedFromLegacy } = resolveSessionKey(input.sessionKey, this.agentId);
+    if (input.sessionKey) {
+      // Ownership must survive job eviction and restart. Service callers can
+      // resume arbitrary gateway keys, but cannot enter the reserved personal
+      // namespace, including bare-key and case-normalized gateway aliases.
+      const allowed = this.sessionKeyNamespace
+        ? input.sessionKey.startsWith(threadSessionPrefix(this.agentId, this.sessionKeyNamespace))
+        : !isPersonalSessionKey(input.sessionKey);
+      if (!allowed) {
+        return this.rejectSubmit(
+          input.sessionKey,
+          "Session not found.",
+          "session not found",
+          "Use a session key from this principal or omit sessionKey to start a new thread.",
+          input,
+        );
+      }
+    }
+    const { sessionKey, migratedFromLegacy } = resolveSessionKey(
+      input.sessionKey, this.agentId, this.sessionKeyNamespace,
+    );
 
     // Parse (but do not yet apply) any attachment directive — buildSubmitMessage
     // must never see the raw directive block, so it's stripped here
@@ -2974,11 +3010,15 @@ export class SessionManager {
     return [...this.sessions.values()];
   }
 
+  hasRunningJobs(): boolean {
+    return [...this.jobs.values()].some((job) => job.status === "running");
+  }
+
   resolveJob(jobId?: string, sessionKey?: string): Job | undefined {
     this.sweepRetention();
     if (jobId) {
       const job = this.jobs.get(jobId);
-      if (job) return job;
+      return job && (!sessionKey || job.sessionKey === sessionKey) ? job : undefined;
     }
     if (sessionKey) {
       return this.getLatestJobForSession(sessionKey);

@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { JsonFileAttachmentStore } from "./attachment-store.ts";
 import { GatewayPool } from "./gateway-pool.ts";
+import { buildCapabilities } from "./capability.ts";
+import type { AgentRegistry } from "./agent-registry.ts";
 import type { OpenClawGateway } from "./gateway.ts";
 import { SessionManager } from "./session.ts";
 import type { GatewayEvent, SessionAttachmentState, TranscriptTransportUpdate } from "./types.ts";
@@ -242,6 +244,90 @@ describe("finished job retention", () => {
     expect(pool.forJob(first.jobId)).toBeUndefined();
     expect(pool.forJob(second.jobId)).toBe(entry);
     expect(pool.retentionStats()).toMatchObject({ jobs: 1, jobRoutingIndex: 1, historyEntries: 1 });
+  });
+
+  it("evicts personal routing keys without changing other principals' indexes", async () => {
+    vi.stubEnv("CLAWCONNECT_FINISHED_JOB_MAX_COUNT", "1");
+    const pool = new GatewayPool({
+      default: "example",
+      agents: [{ id: "example", openclawAgentId: "main", url: "ws://localhost", password: "" }],
+      groups: {},
+      groupLabels: {},
+      source: "env",
+    });
+    pools.push(pool);
+    const views = [
+      pool.forPrincipal(),
+      pool.forPrincipal({ principalId: "p-alice", loginEmail: "alice@example.test" }),
+      pool.forPrincipal({ principalId: "p-bob", loginEmail: "bob@example.test" }),
+    ];
+    const initial = views.map((view) => {
+      const entry = view.forAgent();
+      vi.spyOn(entry.gateway, "chat").mockResolvedValue("done");
+      const job = entry.sessions.submitTask({ task: "first" });
+      view.rememberJob(job.jobId, entry.agent.id);
+      return job;
+    });
+    await Promise.resolve();
+    const personal = views[1].forAgent();
+    const next = personal.sessions.submitTask({ task: "next" });
+    views[1].rememberJob(next.jobId, personal.agent.id);
+    await Promise.resolve();
+    personal.sessions.sweepRetention();
+    // Check the actual index before a lookup can defensively remove stale keys.
+    const index = (pool as unknown as { jobIndex: Map<string, string> }).jobIndex;
+    expect(index.size).toBe(3);
+    views[1].rememberJob(initial[1].jobId, personal.agent.id);
+    expect(index.size).toBe(3);
+    expect(views[1].forJob(initial[1].jobId)).toBeUndefined();
+    expect(views[1].forJob(next.jobId)).toBe(personal);
+    expect(views[0].forJob(initial[0].jobId)).toBeDefined();
+    expect(views[2].forJob(initial[2].jobId)).toBeDefined();
+    expect(views[2].forJob(next.jobId)).toBeUndefined();
+    expect(pool.retentionStats()).toMatchObject({ jobs: 3, finishedJobs: 3, jobRoutingIndex: 3 });
+    for (const view of views)
+      expect(view.retentionStats()).toMatchObject({ jobs: 1, jobRoutingIndex: 1 });
+  });
+
+  it("scopes connection counters while aggregate health reads do not keep personal sockets alive", async () => {
+    const registry: AgentRegistry = {
+      default: "example",
+      agents: [{ id: "example", openclawAgentId: "main", url: "ws://localhost", password: "" }],
+      groups: {},
+      groupLabels: {},
+      source: "env",
+    };
+    const pool = new GatewayPool(registry, undefined, undefined, undefined, {
+      principalIdleTimeoutMs: 1000,
+    });
+    pools.push(pool);
+    const principal = { principalId: "p-alice", loginEmail: "alice@example.test" };
+    const service = pool.forAgent();
+    const personal = pool.forPrincipal(principal).forAgent();
+    for (const entry of [service, personal]) {
+      vi.spyOn(entry.gateway, "chat").mockResolvedValue("done");
+      const job = entry.sessions.submitTask({ task: "done" });
+      pool.rememberJob(job.jobId, entry.agent.id, entry.principal);
+    }
+    await Promise.resolve();
+    const info = buildCapabilities({
+      pool,
+      registry,
+      identity: { user: "Alice", principal },
+      scope: { allowedIds: ["example"], defaultId: "example", serverName: "ClawConnect" },
+      defaultCheckMode: "poll",
+      protocol: () => ({ era: "modern" }),
+    }).find((tool) => tool.name === "get_connection_info")!;
+    expect((await info.handler({})).structuredContent).toMatchObject({
+      retained: { jobs: 1, jobRoutingIndex: 1 },
+    });
+    const personalClose = vi.spyOn(personal.gateway, "close");
+    const serviceClose = vi.spyOn(service.gateway, "close");
+    await vi.advanceTimersByTimeAsync(500);
+    expect(pool.retentionStats()).toMatchObject({ jobs: 2, jobRoutingIndex: 2 });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(personalClose).toHaveBeenCalledTimes(1);
+    expect(serviceClose).not.toHaveBeenCalled();
   });
 
   it("falls back to bounded defaults for invalid environment settings", async () => {
