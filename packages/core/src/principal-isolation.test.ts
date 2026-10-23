@@ -92,6 +92,7 @@ afterEach(() => {
   mocks.connections.length = 0;
   vi.useRealTimers();
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
 });
 
 describe("principal ownership", () => {
@@ -249,6 +250,83 @@ describe("principal ownership", () => {
       next.forPrincipal(bob).forAgent().sessions.getAgentSessionAttachment(run.sessionKey),
     ).toBeUndefined();
     expect(listTasks(next.forPrincipal(bob))).toEqual([]);
+  });
+
+  it("continues personal keys after eviction and restart while rejecting copied keys and aliases", async () => {
+    vi.useFakeTimers();
+    vi.stubEnv("CLAWCONNECT_FINISHED_JOB_MAX_AGE_MS", "1000");
+    const dir = scratch();
+    const value = pool(dir);
+    const a = value.forPrincipal(alice);
+    const entry = a.forAgent();
+    mocks.connections[0].chat.mockResolvedValueOnce("done");
+    const run = runTask(a, { task: "first" });
+    await Promise.resolve();
+    expect(entry.sessions.getJob(run.jobId)?.status).toBe("completed");
+    await vi.advanceTimersByTimeAsync(1001);
+    entry.sessions.sweepRetention();
+    expect(getTask(a, { jobId: run.jobId })).toEqual({ found: false });
+    value.closeAll();
+    const next = pool(dir);
+    next.warmAll();
+    const aliases = [
+      run.sessionKey,
+      run.sessionKey.toUpperCase(),
+      ` ${run.sessionKey} `,
+      run.sessionKey.replace(/^agent:[^:]+:/, ""),
+    ];
+    for (const outsider of [next.forPrincipal(), next.forPrincipal(bob)]) {
+      for (const sessionKey of aliases) {
+        expect(() => runTask(outsider, { task: "copied", sessionKey })).toThrow(
+          "Session not found.",
+        );
+      }
+    }
+    expect(mocks.connections.slice(1).every((connection) => connection.chat.mock.calls.length === 0)).toBe(
+      true,
+    );
+    const continued = runTask(next.forPrincipal(alice), {
+      task: "continue",
+      sessionKey: run.sessionKey,
+    });
+    expect(continued.sessionKey).toBe(run.sessionKey);
+    expect(continued.jobId).not.toBe(run.jobId);
+    expect(next.forPrincipal(alice).forJob(continued.jobId)?.principal).toEqual(alice);
+  });
+
+  it("preserves service continuation after eviction and restart, including non-personal lookalikes", async () => {
+    vi.useFakeTimers();
+    vi.stubEnv("CLAWCONNECT_FINISHED_JOB_MAX_AGE_MS", "1000");
+    const dir = scratch();
+    const value = pool(dir);
+    const entry = value.forAgent();
+    mocks.connections[0].chat.mockResolvedValueOnce("done");
+    const run = runTask(value, { task: "first" });
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(1001);
+    entry.sessions.sweepRetention();
+    expect(getTask(value, { jobId: run.jobId })).toEqual({ found: false });
+    value.closeAll();
+    const next = pool(dir);
+    next.warmAll();
+    expect(
+      runTask(next.forPrincipal(), { task: "continue", sessionKey: run.sessionKey }).sessionKey,
+    ).toBe(run.sessionKey);
+    for (const sessionKey of [
+      "agent:main:main:thread:mcp-clawconnect-personal-notes",
+      "agent:main:project-clawconnect-personal-notes",
+    ]) {
+      expect(runTask(next, { task: "continue service", sessionKey }).sessionKey).toBe(sessionKey);
+    }
+    const legacy = capabilities(next, { user: "Legacy" });
+    expect(
+      await legacy("run_task", { task: "legacy", sessionKey: "agent:chatgpt:legacy-fixture" }),
+    ).toMatchObject({
+      structuredContent: {
+        status: "running",
+        sessionKey: expect.stringMatching(/^agent:main:main:thread:mcp-/),
+      },
+    });
   });
 
   it("keeps degraded store diagnostics inside the owning namespace", () => {

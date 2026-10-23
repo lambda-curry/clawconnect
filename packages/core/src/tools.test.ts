@@ -138,6 +138,31 @@ describe("concurrent taskId/sessionKey safety", () => {
   });
 });
 
+describe("service continuation compatibility", () => {
+  it("continues a durable session key without a retained local job", () => {
+    const pool = freshPool();
+    try {
+      const sessionKey = "agent:main:main:thread:durable-fixture";
+      const result = runTask(pool, { task: "continue", sessionKey });
+      expect(result.sessionKey).toBe(sessionKey);
+      expect(getTask(pool, { jobId: result.jobId }).found).toBe(true);
+    } finally {
+      pool.closeAll();
+    }
+  });
+
+  it("preserves migration of legacy ChatGPT keys on the service path", () => {
+    const pool = freshPool();
+    try {
+      const result = runTask(pool, { task: "continue legacy", sessionKey: "agent:chatgpt:legacy-fixture" });
+      expect(result.sessionKey).toMatch(/^agent:main:main:thread:mcp-/);
+      expect(getTask(pool, { jobId: result.jobId }).found).toBe(true);
+    } finally {
+      pool.closeAll();
+    }
+  });
+});
+
 describe("get_session read model", () => {
   it("snapshot mode (default) returns current state without an events array", () => {
     const pool = freshPool();

@@ -53,6 +53,9 @@ Key design decisions:
   trusted-proxy identity; legacy credentials retain the service path. Personal
   stores live under `principals/<sha256(principalId)>/`, with a validated
   `principal.json` binding for restart recovery. Shared files are never imported.
+  Personal thread keys carry a reserved principal-derived namespace, enforcing
+  continuation ownership independently of retained jobs. Service callers retain
+  gateway-key continuation and legacy-key migration outside that namespace.
   Idle personal sockets close after `CLAWCONNECT_PRINCIPAL_IDLE_TIMEOUT_MS`
   (default five minutes); active jobs keep their connection. Tool declarations
   and wire response shapes remain unchanged.

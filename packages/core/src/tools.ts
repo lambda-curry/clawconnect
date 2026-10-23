@@ -32,9 +32,6 @@ function measurePayloadBytes(snapshot: unknown): number {
 export function runTask(pool: GatewayPoolView, input: TaskInput): RunTaskResult {
   const start = Date.now();
   const entry = pool.forAgent(input.agent);
-  if (input.sessionKey && !entry.sessions.getLatestJobForSession(input.sessionKey)) {
-    throw new Error("Session not found.");
-  }
   const job = entry.sessions.submitTask({
     task: input.task,
     context: input.context,

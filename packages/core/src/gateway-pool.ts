@@ -319,6 +319,7 @@ export class GatewayPool {
       attachmentStore,
       this.runtimes,
       (jobId) => this.jobIndex.delete(this.key(jobId, principal)),
+      principal ? principalNamespace(principal.principalId) : undefined,
     );
     const entry: PoolEntry = {
       agent,
