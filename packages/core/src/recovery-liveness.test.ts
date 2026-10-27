@@ -103,12 +103,12 @@ function harness(initial: Sample) {
     upstream: "unknown" as const,
   })) as InstanceType<typeof OpenClawGateway>["reconcileRun"];
 
-  (gateway as unknown as { readTranscriptSample: (s: string, runId?: string) => Promise<Sample> })
-    .readTranscriptSample = async (_sessionKey: string, runId?: string) => {
+  (
+    gateway as unknown as { readTranscriptSample: (s: string, runId?: string) => Promise<Sample> }
+  ).readTranscriptSample = async (_sessionKey: string, runId?: string) => {
     reads.push({ runId });
     return sample;
   };
-
 
   return {
     gateway,
@@ -126,9 +126,17 @@ function harness(initial: Sample) {
 }
 
 /** The frozen transcript of the resumed run: identical read, run still executing. */
-const frozenAndActive: Sample = { snapshotKey: "assistant:0:12", trailingText: "", upstream: "active" };
+const frozenAndActive: Sample = {
+  snapshotKey: "assistant:0:12",
+  trailingText: "",
+  upstream: "active",
+};
 /** Same stillness, but upstream no longer claims anything — the pre-existing "give up" case. */
-const frozenAndUnknown: Sample = { snapshotKey: "assistant:0:12", trailingText: "", upstream: "unknown" };
+const frozenAndUnknown: Sample = {
+  snapshotKey: "assistant:0:12",
+  trailingText: "",
+  upstream: "unknown",
+};
 
 /**
  * The cross-field invariants a caller relies on. Asserted at every step of
@@ -152,7 +160,8 @@ function expectCoherent(snapshot: JobSnapshot, now: number): void {
     // carries the notice and reads as `needs-human` everywhere (see
     // deriveTaskStatus). Blurring the two is what this exemption is written
     // down to prevent.
-    const livenessIsFresh = snapshot.liveness !== undefined && now - snapshot.liveness.checkedAt <= IDLE_TIMEOUT_MS;
+    const livenessIsFresh =
+      snapshot.liveness !== undefined && now - snapshot.liveness.checkedAt <= IDLE_TIMEOUT_MS;
     const blockedDelegate = isDelegateBlockedTerminalReason(snapshot.terminalReason);
     if (livenessIsFresh && snapshot.liveness?.upstream === "active" && !blockedDelegate) {
       expect(snapshot.status).not.toBe("completed_no_summary");
@@ -174,36 +183,42 @@ afterEach(() => {
 });
 
 describe("late recovery — a still transcript is not a finished run", () => {
-  it("keeps the turn alive for as long as upstream reports the run executing", { timeout: 30_000 }, async () => {
-    vi.useFakeTimers();
-    const ctrl = harness(frozenAndActive);
-    const sessions = new SessionManager(ctrl.gateway);
-    const job = sessions.submitTask({ task: "recover the fleet worktree" });
+  it(
+    "keeps the turn alive for as long as upstream reports the run executing",
+    { timeout: 30_000 },
+    async () => {
+      vi.useFakeTimers();
+      const ctrl = harness(frozenAndActive);
+      const sessions = new SessionManager(ctrl.gateway);
+      const job = sessions.submitTask({ task: "recover the fleet worktree" });
 
-    // The socket died before any terminal event — the run is not over, the
-    // connection to it is.
-    ctrl.closeStream();
-    await vi.advanceTimersByTimeAsync(0);
-    expect(sessions.getJob(job.jobId)?.recovery?.reason).toBe("no_live_final_text");
+      // The socket died before any terminal event — the run is not over, the
+      // connection to it is.
+      ctrl.closeStream();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(sessions.getJob(job.jobId)?.recovery?.reason).toBe("no_live_final_text");
 
-    // Three idle windows — 15+ minutes of a transcript that never moves,
-    // which is what a resumed run doing model calls looks like from here.
-    for (let window = 0; window < 3; window++) {
-      await vi.advanceTimersByTimeAsync(PAST_IDLE_MS);
+      // Three idle windows — 15+ minutes of a transcript that never moves,
+      // which is what a resumed run doing model calls looks like from here.
+      for (let window = 0; window < 3; window++) {
+        await vi.advanceTimersByTimeAsync(PAST_IDLE_MS);
+        const live = sessions.getJob(job.jobId)!;
+        expect(live.status).toBe("running");
+        expect(live.summary).toBeUndefined();
+        expectCoherent(sessions.buildSnapshot(live), Date.now());
+      }
+
       const live = sessions.getJob(job.jobId)!;
-      expect(live.status).toBe("running");
-      expect(live.summary).toBeUndefined();
-      expectCoherent(sessions.buildSnapshot(live), Date.now());
-    }
-
-    const live = sessions.getJob(job.jobId)!;
-    // Not silently: the caller is told, in the log, why the watch continues.
-    expect(live.logs.filter((l) => l.text.includes("still executing")).length).toBeGreaterThanOrEqual(2);
-    // ...and the evidence behind that claim is on the job, freshly re-checked
-    // by the very reads the poll was already making.
-    expect(live.liveness?.upstream).toBe("active");
-    expect(Date.now() - live.liveness!.checkedAt).toBeLessThanOrEqual(POLL_INTERVAL_MS * 2);
-  });
+      // Not silently: the caller is told, in the log, why the watch continues.
+      expect(
+        live.logs.filter((l) => l.text.includes("still executing")).length,
+      ).toBeGreaterThanOrEqual(2);
+      // ...and the evidence behind that claim is on the job, freshly re-checked
+      // by the very reads the poll was already making.
+      expect(live.liveness?.upstream).toBe("active");
+      expect(Date.now() - live.liveness!.checkedAt).toBeLessThanOrEqual(POLL_INTERVAL_MS * 2);
+    },
+  );
 
   it("publishes the answer when it finally lands, exactly once", { timeout: 30_000 }, async () => {
     vi.useFakeTimers();
@@ -216,7 +231,11 @@ describe("late recovery — a still transcript is not a finished run", () => {
     expect(sessions.getJob(job.jobId)?.status).toBe("running");
 
     // The run finally writes its report.
-    ctrl.setSample({ snapshotKey: "assistant:41:13", trailingText: "the answer the resumed run wrote", upstream: "active" });
+    ctrl.setSample({
+      snapshotKey: "assistant:41:13",
+      trailingText: "the answer the resumed run wrote",
+      upstream: "active",
+    });
     await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS * 6);
 
     const live = sessions.getJob(job.jobId)!;
@@ -243,59 +262,71 @@ describe("late recovery — a still transcript is not a finished run", () => {
     expect(ctrl.reads.length - readsAtCompletion).toBeLessThan(10);
   });
 
-  it("holds the session's busy guard while upstream is still executing", { timeout: 30_000 }, async () => {
-    vi.useFakeTimers();
-    const ctrl = harness(frozenAndActive);
-    const sessions = new SessionManager(ctrl.gateway);
-    const sessionKey = "agent:main:main:thread:mcp-1785849945732-fd359ae7";
-    sessions.submitTask({ task: "recover the fleet worktree", sessionKey });
-    ctrl.closeStream();
+  it(
+    "holds the session's busy guard while upstream is still executing",
+    { timeout: 30_000 },
+    async () => {
+      vi.useFakeTimers();
+      const ctrl = harness(frozenAndActive);
+      const sessions = new SessionManager(ctrl.gateway);
+      const sessionKey = "agent:main:main:thread:mcp-1785849945732-fd359ae7";
+      sessions.submitTask({ task: "recover the fleet worktree", sessionKey });
+      ctrl.closeStream();
 
-    await vi.advanceTimersByTimeAsync(PAST_IDLE_MS * 2);
+      await vi.advanceTimersByTimeAsync(PAST_IDLE_MS * 2);
 
-    // The corollary of staying `running`. Publishing the turn here would free
-    // the guard, and the next send would abort the run it collided with —
-    // both jobs broken, which is what the guard exists to prevent.
-    const second = sessions.submitTask({ task: "same session, again", sessionKey });
-    expect(second.status).toBe("error");
-    expect(second.errorInfo?.message).toBe("session busy");
-    expect(ctrl.chatCount()).toBe(1);
-  });
+      // The corollary of staying `running`. Publishing the turn here would free
+      // the guard, and the next send would abort the run it collided with —
+      // both jobs broken, which is what the guard exists to prevent.
+      const second = sessions.submitTask({ task: "same session, again", sessionKey });
+      expect(second.status).toBe("error");
+      expect(second.errorInfo?.message).toBe("session busy");
+      expect(ctrl.chatCount()).toBe(1);
+    },
+  );
 
-  it("never publishes completed_no_summary over an active run — the ceiling ends it as a diagnosable failure", { timeout: 30_000 }, async () => {
-    vi.useFakeTimers();
-    const ctrl = harness(frozenAndActive);
-    const sessions = new SessionManager(ctrl.gateway);
-    const job = sessions.submitTask({ task: "recover the fleet worktree" });
-    ctrl.closeStream();
+  it(
+    "never publishes completed_no_summary over an active run — the ceiling ends it as a diagnosable failure",
+    { timeout: 30_000 },
+    async () => {
+      vi.useFakeTimers();
+      const ctrl = harness(frozenAndActive);
+      const sessions = new SessionManager(ctrl.gateway);
+      const job = sessions.submitTask({ task: "recover the fleet worktree" });
+      ctrl.closeStream();
 
-    // Past the absolute ceiling, with upstream never once retracting.
-    await vi.advanceTimersByTimeAsync(HARD_CAP_MS + PAST_IDLE_MS);
+      // Past the absolute ceiling, with upstream never once retracting.
+      await vi.advanceTimersByTimeAsync(HARD_CAP_MS + PAST_IDLE_MS);
 
-    const live = sessions.getJob(job.jobId)!;
-    expect(live.status).not.toBe("completed_no_summary");
-    expect(live.status).toBe("error");
-    expect(live.terminalReason).toBe("late-recovery-upstream-still-active");
-    // A real failure says what was actually observed, and WHEN — never a
-    // present-tense claim off a read that may be minutes old.
-    expect(live.error).toMatch(/was last reported executing/);
-    expect(live.error).toContain(UPSTREAM_RUN_ID);
-    // ...and what to do about it, which is NOT "resubmit and collide".
-    expect(live.errorInfo?.suggestedRecovery).toContain("check_task");
-    expect(live.errorInfo?.suggestedRecovery).toContain(job.jobId);
-    expect(live.errorInfo?.suggestedRecovery).toMatch(/not re-submit/i);
-    expectCoherent(sessions.buildSnapshot(live), Date.now());
+      const live = sessions.getJob(job.jobId)!;
+      expect(live.status).not.toBe("completed_no_summary");
+      expect(live.status).toBe("error");
+      expect(live.terminalReason).toBe("late-recovery-upstream-still-active");
+      // A real failure says what was actually observed, and WHEN — never a
+      // present-tense claim off a read that may be minutes old.
+      expect(live.error).toMatch(/was last reported executing/);
+      expect(live.error).toContain(UPSTREAM_RUN_ID);
+      // ...and what to do about it, which is NOT "resubmit and collide".
+      expect(live.errorInfo?.suggestedRecovery).toContain("check_task");
+      expect(live.errorInfo?.suggestedRecovery).toContain(job.jobId);
+      expect(live.errorInfo?.suggestedRecovery).toMatch(/not re-submit/i);
+      expectCoherent(sessions.buildSnapshot(live), Date.now());
 
-    // Still recoverable: an `error` job keeps being re-read, so an answer that
-    // lands afterwards still reaches the caller.
-    ctrl.setSample({ snapshotKey: "assistant:44:14", trailingText: "the answer, an hour late", upstream: "unknown" });
-    await vi.advanceTimersByTimeAsync(60_000);
-    const rechecking = sessions.waitForJob(job.jobId, 0, undefined, "poll", 1_000);
-    await vi.advanceTimersByTimeAsync(30_000);
-    await rechecking;
-    expect(sessions.getJob(job.jobId)?.status).toBe("completed");
-    expect(sessions.getJob(job.jobId)?.summary).toBe("the answer, an hour late");
-  });
+      // Still recoverable: an `error` job keeps being re-read, so an answer that
+      // lands afterwards still reaches the caller.
+      ctrl.setSample({
+        snapshotKey: "assistant:44:14",
+        trailingText: "the answer, an hour late",
+        upstream: "unknown",
+      });
+      await vi.advanceTimersByTimeAsync(60_000);
+      const rechecking = sessions.waitForJob(job.jobId, 0, undefined, "poll", 1_000);
+      await vi.advanceTimersByTimeAsync(30_000);
+      await rechecking;
+      expect(sessions.getJob(job.jobId)?.status).toBe("completed");
+      expect(sessions.getJob(job.jobId)?.summary).toBe("the answer, an hour late");
+    },
+  );
 
   it("still settles a genuinely quiet turn — the change is evidence-gated, not a blanket refusal to finish", async () => {
     vi.useFakeTimers();
@@ -402,7 +433,9 @@ describe("late recovery — the surfaces a caller reads", () => {
     expect(snapshot.agentSession?.worktree).toBe("/tmp/worktrees/recovery-fix");
     expect(snapshot.agentSession?.remoteUrl).toBe("https://example.test/sessions/77");
     // The directive block never reaches the agent.
-    expect(sessions.getJob(job.jobId)?.prompt.context ?? "").not.toContain("clawconnect:agent-session");
+    expect(sessions.getJob(job.jobId)?.prompt.context ?? "").not.toContain(
+      "clawconnect:agent-session",
+    );
   });
 
   it("a stream that ends before the turn does is reported as recoverable, not as a failure", async () => {
@@ -438,7 +471,12 @@ describe("late recovery — a failed tool command is not the end of the turn", (
     expect(sessions.getJob(job.jobId)?.status).toBe("running");
 
     // The agent recovers and keeps working.
-    ctrl.emit({ type: "tool", text: "Bash: git worktree add … --force", toolName: "Bash", args: {} });
+    ctrl.emit({
+      type: "tool",
+      text: "Bash: git worktree add … --force",
+      toolName: "Bash",
+      args: {},
+    });
     ctrl.emit({ type: "tool-result", text: "Bash done", toolName: "Bash", isError: false });
     ctrl.finishChat("worktree created on the second attempt");
     await vi.advanceTimersByTimeAsync(0);
@@ -460,7 +498,13 @@ describe("late recovery — a failed tool command is not the end of the turn", (
     const reconcileCalls: string[] = [];
     ctrl.gateway.reconcileRun = (async (sessionKey: string) => {
       reconcileCalls.push(sessionKey);
-      return { ok: false, changed: false, trailingText: "", snapshotKey: "", upstream: "unknown" as const };
+      return {
+        ok: false,
+        changed: false,
+        trailingText: "",
+        snapshotKey: "",
+        upstream: "unknown" as const,
+      };
     }) as InstanceType<typeof OpenClawGateway>["reconcileRun"];
     const sessions = new SessionManager(ctrl.gateway);
     sessions.submitTask({ task: "a command that fails" });
@@ -498,27 +542,35 @@ describe("late recovery — reattaching after a restart", () => {
     parentRunId: UPSTREAM_RUN_ID,
   };
 
-  it("a reloaded job whose run is still executing stays running, and completes when its answer lands", { timeout: 30_000 }, async () => {
-    vi.useFakeTimers();
-    const ctrl = harness(frozenAndActive);
-    const store = new FakeJobStore([persisted]);
-    const sessions = new SessionManager(ctrl.gateway, "main", store);
+  it(
+    "a reloaded job whose run is still executing stays running, and completes when its answer lands",
+    { timeout: 30_000 },
+    async () => {
+      vi.useFakeTimers();
+      const ctrl = harness(frozenAndActive);
+      const store = new FakeJobStore([persisted]);
+      const sessions = new SessionManager(ctrl.gateway, "main", store);
 
-    // The connector came back, the live stream did not — same recovery path,
-    // and the same reason it must not conclude anything from stillness.
-    await vi.advanceTimersByTimeAsync(PAST_IDLE_MS * 2);
-    const reloaded = sessions.getJob(persisted.jobId)!;
-    expect(reloaded.status).toBe("running");
-    expectCoherent(sessions.buildSnapshot(reloaded), Date.now());
+      // The connector came back, the live stream did not — same recovery path,
+      // and the same reason it must not conclude anything from stillness.
+      await vi.advanceTimersByTimeAsync(PAST_IDLE_MS * 2);
+      const reloaded = sessions.getJob(persisted.jobId)!;
+      expect(reloaded.status).toBe("running");
+      expectCoherent(sessions.buildSnapshot(reloaded), Date.now());
 
-    ctrl.setSample({ snapshotKey: "assistant:52:9", trailingText: "the report the run finished writing", upstream: "active" });
-    await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS * 6);
+      ctrl.setSample({
+        snapshotKey: "assistant:52:9",
+        trailingText: "the report the run finished writing",
+        upstream: "active",
+      });
+      await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS * 6);
 
-    expect(reloaded.status).toBe("completed");
-    expect(reloaded.summary).toBe("the report the run finished writing");
-    expect(store.latestSave).toEqual([]);
-    expectCoherent(sessions.buildSnapshot(reloaded), Date.now());
-  });
+      expect(reloaded.status).toBe("completed");
+      expect(reloaded.summary).toBe("the report the run finished writing");
+      expect(store.latestSave).toEqual([]);
+      expectCoherent(sessions.buildSnapshot(reloaded), Date.now());
+    },
+  );
 
   it("reads the reloaded job's persisted run id — restart does not lose the correlation", async () => {
     vi.useFakeTimers();
@@ -529,7 +581,9 @@ describe("late recovery — reattaching after a restart", () => {
 
     expect(ctrl.reads.length).toBeGreaterThan(0);
     expect(ctrl.reads.every((r) => r.runId === UPSTREAM_RUN_ID)).toBe(true);
-    expect(sessions.buildSnapshot(sessions.getJob(persisted.jobId) as Job).parentRunId).toBe(UPSTREAM_RUN_ID);
+    expect(sessions.buildSnapshot(sessions.getJob(persisted.jobId) as Job).parentRunId).toBe(
+      UPSTREAM_RUN_ID,
+    );
   });
 });
 
@@ -577,140 +631,191 @@ describe("late recovery — the ceiling never skips the recovery tiers below it"
     }) +
     "[[/clawconnect:agent-session]]";
 
-  it("publishes the delegate's answer rather than failing, when the ceiling arrives and the delegate has one", { timeout: 30_000 }, async () => {
-    vi.useFakeTimers();
-    // The parent transcript never moves and upstream never stops claiming the
-    // run — but the work was delegated, and the delegate finished. Reaching
-    // the ceiling must not skip past an answer that is already sitting there.
-    const ctrl = harness(frozenAndActive);
-    const adapter = fakeRuntime({ text: "the delegate's finished report", resultAt: Date.now() + 60_000 });
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter.registry);
-    const job = sessions.submitTask({ task: "delegate the worktree build", context: attachContext() });
-    ctrl.closeStream();
+  it(
+    "publishes the delegate's answer rather than failing, when the ceiling arrives and the delegate has one",
+    { timeout: 30_000 },
+    async () => {
+      vi.useFakeTimers();
+      // The parent transcript never moves and upstream never stops claiming the
+      // run — but the work was delegated, and the delegate finished. Reaching
+      // the ceiling must not skip past an answer that is already sitting there.
+      const ctrl = harness(frozenAndActive);
+      const adapter = fakeRuntime({
+        text: "the delegate's finished report",
+        resultAt: Date.now() + 60_000,
+      });
+      const sessions = new SessionManager(
+        ctrl.gateway,
+        "main",
+        undefined,
+        undefined,
+        adapter.registry,
+      );
+      const job = sessions.submitTask({
+        task: "delegate the worktree build",
+        context: attachContext(),
+      });
+      ctrl.closeStream();
 
-    await vi.advanceTimersByTimeAsync(HARD_CAP_MS + PAST_IDLE_MS);
+      await vi.advanceTimersByTimeAsync(HARD_CAP_MS + PAST_IDLE_MS);
 
-    const live = sessions.getJob(job.jobId)!;
-    expect(adapter.handoffCalls).toBeGreaterThan(0);
-    expect(live.status).toBe("completed");
-    expect(live.summary).toBe("the delegate's finished report");
-    expect(live.resultSource).toBe("agent-session");
-    expect(live.terminalReason).toBe("agent-session-recovery");
-    expect(live.terminalReason).not.toBe("late-recovery-upstream-still-active");
-    expect(live.error).toBeUndefined();
-    expectCoherent(sessions.buildSnapshot(live), Date.now());
-  });
+      const live = sessions.getJob(job.jobId)!;
+      expect(adapter.handoffCalls).toBeGreaterThan(0);
+      expect(live.status).toBe("completed");
+      expect(live.summary).toBe("the delegate's finished report");
+      expect(live.resultSource).toBe("agent-session");
+      expect(live.terminalReason).toBe("agent-session-recovery");
+      expect(live.terminalReason).not.toBe("late-recovery-upstream-still-active");
+      expect(live.error).toBeUndefined();
+      expectCoherent(sessions.buildSnapshot(live), Date.now());
+    },
+  );
 
-  it("keeps a blocked delegate's actionable state rather than reporting a parent failure over it", { timeout: 30_000 }, async () => {
-    vi.useFakeTimers();
-    // The delegate is waiting on a human. That is the real answer to "why has
-    // nothing happened", and it is more actionable than "the parent stopped
-    // watching" — so it must survive the ceiling, not be overwritten by it.
-    const ctrl = harness(frozenAndActive);
-    const adapter = fakeRuntime(null);
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter.registry);
-    const job = sessions.submitTask({
-      task: "delegate the worktree build",
-      context: attachContext({ status: "needs_input" }),
-    });
-    ctrl.closeStream();
+  it(
+    "keeps a blocked delegate's actionable state rather than reporting a parent failure over it",
+    { timeout: 30_000 },
+    async () => {
+      vi.useFakeTimers();
+      // The delegate is waiting on a human. That is the real answer to "why has
+      // nothing happened", and it is more actionable than "the parent stopped
+      // watching" — so it must survive the ceiling, not be overwritten by it.
+      const ctrl = harness(frozenAndActive);
+      const adapter = fakeRuntime(null);
+      const sessions = new SessionManager(
+        ctrl.gateway,
+        "main",
+        undefined,
+        undefined,
+        adapter.registry,
+      );
+      const job = sessions.submitTask({
+        task: "delegate the worktree build",
+        context: attachContext({ status: "needs_input" }),
+      });
+      ctrl.closeStream();
 
-    await vi.advanceTimersByTimeAsync(HARD_CAP_MS + PAST_IDLE_MS);
+      await vi.advanceTimersByTimeAsync(HARD_CAP_MS + PAST_IDLE_MS);
 
-    const live = sessions.getJob(job.jobId)!;
-    expect(live.status).toBe("completed_no_summary");
-    expect(isDelegateBlockedTerminalReason(live.terminalReason)).toBe(true);
-    expect(live.terminalReason).not.toBe("late-recovery-upstream-still-active");
-    // The notice, not the generic sentinel — and on the log too, so a caller
-    // reading the timeline sees why.
-    expect(live.summary).not.toBe(NO_SUMMARY_SENTINEL);
-    expect(live.summary).toMatch(/delegated session/i);
-    expect(live.logs.some((l) => l.type === "recovery" && /delegated session/i.test(l.text))).toBe(true);
-    // A blocked delegate is never asked for a result — that is what keeps a
-    // block from being papered over with leftover output.
-    expect(adapter.handoffCalls).toBe(0);
-    expectCoherent(sessions.buildSnapshot(live), Date.now());
-  });
+      const live = sessions.getJob(job.jobId)!;
+      expect(live.status).toBe("completed_no_summary");
+      expect(isDelegateBlockedTerminalReason(live.terminalReason)).toBe(true);
+      expect(live.terminalReason).not.toBe("late-recovery-upstream-still-active");
+      // The notice, not the generic sentinel — and on the log too, so a caller
+      // reading the timeline sees why.
+      expect(live.summary).not.toBe(NO_SUMMARY_SENTINEL);
+      expect(live.summary).toMatch(/delegated session/i);
+      expect(
+        live.logs.some((l) => l.type === "recovery" && /delegated session/i.test(l.text)),
+      ).toBe(true);
+      // A blocked delegate is never asked for a result — that is what keeps a
+      // block from being papered over with leftover output.
+      expect(adapter.handoffCalls).toBe(0);
+      expectCoherent(sessions.buildSnapshot(live), Date.now());
+    },
+  );
 
-  it("only reaches the still-active error when neither tier had anything to say", { timeout: 30_000 }, async () => {
-    vi.useFakeTimers();
-    const ctrl = harness(frozenAndActive);
-    const adapter = fakeRuntime(null);
-    const sessions = new SessionManager(ctrl.gateway, "main", undefined, undefined, adapter.registry);
-    const job = sessions.submitTask({ task: "delegate the worktree build", context: attachContext() });
-    ctrl.closeStream();
+  it(
+    "only reaches the still-active error when neither tier had anything to say",
+    { timeout: 30_000 },
+    async () => {
+      vi.useFakeTimers();
+      const ctrl = harness(frozenAndActive);
+      const adapter = fakeRuntime(null);
+      const sessions = new SessionManager(
+        ctrl.gateway,
+        "main",
+        undefined,
+        undefined,
+        adapter.registry,
+      );
+      const job = sessions.submitTask({
+        task: "delegate the worktree build",
+        context: attachContext(),
+      });
+      ctrl.closeStream();
 
-    await vi.advanceTimersByTimeAsync(HARD_CAP_MS + PAST_IDLE_MS);
+      await vi.advanceTimersByTimeAsync(HARD_CAP_MS + PAST_IDLE_MS);
 
-    const live = sessions.getJob(job.jobId)!;
-    expect(adapter.handoffCalls).toBeGreaterThan(0);
-    expect(live.status).toBe("error");
-    expect(live.terminalReason).toBe("late-recovery-upstream-still-active");
-  });
+      const live = sessions.getJob(job.jobId)!;
+      expect(adapter.handoffCalls).toBeGreaterThan(0);
+      expect(live.status).toBe("error");
+      expect(live.terminalReason).toBe("late-recovery-upstream-still-active");
+    },
+  );
 });
 
 describe("late recovery — what a caller is told to do next", () => {
-  it("never tells the caller to retry on a surface while another tells them not to", { timeout: 30_000 }, async () => {
-    vi.useFakeTimers();
-    const ctrl = harness(frozenAndActive);
-    const sessions = new SessionManager(ctrl.gateway);
-    const job = sessions.submitTask({ task: "recover the fleet worktree" });
-    ctrl.closeStream();
+  it(
+    "never tells the caller to retry on a surface while another tells them not to",
+    { timeout: 30_000 },
+    async () => {
+      vi.useFakeTimers();
+      const ctrl = harness(frozenAndActive);
+      const sessions = new SessionManager(ctrl.gateway);
+      const job = sessions.submitTask({ task: "recover the fleet worktree" });
+      ctrl.closeStream();
 
-    await vi.advanceTimersByTimeAsync(HARD_CAP_MS + PAST_IDLE_MS);
+      await vi.advanceTimersByTimeAsync(HARD_CAP_MS + PAST_IDLE_MS);
 
-    const snapshot = sessions.buildSnapshot(sessions.getJob(job.jobId)!);
-    const nextStep = snapshot.continuationState?.recommendedNextStep ?? "";
-    // The generic derivation for an `error` job — the one this outcome must
-    // NOT inherit, because "retry" here means "abort the run you are waiting
-    // for".
-    expect(nextStep).not.toBe("Fix the issue and retry.");
-    expect(nextStep).not.toMatch(/\bretry\b/i);
-    // ...and it has to actually say something useful, not just stay silent.
-    expect(nextStep).toMatch(/check_task/);
-    expect(nextStep).toMatch(/do not re-submit/i);
-    expect(nextStep).toContain(job.jobId);
-    // Both surfaces, one decision.
-    expect(snapshot.errorInfo?.suggestedRecovery).toMatch(/do not re-submit/i);
-    expect(snapshot.errorInfo?.suggestedRecovery).toContain(job.jobId);
-    expectCoherent(snapshot, Date.now());
-  });
+      const snapshot = sessions.buildSnapshot(sessions.getJob(job.jobId)!);
+      const nextStep = snapshot.continuationState?.recommendedNextStep ?? "";
+      // The generic derivation for an `error` job — the one this outcome must
+      // NOT inherit, because "retry" here means "abort the run you are waiting
+      // for".
+      expect(nextStep).not.toBe("Fix the issue and retry.");
+      expect(nextStep).not.toMatch(/\bretry\b/i);
+      // ...and it has to actually say something useful, not just stay silent.
+      expect(nextStep).toMatch(/check_task/);
+      expect(nextStep).toMatch(/do not re-submit/i);
+      expect(nextStep).toContain(job.jobId);
+      // Both surfaces, one decision.
+      expect(snapshot.errorInfo?.suggestedRecovery).toMatch(/do not re-submit/i);
+      expect(snapshot.errorInfo?.suggestedRecovery).toContain(job.jobId);
+      expectCoherent(snapshot, Date.now());
+    },
+  );
 });
 
 describe("late recovery — stale evidence is never presented as a fresh confirmation", () => {
-  it("dates its claim, and stops refreshing liveness when upstream goes unreadable", { timeout: 30_000 }, async () => {
-    vi.useFakeTimers();
-    const ctrl = harness(frozenAndActive);
-    const sessions = new SessionManager(ctrl.gateway);
-    const job = sessions.submitTask({ task: "recover the fleet worktree" });
-    ctrl.closeStream();
+  it(
+    "dates its claim, and stops refreshing liveness when upstream goes unreadable",
+    { timeout: 30_000 },
+    async () => {
+      vi.useFakeTimers();
+      const ctrl = harness(frozenAndActive);
+      const sessions = new SessionManager(ctrl.gateway);
+      const job = sessions.submitTask({ task: "recover the fleet worktree" });
+      ctrl.closeStream();
 
-    // One window of real confirmations...
-    await vi.advanceTimersByTimeAsync(PAST_IDLE_MS);
-    const live = sessions.getJob(job.jobId)!;
-    const confirmedAt = live.liveness!.checkedAt;
-    expect(live.liveness?.upstream).toBe("active");
-    expect(live.logs.some((l) => /Upstream confirms the run is still executing/.test(l.text))).toBe(true);
+      // One window of real confirmations...
+      await vi.advanceTimersByTimeAsync(PAST_IDLE_MS);
+      const live = sessions.getJob(job.jobId)!;
+      const confirmedAt = live.liveness!.checkedAt;
+      expect(live.liveness?.upstream).toBe("active");
+      expect(
+        live.logs.some((l) => /Upstream confirms the run is still executing/.test(l.text)),
+      ).toBe(true);
 
-    // ...then the gateway stops answering entirely.
-    ctrl.setSample(null);
-    await vi.advanceTimersByTimeAsync(PAST_IDLE_MS);
+      // ...then the gateway stops answering entirely.
+      ctrl.setSample(null);
+      await vi.advanceTimersByTimeAsync(PAST_IDLE_MS);
 
-    // The watch holds — releasing the busy guard because we cannot SEE the
-    // run is how the original failure gets handed straight back.
-    expect(sessions.getJob(job.jobId)?.status).toBe("running");
-    // But nothing is re-confirmed: the evidence ages instead of refreshing.
-    expect(sessions.getJob(job.jobId)?.liveness?.checkedAt).toBe(confirmedAt);
-    // And the claim is dated rather than asserted in the present tense.
-    const stale = live.logs.filter((l) => /has not been readable since/.test(l.text));
-    expect(stale.length).toBeGreaterThan(0);
-    expect(stale.at(-1)!.text).toMatch(/last reported the run executing \d+[sm] ago/);
+      // The watch holds — releasing the busy guard because we cannot SEE the
+      // run is how the original failure gets handed straight back.
+      expect(sessions.getJob(job.jobId)?.status).toBe("running");
+      // But nothing is re-confirmed: the evidence ages instead of refreshing.
+      expect(sessions.getJob(job.jobId)?.liveness?.checkedAt).toBe(confirmedAt);
+      // And the claim is dated rather than asserted in the present tense.
+      const stale = live.logs.filter((l) => /has not been readable since/.test(l.text));
+      expect(stale.length).toBeGreaterThan(0);
+      expect(stale.at(-1)!.text).toMatch(/last reported the run executing \d+[sm] ago/);
 
-    // The terminal message says when, too — not "is still executing".
-    await vi.advanceTimersByTimeAsync(HARD_CAP_MS);
-    const settled = sessions.getJob(job.jobId)!;
-    expect(settled.status).toBe("error");
-    expect(settled.error).toMatch(/was last reported executing \d+m ago/);
-    expect(settled.error).not.toMatch(/is still (reported as )?executing/);
-  });
+      // The terminal message says when, too — not "is still executing".
+      await vi.advanceTimersByTimeAsync(HARD_CAP_MS);
+      const settled = sessions.getJob(job.jobId)!;
+      expect(settled.status).toBe("error");
+      expect(settled.error).toMatch(/was last reported executing \d+m ago/);
+      expect(settled.error).not.toMatch(/is still (reported as )?executing/);
+    },
+  );
 });

@@ -34,15 +34,30 @@ async function startFakeGateway(onRequest: RequestHandler, autoTranscript = true
   const wss = new WebSocketServer({ port: 0, host: "127.0.0.1" });
   await once(wss, "listening");
   wss.on("connection", (socket) => {
-    socket.send(JSON.stringify({ type: "event", event: "connect.challenge", payload: { nonce: "test-nonce" } }));
+    socket.send(
+      JSON.stringify({
+        type: "event",
+        event: "connect.challenge",
+        payload: { nonce: "test-nonce" },
+      }),
+    );
     socket.on("message", (raw: Buffer) => {
       const frame = JSON.parse(raw.toString()) as RequestFrame;
       if (frame.method === "connect") {
-        socket.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: { protocol: 4 } }));
+        socket.send(
+          JSON.stringify({ type: "res", id: frame.id, ok: true, payload: { protocol: 4 } }),
+        );
         return;
       }
       if (autoTranscript && frame.method === "chat.history") {
-        socket.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: { messages: [], hasMore: false } }));
+        socket.send(
+          JSON.stringify({
+            type: "res",
+            id: frame.id,
+            ok: true,
+            payload: { messages: [], hasMore: false },
+          }),
+        );
         return;
       }
       if (autoTranscript && frame.method === "sessions.messages.subscribe") {
@@ -63,7 +78,12 @@ async function startFakeGateway(onRequest: RequestHandler, autoTranscript = true
   };
 }
 
-const chatEvent = (runId: string, state: string, text?: string, sessionKey = "agent:main:main:thread:test") =>
+const chatEvent = (
+  runId: string,
+  state: string,
+  text?: string,
+  sessionKey = "agent:main:main:thread:test",
+) =>
   JSON.stringify({
     type: "event",
     event: "chat",
@@ -79,7 +99,11 @@ const agentToolEvent = (runId: string, name: string) =>
   JSON.stringify({
     type: "event",
     event: "agent",
-    payload: { runId, stream: "tool", data: { phase: "start", name, args: { command: "pnpm test" } } },
+    payload: {
+      runId,
+      stream: "tool",
+      data: { phase: "start", name, args: { command: "pnpm test" } },
+    },
   });
 
 const sessionToolEvent = (sequence: number, name: string) =>
@@ -156,7 +180,9 @@ describe("OpenClawGateway.chat — run correlation across the send boundary", ()
     });
 
     const seen: GatewayEvent[] = [];
-    const reply = await gateway.chat("agent:main:main:thread:test", "hi", 10_000, (e) => seen.push(e));
+    const reply = await gateway.chat("agent:main:main:thread:test", "hi", 10_000, (e) =>
+      seen.push(e),
+    );
 
     expect(reply).toBe("done");
     expect(seen.map((e) => e.type === "tool" && e.toolName)).toEqual(["Bash", "Read"]);
@@ -170,7 +196,9 @@ describe("OpenClawGateway.chat — run correlation across the send boundary", ()
       socket.send(sendAck(frame.id, "batch-run"));
     });
     const seen: GatewayEvent[] = [];
-    await expect(gateway.chat("agent:main:main:thread:test", "hi", 10_000, (event) => seen.push(event))).resolves.toBe("done");
+    await expect(
+      gateway.chat("agent:main:main:thread:test", "hi", 10_000, (event) => seen.push(event)),
+    ).resolves.toBe("done");
     expect(seen).toHaveLength(100);
     expect(seen.at(-1)).toMatchObject({ toolName: "Tool100" });
   });
@@ -184,7 +212,9 @@ describe("OpenClawGateway.chat — run correlation across the send boundary", ()
       socket.send(chatEvent("run-3", "final", "our answer"));
     });
 
-    await expect(gateway.chat("agent:main:main:thread:test", "hi", 10_000)).resolves.toBe("our answer");
+    await expect(gateway.chat("agent:main:main:thread:test", "hi", 10_000)).resolves.toBe(
+      "our answer",
+    );
   });
 
   it("keeps this run's final when unrelated sessions flood the socket before the acknowledgement", async () => {
@@ -194,13 +224,22 @@ describe("OpenClawGateway.chat — run correlation across the send boundary", ()
     const gateway = await harness((frame, socket) => {
       if (frame.method !== "chat.send") return;
       for (let i = 0; i < 600; i++) {
-        socket.send(chatEvent(`noisy-run-${i}`, "final", "someone else's answer", "agent:other:main:thread:noise"));
+        socket.send(
+          chatEvent(
+            `noisy-run-${i}`,
+            "final",
+            "someone else's answer",
+            "agent:other:main:thread:noise",
+          ),
+        );
       }
       socket.send(chatEvent("run-5", "final", "our answer"));
       socket.send(sendAck(frame.id, "run-5"));
     });
 
-    await expect(gateway.chat("agent:main:main:thread:test", "hi", 10_000)).resolves.toBe("our answer");
+    await expect(gateway.chat("agent:main:main:thread:test", "hi", 10_000)).resolves.toBe(
+      "our answer",
+    );
   });
 
   it("keeps this run's buffered final when a flood of agent frames would overflow the buffer", async () => {
@@ -217,7 +256,9 @@ describe("OpenClawGateway.chat — run correlation across the send boundary", ()
       socket.send(sendAck(frame.id, "run-6"));
     });
 
-    await expect(gateway.chat("agent:main:main:thread:test", "hi", 10_000)).resolves.toBe("our answer");
+    await expect(gateway.chat("agent:main:main:thread:test", "hi", 10_000)).resolves.toBe(
+      "our answer",
+    );
   });
 
   it("still handles the ordinary case where the acknowledgement precedes the events", async () => {
@@ -231,7 +272,9 @@ describe("OpenClawGateway.chat — run correlation across the send boundary", ()
     });
 
     const seen: GatewayEvent[] = [];
-    const reply = await gateway.chat("agent:main:main:thread:test", "hi", 10_000, (e) => seen.push(e));
+    const reply = await gateway.chat("agent:main:main:thread:test", "hi", 10_000, (e) =>
+      seen.push(e),
+    );
     expect(reply).toBe("the final answer");
     // Both sources report the call: the live agent frame carries it the moment
     // it starts (with its args), the durable transcript again once persisted.
@@ -272,10 +315,19 @@ describe("OpenClawGateway.chat — run correlation across the send boundary", ()
   it("rejects when the send itself fails, without stranding the caller", async () => {
     const gateway = await harness((frame, socket) => {
       if (frame.method !== "chat.send") return;
-      socket.send(JSON.stringify({ type: "res", id: frame.id, ok: false, error: { message: "session busy" } }));
+      socket.send(
+        JSON.stringify({
+          type: "res",
+          id: frame.id,
+          ok: false,
+          error: { message: "session busy" },
+        }),
+      );
     });
 
-    await expect(gateway.chat("agent:main:main:thread:test", "hi", 10_000)).rejects.toThrow(/session busy/);
+    await expect(gateway.chat("agent:main:main:thread:test", "hi", 10_000)).rejects.toThrow(
+      /session busy/,
+    );
   });
 
   it("rejects when the send returns no runId — there is nothing to correlate against", async () => {
@@ -314,14 +366,20 @@ describe("OpenClawGateway.chat — run correlation across the send boundary", ()
         JSON.stringify({
           type: "event",
           event: "chat",
-          payload: { runId: "run-failed", sessionKey: "agent:main:main:thread:test", state: "error", errorMessage: "provider returned 500" },
+          payload: {
+            runId: "run-failed",
+            sessionKey: "agent:main:main:thread:test",
+            state: "error",
+            errorMessage: "provider returned 500",
+          },
         }),
       );
     });
 
-    const rejection = await gateway
-      .chat("agent:main:main:thread:test", "hi", 10_000)
-      .then(() => undefined, (err: Error) => err);
+    const rejection = await gateway.chat("agent:main:main:thread:test", "hi", 10_000).then(
+      () => undefined,
+      (err: Error) => err,
+    );
     expect(rejection?.message).toBe("provider returned 500");
     expect(rejection?.name).not.toBe("ParentObservationTimeoutError");
   });
@@ -368,11 +426,15 @@ describe("OpenClawGateway reconnect — a failed attempt must re-arm", () => {
     await once(wss, "listening");
     const { port } = wss.address() as AddressInfo;
     const handshake = (socket: ServerSocket) => {
-      socket.send(JSON.stringify({ type: "event", event: "connect.challenge", payload: { nonce: "n" } }));
+      socket.send(
+        JSON.stringify({ type: "event", event: "connect.challenge", payload: { nonce: "n" } }),
+      );
       socket.on("message", (raw: Buffer) => {
         const frame = JSON.parse(raw.toString()) as RequestFrame;
         if (frame.method === "connect") {
-          socket.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: { protocol: 4 } }));
+          socket.send(
+            JSON.stringify({ type: "res", id: frame.id, ok: true, payload: { protocol: 4 } }),
+          );
         }
       });
     };
@@ -429,8 +491,14 @@ describe("OpenClawGateway.reconcileRun — bounded read of upstream truth", () =
       );
     }, false);
 
-    const observation = await gateway.reconcileRun("agent:main:main:thread:test", { intervalMs: 1 });
-    expect(observation).toMatchObject({ ok: true, changed: false, trailingText: "here is the report" });
+    const observation = await gateway.reconcileRun("agent:main:main:thread:test", {
+      intervalMs: 1,
+    });
+    expect(observation).toMatchObject({
+      ok: true,
+      changed: false,
+      trailingText: "here is the report",
+    });
     // Carried so a caller can compare successive observations for progress
     // that happens between them, not just within one.
     expect(observation.snapshotKey).not.toBe("");
@@ -447,13 +515,18 @@ describe("OpenClawGateway.reconcileRun — bounded read of upstream truth", () =
           id: frame.id,
           ok: true,
           payload: history(
-            Array.from({ length: reads }, (_, i) => ({ role: "toolResult", content: `tool round ${i}` })),
+            Array.from({ length: reads }, (_, i) => ({
+              role: "toolResult",
+              content: `tool round ${i}`,
+            })),
           ),
         }),
       );
     }, false);
 
-    const observation = await gateway.reconcileRun("agent:main:main:thread:test", { intervalMs: 1 });
+    const observation = await gateway.reconcileRun("agent:main:main:thread:test", {
+      intervalMs: 1,
+    });
     expect(observation.changed).toBe(true);
     expect(observation.ok).toBe(true);
   });
@@ -471,7 +544,9 @@ describe("OpenClawGateway.reconcileRun — bounded read of upstream truth", () =
       );
     }, false);
 
-    const observation = await gateway.reconcileRun("agent:main:main:thread:test", { intervalMs: 1 });
+    const observation = await gateway.reconcileRun("agent:main:main:thread:test", {
+      intervalMs: 1,
+    });
     expect(observation).toMatchObject({ ok: true, changed: false, trailingText: "" });
     expect(observation.snapshotKey).not.toBe("");
   });
@@ -479,10 +554,19 @@ describe("OpenClawGateway.reconcileRun — bounded read of upstream truth", () =
   it("reports not-ok when upstream can't be read — a failed read is not evidence of a finished run", async () => {
     const gateway = await harness((frame, socket) => {
       if (frame.method !== "chat.history") return;
-      socket.send(JSON.stringify({ type: "res", id: frame.id, ok: false, error: { message: "no such session" } }));
+      socket.send(
+        JSON.stringify({
+          type: "res",
+          id: frame.id,
+          ok: false,
+          error: { message: "no such session" },
+        }),
+      );
     }, false);
 
-    await expect(gateway.reconcileRun("agent:main:main:thread:test", { intervalMs: 1 })).resolves.toMatchObject({
+    await expect(
+      gateway.reconcileRun("agent:main:main:thread:test", { intervalMs: 1 }),
+    ).resolves.toMatchObject({
       ok: false,
     });
   });
@@ -491,7 +575,8 @@ describe("OpenClawGateway.reconcileRun — bounded read of upstream truth", () =
 describe("bounded transcript replay and pending work", () => {
   const sessionKey = "agent:main:main:thread:test";
   const row = (sequence: number, text = "progress") => ({
-    role: "assistant", content: [{ type: "text", text }],
+    role: "assistant",
+    content: [{ type: "text", text }],
     __openclaw: { id: `row-${sequence}`, seq: sequence },
   });
 
@@ -507,12 +592,20 @@ describe("bounded transcript replay and pending work", () => {
         socket.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: { messages } }));
       }
     }, false);
-    await gateway.resumeTranscript(sessionKey, 0, (event) => events.push(event), (state) => states.push(state.transcript));
+    await gateway.resumeTranscript(
+      sessionKey,
+      0,
+      (event) => events.push(event),
+      (state) => states.push(state.transcript),
+    );
     expect(states.at(-1)).toBe("detached");
     expect(events).toEqual([]);
     expect(gateway.diagnostics()).toMatchObject({
-      transcriptLimitFailures: 1, transcriptWatches: 1,
-      transcriptReplayMessages: 0, transcriptReplayBytes: 0, pendingTranscriptWork: 0,
+      transcriptLimitFailures: 1,
+      transcriptWatches: 1,
+      transcriptReplayMessages: 0,
+      transcriptReplayBytes: 0,
+      pendingTranscriptWork: 0,
     });
   });
 
@@ -522,13 +615,22 @@ describe("bounded transcript replay and pending work", () => {
     const gateway = await harness((frame, socket) => {
       if (frame.method === "chat.history") {
         reads++;
-        socket.send(JSON.stringify({ type: "res", id: frame.id, ok: true,
-          payload: { messages: [], hasMore: true, nextOffset: reads } }));
+        socket.send(
+          JSON.stringify({
+            type: "res",
+            id: frame.id,
+            ok: true,
+            payload: { messages: [], hasMore: true, nextOffset: reads },
+          }),
+        );
       }
     }, false);
     await gateway.resumeTranscript(sessionKey, 0, undefined, undefined);
     expect(reads).toBe(2);
-    expect(gateway.diagnostics()).toMatchObject({ transcriptWatches: 1, transcriptLimitFailures: 1 });
+    expect(gateway.diagnostics()).toMatchObject({
+      transcriptWatches: 1,
+      transcriptLimitFailures: 1,
+    });
   });
 
   it.each([
@@ -543,16 +645,24 @@ describe("bounded transcript replay and pending work", () => {
     const events: GatewayEvent[] = [];
     const gateway = await harness((frame, connection) => {
       if (frame.method === "chat.history") {
-        connection.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: { messages: [] } }));
+        connection.send(
+          JSON.stringify({ type: "res", id: frame.id, ok: true, payload: { messages: [] } }),
+        );
       }
       if (frame.method === "sessions.messages.subscribe") {
         socket = connection;
-        const acknowledge = () => connection.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: {} }));
+        const acknowledge = () =>
+          connection.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: {} }));
         if (++subscriptions === 1) release = acknowledge;
         else acknowledge();
       }
     }, false);
-    const resuming = gateway.resumeTranscript(sessionKey, 0, (event) => events.push(event), (state) => states.push(state.transcript));
+    const resuming = gateway.resumeTranscript(
+      sessionKey,
+      0,
+      (event) => events.push(event),
+      (state) => states.push(state.transcript),
+    );
     await waitFor(() => Boolean(release), 1_000);
     for (let i = 1; i <= count; i++) socket!.send(sessionToolEvent(i, "Bash"));
     await waitFor(() => gateway.diagnostics().transcriptLimitFailures === 1, 1_000);
@@ -563,7 +673,10 @@ describe("bounded transcript replay and pending work", () => {
     await resuming;
     await waitFor(() => gateway.diagnostics().pendingTranscriptWork === 0, 1_000);
     expect(events).toEqual([]);
-    expect(gateway.diagnostics()).toMatchObject({ transcriptWatches: 1, pendingTranscriptBytes: 0 });
+    expect(gateway.diagnostics()).toMatchObject({
+      transcriptWatches: 1,
+      pendingTranscriptBytes: 0,
+    });
   });
 
   it("keeps sequenced live messages out of the identity index and bounds legacy identities", async () => {
@@ -571,16 +684,26 @@ describe("bounded transcript replay and pending work", () => {
     let socket: ServerSocket | undefined;
     const gateway = await harness((frame, connection) => {
       socket = connection;
-      connection.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: { messages: [] } }));
+      connection.send(
+        JSON.stringify({ type: "res", id: frame.id, ok: true, payload: { messages: [] } }),
+      );
     }, false);
     await gateway.resumeTranscript(sessionKey, 0, undefined, undefined);
     for (let i = 1; i <= 5; i++) socket!.send(sessionToolEvent(i, "Bash"));
     await waitFor(() => gateway.diagnostics().pendingTranscriptWork === 0, 1_000);
     expect(gateway.diagnostics().transcriptSeenIds).toBe(0);
     for (let i = 1; i <= 3; i++) {
-      socket!.send(JSON.stringify({ type: "event", event: "session.message", payload: {
-        sessionKey, messageId: `legacy-${i}`, message: { role: "assistant", content: `legacy ${i}` },
-      } }));
+      socket!.send(
+        JSON.stringify({
+          type: "event",
+          event: "session.message",
+          payload: {
+            sessionKey,
+            messageId: `legacy-${i}`,
+            message: { role: "assistant", content: `legacy ${i}` },
+          },
+        }),
+      );
     }
     await waitFor(() => gateway.diagnostics().transcriptLimitFailures === 1, 1_000);
     expect(gateway.diagnostics()).toMatchObject({ transcriptSeenIds: 0, transcriptWatches: 1 });
@@ -590,30 +713,50 @@ describe("bounded transcript replay and pending work", () => {
 describe("transcript limit recovery", () => {
   const sessionKey = "agent:main:main:thread:test";
   const row = (sequence: number, text = "progress") => ({
-    role: "assistant", content: [{ type: "text", text }],
+    role: "assistant",
+    content: [{ type: "text", text }],
     __openclaw: { id: `row-${sequence}`, seq: sequence },
   });
 
   it("resumes at a bounded current head, reports the sequence gap, and accepts subsequent events", async () => {
     vi.stubEnv("CLAWCONNECT_TRANSCRIPT_MAX_MESSAGES", "2");
-    const states: Array<{ reason?: string; skippedSequenceCount?: number; lastSeenSequence?: number }> = [];
+    const states: Array<{
+      reason?: string;
+      skippedSequenceCount?: number;
+      lastSeenSequence?: number;
+    }> = [];
     const events: GatewayEvent[] = [];
     let socket: ServerSocket | undefined;
     const gateway = await harness((frame, connection) => {
       socket = connection;
       const messages = frame.params?.limit === 1 ? [row(20)] : [row(18), row(19), row(20)];
-      connection.send(JSON.stringify({ type: "res", id: frame.id, ok: true,
-        payload: frame.method === "chat.history" ? { messages } : {} }));
+      connection.send(
+        JSON.stringify({
+          type: "res",
+          id: frame.id,
+          ok: true,
+          payload: frame.method === "chat.history" ? { messages } : {},
+        }),
+      );
     }, false);
-    await gateway.resumeTranscript(sessionKey, 0, (event) => events.push(event), (state) => states.push(state));
+    await gateway.resumeTranscript(
+      sessionKey,
+      0,
+      (event) => events.push(event),
+      (state) => states.push(state),
+    );
     await waitFor(() => states.some((state) => state.reason === "limit_recovered"), 1_000);
     expect(states.find((state) => state.reason === "limit_recovered")).toMatchObject({
-      skippedSequenceCount: 20, lastSeenSequence: 20,
+      skippedSequenceCount: 20,
+      lastSeenSequence: 20,
     });
     socket!.send(sessionToolEvent(21, "AfterLimit"));
     await waitFor(() => events.length === 1, 1_000);
     expect(events[0]).toMatchObject({ toolName: "AfterLimit" });
-    expect(gateway.diagnostics()).toMatchObject({ transcriptPausedWatches: 0, transcriptSkippedSequences: 20 });
+    expect(gateway.diagnostics()).toMatchObject({
+      transcriptPausedWatches: 0,
+      transcriptSkippedSequences: 20,
+    });
   });
 
   it("coalesces overload while paused and retries head recovery on a real reconnect", async () => {
@@ -627,18 +770,33 @@ describe("transcript limit recovery", () => {
       socket = connection;
       if (frame.method === "chat.history") {
         if (frame.params?.limit === 1) headReads++;
-        connection.send(JSON.stringify({ type: "res", id: frame.id, ok: true,
-          payload: { messages: [row(100, healthy ? "head" : "x".repeat(1_000))] } }));
+        connection.send(
+          JSON.stringify({
+            type: "res",
+            id: frame.id,
+            ok: true,
+            payload: { messages: [row(100, healthy ? "head" : "x".repeat(1_000))] },
+          }),
+        );
       } else connection.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: {} }));
     }, false);
-    await gateway.resumeTranscript(sessionKey, 0, (event) => events.push(event), (state) => {
-      if (state.reason) reasons.push(state.reason);
-    });
+    await gateway.resumeTranscript(
+      sessionKey,
+      0,
+      (event) => events.push(event),
+      (state) => {
+        if (state.reason) reasons.push(state.reason);
+      },
+    );
     await waitFor(() => headReads === 1 && gateway.diagnostics().pendingRpcs === 0, 1_000);
     for (let i = 1; i <= 100; i++) socket!.send(sessionToolEvent(i, "Skipped"));
     await waitFor(() => gateway.diagnostics().transcriptSkippedEvents === 100, 1_000);
     expect(headReads).toBe(1);
-    expect(gateway.diagnostics()).toMatchObject({ pendingTranscriptWork: 0, transcriptPausedWatches: 1, transcriptWatches: 1 });
+    expect(gateway.diagnostics()).toMatchObject({
+      pendingTranscriptWork: 0,
+      transcriptPausedWatches: 1,
+      transcriptWatches: 1,
+    });
     healthy = true;
     socket!.terminate();
     await waitFor(() => reasons.includes("limit_recovered"), 4_000);
@@ -646,6 +804,10 @@ describe("transcript limit recovery", () => {
     socket!.send(sessionToolEvent(101, "AfterReconnect"));
     await waitFor(() => events.length === 1, 1_000);
     expect(events[0]).toMatchObject({ toolName: "AfterReconnect" });
-    expect(gateway.diagnostics()).toMatchObject({ transcriptPausedWatches: 0, transcriptSkippedEvents: 100, transcriptSkippedSequences: 100 });
+    expect(gateway.diagnostics()).toMatchObject({
+      transcriptPausedWatches: 0,
+      transcriptSkippedEvents: 100,
+      transcriptSkippedSequences: 100,
+    });
   });
 });

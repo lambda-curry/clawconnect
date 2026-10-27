@@ -34,8 +34,10 @@ const script = shell.slice(shell.indexOf("__STATE_MODULE__"));
 /** Names the inlined modules bring into scope. build-widget.mjs strips the leading `export`, so top-level declarations of both kinds land in the shell's scope. */
 function moduleScope(): Set<string> {
   const names = new Set<string>();
-  for (const m of modules.matchAll(/^(?:export\s+)?(?:async\s+)?function\s+([\w$]+)/gm)) names.add(m[1]);
-  for (const m of modules.matchAll(/^(?:export\s+)?(?:const|let|var)\s+([\w$]+)/gm)) names.add(m[1]);
+  for (const m of modules.matchAll(/^(?:export\s+)?(?:async\s+)?function\s+([\w$]+)/gm))
+    names.add(m[1]);
+  for (const m of modules.matchAll(/^(?:export\s+)?(?:const|let|var)\s+([\w$]+)/gm))
+    names.add(m[1]);
   return names;
 }
 
@@ -65,22 +67,64 @@ function parameterNames(source: string): Set<string> {
 /** Names shell.html's own script declares, at any nesting depth (a nested helper is still resolvable from its enclosing scope). */
 function shellScope(): Set<string> {
   const names = new Set<string>();
-  for (const m of script.matchAll(/(?:^|[\s;{(])(?:async\s+)?function\s+([\w$]+)/gm)) names.add(m[1]);
-  for (const m of script.matchAll(/(?:^|[\s;{])(?:const|let|var)\s+([\w$]+)\s*=/gm)) names.add(m[1]);
+  for (const m of script.matchAll(/(?:^|[\s;{(])(?:async\s+)?function\s+([\w$]+)/gm))
+    names.add(m[1]);
+  for (const m of script.matchAll(/(?:^|[\s;{])(?:const|let|var)\s+([\w$]+)\s*=/gm))
+    names.add(m[1]);
   for (const n of parameterNames(script)) names.add(n);
   return names;
 }
 
 // Language keywords and control-flow forms that a `name(` regex also matches.
 const KEYWORDS = new Set([
-  "if", "for", "while", "switch", "catch", "function", "return", "typeof", "new", "await", "else", "do", "try",
-  "in", "of", "case", "delete", "void", "throw", "yield", "instanceof", "super", "this", "async",
+  "if",
+  "for",
+  "while",
+  "switch",
+  "catch",
+  "function",
+  "return",
+  "typeof",
+  "new",
+  "await",
+  "else",
+  "do",
+  "try",
+  "in",
+  "of",
+  "case",
+  "delete",
+  "void",
+  "throw",
+  "yield",
+  "instanceof",
+  "super",
+  "this",
+  "async",
 ]);
 
 // Genuine platform globals this widget legitimately calls.
 const GLOBALS = new Set([
-  "Array", "Boolean", "Date", "Error", "JSON", "Map", "Math", "Number", "Object", "Promise", "Set", "String",
-  "clearInterval", "clearTimeout", "matchMedia", "parseFloat", "parseInt", "queueMicrotask", "setInterval", "setTimeout",
+  "Array",
+  "Boolean",
+  "Date",
+  "Error",
+  "JSON",
+  "Map",
+  "Math",
+  "Number",
+  "Object",
+  "Promise",
+  "Set",
+  "String",
+  "clearInterval",
+  "clearTimeout",
+  "matchMedia",
+  "parseFloat",
+  "parseInt",
+  "queueMicrotask",
+  "setInterval",
+  "setTimeout",
   "structuredClone",
 ]);
 
@@ -125,7 +169,13 @@ describe("shell.html <-> inlined module seam", () => {
 
   it("the five functions commit 30a5669 left undefined are defined now", () => {
     const scope = moduleScope();
-    for (const name of ["ensurePinnedTask", "deriveCardTabs", "defaultCardTab", "isLikelyMarkdown", "renderMarkdownHtml"]) {
+    for (const name of [
+      "ensurePinnedTask",
+      "deriveCardTabs",
+      "defaultCardTab",
+      "isLikelyMarkdown",
+      "renderMarkdownHtml",
+    ]) {
       expect(scope.has(name), `${name} must be defined in an inlined module`).toBe(true);
     }
   });

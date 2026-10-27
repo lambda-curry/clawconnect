@@ -1,4 +1,12 @@
-import { constants, copyFileSync, existsSync, mkdirSync, renameSync, statSync, writeFileSync } from "node:fs";
+import {
+  constants,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  renameSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname } from "node:path";
 import { loadJsonArrayFile, type StoreDegradationSink } from "./store-health.ts";
 import type { SessionAttachmentState } from "./types.ts";
@@ -52,7 +60,9 @@ export class JsonFileAttachmentStore implements AttachmentStore {
       writeFileSync(tmpPath, JSON.stringify(states));
       renameSync(tmpPath, this.filePath);
     } catch (err) {
-      console.error(`[attachment-store] failed to save ${this.filePath}: ${(err as Error).message}`);
+      console.error(
+        `[attachment-store] failed to save ${this.filePath}: ${(err as Error).message}`,
+      );
     }
   }
 
@@ -64,7 +74,8 @@ export class JsonFileAttachmentStore implements AttachmentStore {
       try {
         copyFileSync(this.filePath, target, constants.COPYFILE_EXCL);
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST" || !statSync(target).isFile()) throw error;
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST" || !statSync(target).isFile())
+          throw error;
       }
       this.backupReady = true;
       return true;

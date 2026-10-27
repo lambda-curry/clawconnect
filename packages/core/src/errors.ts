@@ -9,7 +9,8 @@ const ERROR_PATTERNS: Array<{ pattern: RegExp; category: ErrorCategory; recovery
   {
     pattern: /timed?\s?out|ETIMEDOUT/i,
     category: "timeout",
-    recovery: "The task may be too large. Try breaking it into smaller steps, or continue from the same session.",
+    recovery:
+      "The task may be too large. Try breaking it into smaller steps, or continue from the same session.",
   },
   {
     pattern: /merge conflict|CONFLICT/i,

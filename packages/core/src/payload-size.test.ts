@@ -20,7 +20,12 @@ let resolveChat: ((v: string) => void) | undefined;
 vi.mock("./gateway.ts", () => {
   function FakeOpenClawGateway() {
     return {
-      chat(_sessionKey: string, _message: string, _timeoutMs: number, onEvent?: (e: GatewayEvent) => void) {
+      chat(
+        _sessionKey: string,
+        _message: string,
+        _timeoutMs: number,
+        onEvent?: (e: GatewayEvent) => void,
+      ) {
         onEventCb = onEvent;
         return new Promise<string>((resolve) => {
           resolveChat = resolve;
@@ -28,7 +33,8 @@ vi.mock("./gateway.ts", () => {
       },
       close() {},
       pollTranscriptForFinalText: () => Promise.resolve(undefined),
-      reconcileRun: () => Promise.resolve({ ok: true, changed: true, trailingText: "", snapshotKey: "active" }),
+      reconcileRun: () =>
+        Promise.resolve({ ok: true, changed: true, trailingText: "", snapshotKey: "active" }),
     };
   }
   return { OpenClawGateway: FakeOpenClawGateway };
@@ -40,7 +46,9 @@ function singleAgentRegistry(): AgentRegistry {
     source: "env",
     groups: {},
     groupLabels: {},
-    agents: [{ id: "assistant", url: "ws://fake-assistant", password: "x", openclawAgentId: "main" }],
+    agents: [
+      { id: "assistant", url: "ws://fake-assistant", password: "x", openclawAgentId: "main" },
+    ],
   };
 }
 
@@ -64,7 +72,12 @@ describe("payload size — non-terminal running snapshot", () => {
     const run = runTask(pool, { task: "do a realistic multi-step task" });
     emitMany(15, (i) =>
       i % 3 === 0
-        ? { type: "tool", text: `Bash: running step ${i}`, toolName: "Bash", args: { command: `step-${i}.sh` } }
+        ? {
+            type: "tool",
+            text: `Bash: running step ${i}`,
+            toolName: "Bash",
+            args: { command: `step-${i}.sh` },
+          }
         : i % 3 === 1
           ? { type: "tool-result", text: "ok", toolName: "Bash", isError: false }
           : { type: "lifecycle", text: `checkpoint ${i} reached` },
@@ -96,7 +109,12 @@ describe("payload size — non-terminal running snapshot", () => {
       const run = runTask(pool, { task: "poll-mode task" });
       emitMany(8, (i) => ({ type: "lifecycle", text: `step ${i} of the run` }));
 
-      const resultPromise = checkTask(pool, { jobId: run.jobId, mode: "poll", knownLogCount: 0, waitMs: 1_000 });
+      const resultPromise = checkTask(pool, {
+        jobId: run.jobId,
+        mode: "poll",
+        knownLogCount: 0,
+        waitMs: 1_000,
+      });
       await vi.advanceTimersByTimeAsync(1_000);
       const result = await resultPromise;
       expect(result.found).toBe(true);
@@ -137,7 +155,10 @@ describe("telemetry — structured counts/bytes only, never prompt/log content",
     emitMany(5, (i) => ({ type: "lifecycle", text: `step ${i}` }));
     await getTask(pool, { jobId: run.jobId });
 
-    const getTaskEvents = events.filter((e): e is Record<string, unknown> => typeof e === "object" && e !== null && (e as Record<string, unknown>).tool === "get_task");
+    const getTaskEvents = events.filter(
+      (e): e is Record<string, unknown> =>
+        typeof e === "object" && e !== null && (e as Record<string, unknown>).tool === "get_task",
+    );
     expect(getTaskEvents.length).toBeGreaterThan(0);
     const last = getTaskEvents.at(-1)!;
     expect(typeof last.payloadBytes).toBe("number");

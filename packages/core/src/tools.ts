@@ -373,7 +373,13 @@ export async function cancelTask(
   const start = Date.now();
   const entry = resolvePoolEntry(pool, opts);
   if (!entry) {
-    recordTelemetry({ tool: "cancel_task", jobId: opts.jobId, sessionKey: opts.sessionKey, status: "not_found", durationMs: Date.now() - start });
+    recordTelemetry({
+      tool: "cancel_task",
+      jobId: opts.jobId,
+      sessionKey: opts.sessionKey,
+      status: "not_found",
+      durationMs: Date.now() - start,
+    });
     return { found: false };
   }
   const result = await entry.sessions.requestCancel(opts.jobId, opts.sessionKey);
@@ -382,7 +388,11 @@ export async function cancelTask(
     jobId: result.jobId ?? opts.jobId,
     sessionKey: opts.sessionKey,
     agent: entry.agent.id,
-    status: result.found ? (result.alreadyTerminal ? "already_terminal" : "requested") : "not_found",
+    status: result.found
+      ? result.alreadyTerminal
+        ? "already_terminal"
+        : "requested"
+      : "not_found",
     durationMs: Date.now() - start,
   });
   return result;

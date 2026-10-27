@@ -71,7 +71,12 @@ export async function runCommand(args: string[]) {
 
   if (!values.wait) {
     const output = values.json
-      ? JSON.stringify({ jobId: job.jobId, sessionKey: job.sessionKey, status: "running", agent: agent.id })
+      ? JSON.stringify({
+          jobId: job.jobId,
+          sessionKey: job.sessionKey,
+          status: "running",
+          agent: agent.id,
+        })
       : `Job submitted on agent "${agent.id}": ${job.jobId}\nSession: ${job.sessionKey}\n\nUse 'clawconnect status ${job.jobId.slice(0, 8)} --agent ${agent.id}' to check progress, or re-run with --wait.`;
     console.log(output);
     process.exit(0);
@@ -82,7 +87,9 @@ export async function runCommand(args: string[]) {
   let lastLogCount = 0;
 
   if (!values.json) {
-    progressLine(`[clawconnect:${agent.id}] Running task on session ${job.sessionKey.slice(-12)}...`);
+    progressLine(
+      `[clawconnect:${agent.id}] Running task on session ${job.sessionKey.slice(-12)}...`,
+    );
   }
 
   while (Date.now() < deadline) {
@@ -108,10 +115,19 @@ export async function runCommand(args: string[]) {
 
   progressDone();
   if (values.json) {
-    console.log(JSON.stringify({ jobId: job.jobId, status: "timeout", sessionKey: job.sessionKey, agent: agent.id }));
+    console.log(
+      JSON.stringify({
+        jobId: job.jobId,
+        status: "timeout",
+        sessionKey: job.sessionKey,
+        agent: agent.id,
+      }),
+    );
   } else {
     console.error(`Task timed out after ${timeoutMs / 1000}s. Session: ${job.sessionKey}`);
-    console.error(`Resume with: clawconnect run "continue" --agent ${agent.id} --session ${job.sessionKey} --wait`);
+    console.error(
+      `Resume with: clawconnect run "continue" --agent ${agent.id} --session ${job.sessionKey} --wait`,
+    );
   }
   gateway.close();
   process.exit(2);

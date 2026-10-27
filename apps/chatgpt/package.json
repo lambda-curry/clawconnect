@@ -2,10 +2,10 @@
   "name": "chatgpt",
   "version": "0.0.0",
   "private": true,
-  "type": "module",
   "description": "ChatGPT MCP integration for OpenClaw with live progress widget",
-  "author": "Jake Ruesink",
   "license": "MIT",
+  "author": "Jake Ruesink",
+  "type": "module",
   "scripts": {
     "dev": "vpx --watch src/index.ts",
     "build": "tsc -p tsconfig.build.json && node scripts/build-widget.mjs",

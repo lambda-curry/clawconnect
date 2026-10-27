@@ -132,9 +132,10 @@ export async function searchMemory(
     //   that's restricted to ["hank-memory"] can't pull from shared LC
     //   collections via QMD's shared-visibility rule.
     if (opts.collections && opts.collections.length > 0) {
-      const effective = ep.allowedCollections.length > 0
-        ? opts.collections.filter((c) => ep.allowedCollections.includes(c))
-        : opts.collections;
+      const effective =
+        ep.allowedCollections.length > 0
+          ? opts.collections.filter((c) => ep.allowedCollections.includes(c))
+          : opts.collections;
       if (effective.length === 0) {
         // Caller asked for collections this endpoint can't reach. Skip.
         return { ep, res: { ok: true as const, data: [] } };
@@ -205,17 +206,34 @@ export interface GetMemoryResult {
 
 export async function getMemory(agents: AgentEntry[], file: string): Promise<GetMemoryResult> {
   if (!file.startsWith("qmd://")) {
-    return { file, found: false, errors: [{ agent: "-", qmdUrl: "-", message: "file must start with qmd://" }] };
+    return {
+      file,
+      found: false,
+      errors: [{ agent: "-", qmdUrl: "-", message: "file must start with qmd://" }],
+    };
   }
   const collection = extractCollectionFromFile(file);
   // Optional per-agent collection allow-list: if the file's collection isn't
   // in any endpoint's allow-list, hide it (same protection as search).
   const endpoints = endpointsFor(agents);
   const eligibleEndpoints = endpoints.filter(
-    (ep) => ep.allowedCollections.length === 0 || (collection && ep.allowedCollections.includes(collection)),
+    (ep) =>
+      ep.allowedCollections.length === 0 ||
+      (collection && ep.allowedCollections.includes(collection)),
   );
   if (eligibleEndpoints.length === 0) {
-    return { file, found: false, collection, errors: [{ agent: "-", qmdUrl: "-", message: "collection not in any allow-list for this connection" }] };
+    return {
+      file,
+      found: false,
+      collection,
+      errors: [
+        {
+          agent: "-",
+          qmdUrl: "-",
+          message: "collection not in any allow-list for this connection",
+        },
+      ],
+    };
   }
   const errors: GetMemoryResult["errors"] = [];
 
@@ -239,7 +257,11 @@ export async function getMemory(agents: AgentEntry[], file: string): Promise<Get
         message: `${res.status}: ${(await res.text()).slice(0, 200)}`,
       });
     } catch (err) {
-      errors.push({ agent: ep.agents.join("+"), qmdUrl: ep.qmdUrl, message: (err as Error).message });
+      errors.push({
+        agent: ep.agents.join("+"),
+        qmdUrl: ep.qmdUrl,
+        message: (err as Error).message,
+      });
     } finally {
       clearTimeout(timer);
     }

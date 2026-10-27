@@ -39,7 +39,11 @@ describe("loading host-registered runtimes", () => {
     const registry = await loadAgentSessionRuntimes(path, silent);
     expect(registry?.ids()).toEqual(["example-runtime"]);
     // Capabilities stay DERIVED from the callbacks the module actually gave.
-    expect(registry?.get("example-runtime")?.capabilities).toEqual({ inspect: true, continue: false, detach: false });
+    expect(registry?.get("example-runtime")?.capabilities).toEqual({
+      inspect: true,
+      continue: false,
+      detach: false,
+    });
   });
 
   it("accepts a default export, several modules at once, and a relative specifier", async () => {
@@ -67,7 +71,10 @@ describe("loading host-registered runtimes", () => {
 
   it("never lets a broken integration stop the connector from starting", async () => {
     const logs: string[] = [];
-    const throwing = moduleFile("boom.mjs", `export function registerAgentSessionRuntimes() { throw new Error("no credentials"); }`);
+    const throwing = moduleFile(
+      "boom.mjs",
+      `export function registerAgentSessionRuntimes() { throw new Error("no credentials"); }`,
+    );
     const empty = moduleFile("nothing.mjs", `export const notARegistrar = 1;`);
     const good = moduleFile(
       "good.mjs",

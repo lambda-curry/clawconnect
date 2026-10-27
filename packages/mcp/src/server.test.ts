@@ -79,11 +79,12 @@ async function connectedClient() {
 }
 
 async function connectedModernClient() {
-  const handler = createMcpHandler((ctx) =>
-    createMcpServer({
-      registry: fakeRegistry(),
-      protocol: { era: ctx.era, ...(ctx.era === "modern" ? { version: "2026-07-28" } : {}) },
-    }).server,
+  const handler = createMcpHandler(
+    (ctx) =>
+      createMcpServer({
+        registry: fakeRegistry(),
+        protocol: { era: ctx.era, ...(ctx.era === "modern" ? { version: "2026-07-28" } : {}) },
+      }).server,
   );
   const transport = new StreamableHTTPClientTransport(new URL("http://test.local/mcp"), {
     fetch: (input, init) => handler.fetch(new Request(input, init)),

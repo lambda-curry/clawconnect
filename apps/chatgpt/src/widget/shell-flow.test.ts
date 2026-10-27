@@ -46,7 +46,8 @@ class El {
   }
 
   append(...nodes: (El | string)[]): void {
-    for (const node of nodes) this.children.push(typeof node === "string" ? new El("#text", node) : node);
+    for (const node of nodes)
+      this.children.push(typeof node === "string" ? new El("#text", node) : node);
   }
 
   addEventListener(type: string, fn: (event: unknown) => void): void {
@@ -104,7 +105,8 @@ function textOf(node: El): string {
 }
 
 function click(node: El): void {
-  for (const fn of node.listeners.get("click") ?? []) fn({ stopPropagation() {}, preventDefault() {} });
+  for (const fn of node.listeners.get("click") ?? [])
+    fn({ stopPropagation() {}, preventDefault() {} });
 }
 
 function findTabButton(root: El, label: string): El {
@@ -149,7 +151,11 @@ type Task = {
   summary?: string;
 };
 
-function createHost(opts: { mountedOnBoot?: boolean; knownSessionKeys?: string[]; world: { tasks: Task[] } } = { world: { tasks: [] } }) {
+function createHost(
+  opts: { mountedOnBoot?: boolean; knownSessionKeys?: string[]; world: { tasks: Task[] } } = {
+    world: { tasks: [] },
+  },
+) {
   const calls: { name: string; args: Json }[] = [];
   let cursor = 0;
   const allEvents: Json[] = [];
@@ -160,7 +166,9 @@ function createHost(opts: { mountedOnBoot?: boolean; knownSessionKeys?: string[]
     displayMode: "inline",
     theme: "light" as const,
     toolOutput: opts.mountedOnBoot ? { structuredContent: mountPayload } : null,
-    widgetState: opts.knownSessionKeys ? { mounted: null, knownSessionKeys: opts.knownSessionKeys } : null,
+    widgetState: opts.knownSessionKeys
+      ? { mounted: null, knownSessionKeys: opts.knownSessionKeys }
+      : null,
     setWidgetState(value: unknown) {
       host.widgetState = value as typeof host.widgetState;
     },
@@ -185,16 +193,26 @@ function createHost(opts: { mountedOnBoot?: boolean; knownSessionKeys?: string[]
       }
       if (name === "get_task") {
         if (args.detail === "prompt") {
-          return Promise.resolve({ structuredContent: { taskId: args.taskId, prompt: { task: "do the thing" } } });
+          return Promise.resolve({
+            structuredContent: { taskId: args.taskId, prompt: { task: "do the thing" } },
+          });
         }
         const task = opts.world.tasks.find((t) => t.taskId === args.taskId);
-        if (!task) return Promise.resolve({ structuredContent: { taskId: args.taskId, status: "error", error: "Task not found." } });
+        if (!task)
+          return Promise.resolve({
+            structuredContent: { taskId: args.taskId, status: "error", error: "Task not found." },
+          });
         const known = typeof args.knownLogCount === "number" ? args.knownLogCount : 0;
-        const updates = task.taskId === TASK_ID ? allEvents.filter((e) => (e.seq as number) > known) : [];
+        const updates =
+          task.taskId === TASK_ID ? allEvents.filter((e) => (e.seq as number) > known) : [];
         return Promise.resolve({ structuredContent: { ...task, updates, logCursor: cursor } });
       }
       if (name === "get_session") {
-        return Promise.resolve({ structuredContent: { tasks: opts.world.tasks.filter((t) => t.sessionKey === args.sessionId) } });
+        return Promise.resolve({
+          structuredContent: {
+            tasks: opts.world.tasks.filter((t) => t.sessionKey === args.sessionId),
+          },
+        });
       }
       return Promise.resolve({});
     },
@@ -257,14 +275,26 @@ async function settle(): Promise<void> {
   for (let i = 0; i < 100; i += 1) await Promise.resolve();
 }
 
-const rowTitles = (root: El) => withClass(root, "cc-row").map((row) => textOf(withClass(row, "cc-title")[0]));
+const rowTitles = (root: El) =>
+  withClass(root, "cc-row").map((row) => textOf(withClass(row, "cc-title")[0]));
 const rowUpdateLines = (root: El) => withClass(root, "cc-update").map(textOf);
 const lastGetTaskArgs = (host: ReturnType<typeof createHost>) =>
   [...host.calls].reverse().find((c) => c.name === "get_task" && c.args.detail !== "prompt")?.args;
 
 describe("session registration: the mount payload can land after boot", () => {
   it("registers the session and starts polling once openai:set_globals delivers the mount payload", async () => {
-    const world = { tasks: [{ taskId: TASK_ID, jobId: TASK_ID, sessionKey: SESSION_KEY, agent: "assistant", status: "running", lastEventAt: 0 }] };
+    const world = {
+      tasks: [
+        {
+          taskId: TASK_ID,
+          jobId: TASK_ID,
+          sessionKey: SESSION_KEY,
+          agent: "assistant",
+          status: "running",
+          lastEventAt: 0,
+        },
+      ],
+    };
     const host = createHost({ mountedOnBoot: false, world }); // toolOutput is null at boot — the race
     const { root, windowStub } = mount(host);
     await settle();
@@ -285,8 +315,22 @@ describe("session registration: the mount payload can land after boot", () => {
 
 describe("canonical store: retention and its bound", () => {
   it("keeps a known session's task visible after it drops out of the read", async () => {
-    const A1 = { taskId: "a1", jobId: "a1", sessionKey: "sess-a", agent: "assistant", status: "running", lastEventAt: 1_000 };
-    const B1 = { taskId: "b1", jobId: "b1", sessionKey: "sess-b", agent: "scout", status: "running", lastEventAt: 2_000 };
+    const A1 = {
+      taskId: "a1",
+      jobId: "a1",
+      sessionKey: "sess-a",
+      agent: "assistant",
+      status: "running",
+      lastEventAt: 1_000,
+    };
+    const B1 = {
+      taskId: "b1",
+      jobId: "b1",
+      sessionKey: "sess-b",
+      agent: "scout",
+      status: "running",
+      lastEventAt: 2_000,
+    };
     const world = { tasks: [A1, B1] };
     const host = createHost({ knownSessionKeys: ["sess-a", "sess-b"], world });
     vi.useFakeTimers();
@@ -306,8 +350,23 @@ describe("canonical store: retention and its bound", () => {
   });
 
   it("does not retain a session the card does not know about", async () => {
-    const A1 = { taskId: "a1", jobId: "a1", sessionKey: "sess-a", agent: "assistant", status: "running", lastEventAt: 1_000 };
-    const C1 = { taskId: "c1", jobId: "c1", sessionKey: "sess-c", agent: "archivist", status: "done", lastEventAt: 500, summary: "Old work" };
+    const A1 = {
+      taskId: "a1",
+      jobId: "a1",
+      sessionKey: "sess-a",
+      agent: "assistant",
+      status: "running",
+      lastEventAt: 1_000,
+    };
+    const C1 = {
+      taskId: "c1",
+      jobId: "c1",
+      sessionKey: "sess-c",
+      agent: "archivist",
+      status: "done",
+      lastEventAt: 500,
+      summary: "Old work",
+    };
     const world = { tasks: [A1, C1] };
     // Only sess-a is known; sess-c is out of scope from the start.
     const host = createHost({ knownSessionKeys: ["sess-a"], world });
@@ -333,7 +392,18 @@ describe("ring buffer accumulates check_task/get_task's bounded per-poll delta",
   it("shows accumulated recent activity across polls, not just the latest poll's delta", async () => {
     vi.useFakeTimers();
     try {
-      const world = { tasks: [{ taskId: TASK_ID, jobId: TASK_ID, sessionKey: SESSION_KEY, agent: "assistant", status: "running", lastEventAt: 0 }] };
+      const world = {
+        tasks: [
+          {
+            taskId: TASK_ID,
+            jobId: TASK_ID,
+            sessionKey: SESSION_KEY,
+            agent: "assistant",
+            status: "running",
+            lastEventAt: 0,
+          },
+        ],
+      };
       const host = createHost({ mountedOnBoot: true, world });
       host.pushEvent("step one");
       const { root } = mount(host);
@@ -361,7 +431,18 @@ describe("ring buffer accumulates check_task/get_task's bounded per-poll delta",
   it("passes the prior logCursor back as knownLogCount on the next get_task call — no re-fetch of already-seen events", async () => {
     vi.useFakeTimers();
     try {
-      const world = { tasks: [{ taskId: TASK_ID, jobId: TASK_ID, sessionKey: SESSION_KEY, agent: "assistant", status: "running", lastEventAt: 0 }] };
+      const world = {
+        tasks: [
+          {
+            taskId: TASK_ID,
+            jobId: TASK_ID,
+            sessionKey: SESSION_KEY,
+            agent: "assistant",
+            status: "running",
+            lastEventAt: 0,
+          },
+        ],
+      };
       const host = createHost({ mountedOnBoot: true, world });
       host.pushEvent("step one");
       mount(host);
@@ -382,7 +463,18 @@ describe("render cadence: lifecycle/terminal changes are immediate, cosmetic-onl
   it("a cosmetic-only poll (same status group) does not repaint until the debounce window elapses", async () => {
     vi.useFakeTimers();
     try {
-      const world = { tasks: [{ taskId: TASK_ID, jobId: TASK_ID, sessionKey: SESSION_KEY, agent: "assistant", status: "running", lastEventAt: 0 }] };
+      const world = {
+        tasks: [
+          {
+            taskId: TASK_ID,
+            jobId: TASK_ID,
+            sessionKey: SESSION_KEY,
+            agent: "assistant",
+            status: "running",
+            lastEventAt: 0,
+          },
+        ],
+      };
       const host = createHost({ mountedOnBoot: true, world });
       host.pushEvent("step one");
       const { root } = mount(host);
@@ -406,7 +498,18 @@ describe("render cadence: lifecycle/terminal changes are immediate, cosmetic-onl
   it("a terminal transition is reflected right away, without waiting out the cosmetic debounce window", async () => {
     vi.useFakeTimers();
     try {
-      const world = { tasks: [{ taskId: TASK_ID, jobId: TASK_ID, sessionKey: SESSION_KEY, agent: "assistant", status: "running", lastEventAt: 0 }] };
+      const world = {
+        tasks: [
+          {
+            taskId: TASK_ID,
+            jobId: TASK_ID,
+            sessionKey: SESSION_KEY,
+            agent: "assistant",
+            status: "running",
+            lastEventAt: 0,
+          },
+        ],
+      };
       const host = createHost({ mountedOnBoot: true, world });
       host.pushEvent("working");
       const { root } = mount(host);
@@ -429,12 +532,25 @@ describe("Continue in ChatGPT button on needs_attention / completed / failed", (
   it("queues a button on transition, sends only on click, and does not re-queue the same group", async () => {
     vi.useFakeTimers();
     try {
-      const world = { tasks: [{ taskId: TASK_ID, jobId: TASK_ID, sessionKey: SESSION_KEY, agent: "assistant", status: "running", lastEventAt: 0 }] };
+      const world = {
+        tasks: [
+          {
+            taskId: TASK_ID,
+            jobId: TASK_ID,
+            sessionKey: SESSION_KEY,
+            agent: "assistant",
+            status: "running",
+            lastEventAt: 0,
+          },
+        ],
+      };
       const host = createHost({ mountedOnBoot: true, world });
       const { root } = mount(host);
       await settle();
       expect(host.followUps).toHaveLength(0);
-      expect(withClass(root, "cc-btn").filter((n) => textOf(n) === "Continue in ChatGPT")).toHaveLength(0);
+      expect(
+        withClass(root, "cc-btn").filter((n) => textOf(n) === "Continue in ChatGPT"),
+      ).toHaveLength(0);
 
       host.completeTask("needs-human");
       await vi.advanceTimersByTimeAsync(3_000);
@@ -449,13 +565,17 @@ describe("Continue in ChatGPT button on needs_attention / completed / failed", (
       expect(host.followUps).toHaveLength(1);
       expect(host.followUps[0]?.prompt).toContain("needs attention");
       expect(host.followUps[0]?.prompt).toContain(TASK_ID);
-      expect(withClass(root, "cc-btn").filter((n) => textOf(n) === "Continue in ChatGPT")).toHaveLength(0);
+      expect(
+        withClass(root, "cc-btn").filter((n) => textOf(n) === "Continue in ChatGPT"),
+      ).toHaveLength(0);
 
       // Still needs-human on the next poll — no second button.
       await vi.advanceTimersByTimeAsync(10_000);
       await settle();
       expect(host.followUps).toHaveLength(1);
-      expect(withClass(root, "cc-btn").filter((n) => textOf(n) === "Continue in ChatGPT")).toHaveLength(0);
+      expect(
+        withClass(root, "cc-btn").filter((n) => textOf(n) === "Continue in ChatGPT"),
+      ).toHaveLength(0);
 
       host.completeTask("completed");
       await vi.advanceTimersByTimeAsync(10_000);
@@ -473,20 +593,44 @@ describe("Continue in ChatGPT button on needs_attention / completed / failed", (
   });
 
   it("does not offer Notify when mounting onto an already-completed task", async () => {
-    const world = { tasks: [{ taskId: TASK_ID, jobId: TASK_ID, sessionKey: SESSION_KEY, agent: "assistant", status: "completed", lastEventAt: 0 }] };
+    const world = {
+      tasks: [
+        {
+          taskId: TASK_ID,
+          jobId: TASK_ID,
+          sessionKey: SESSION_KEY,
+          agent: "assistant",
+          status: "completed",
+          lastEventAt: 0,
+        },
+      ],
+    };
     const host = createHost({ mountedOnBoot: true, world });
     const { root } = mount(host);
     await settle();
     expect(host.followUps).toHaveLength(0);
-    expect(withClass(root, "cc-btn").filter((n) => textOf(n) === "Continue in ChatGPT")).toHaveLength(0);
+    expect(
+      withClass(root, "cc-btn").filter((n) => textOf(n) === "Continue in ChatGPT"),
+    ).toHaveLength(0);
   });
 });
 
 describe("original request stays out of recurring heartbeats — fetched lazily on demand", () => {
-  it("the initial mount and subsequent poll cycles never call get_task(detail:\"prompt\")", async () => {
+  it('the initial mount and subsequent poll cycles never call get_task(detail:"prompt")', async () => {
     vi.useFakeTimers();
     try {
-      const world = { tasks: [{ taskId: TASK_ID, jobId: TASK_ID, sessionKey: SESSION_KEY, agent: "assistant", status: "running", lastEventAt: 0 }] };
+      const world = {
+        tasks: [
+          {
+            taskId: TASK_ID,
+            jobId: TASK_ID,
+            sessionKey: SESSION_KEY,
+            agent: "assistant",
+            status: "running",
+            lastEventAt: 0,
+          },
+        ],
+      };
       const host = createHost({ mountedOnBoot: true, world });
       host.pushEvent("step one");
       mount(host);
@@ -496,7 +640,9 @@ describe("original request stays out of recurring heartbeats — fetched lazily 
       await vi.advanceTimersByTimeAsync(4_000);
       await settle();
 
-      const promptCalls = host.calls.filter((c) => c.name === "get_task" && c.args.detail === "prompt");
+      const promptCalls = host.calls.filter(
+        (c) => c.name === "get_task" && c.args.detail === "prompt",
+      );
       expect(promptCalls).toHaveLength(0);
     } finally {
       vi.useRealTimers();
@@ -504,25 +650,51 @@ describe("original request stays out of recurring heartbeats — fetched lazily 
   });
 
   it("selecting the Request tab fetches the prompt exactly once, even when re-selected before the first fetch resolves", async () => {
-    const world = { tasks: [{ taskId: TASK_ID, jobId: TASK_ID, sessionKey: SESSION_KEY, agent: "assistant", status: "running", lastEventAt: 0 }] };
+    const world = {
+      tasks: [
+        {
+          taskId: TASK_ID,
+          jobId: TASK_ID,
+          sessionKey: SESSION_KEY,
+          agent: "assistant",
+          status: "running",
+          lastEventAt: 0,
+        },
+      ],
+    };
     const host = createHost({ mountedOnBoot: true, world });
     const { root } = mount(host);
     await settle();
-    expect(host.calls.filter((c) => c.name === "get_task" && c.args.detail === "prompt")).toHaveLength(0);
+    expect(
+      host.calls.filter((c) => c.name === "get_task" && c.args.detail === "prompt"),
+    ).toHaveLength(0);
 
     const requestTab = findTabButton(root, "Request");
     click(requestTab);
     click(requestTab); // rapid re-click before the first fetch resolves — must not double-fetch
     await settle();
 
-    const promptCalls = host.calls.filter((c) => c.name === "get_task" && c.args.detail === "prompt");
+    const promptCalls = host.calls.filter(
+      (c) => c.name === "get_task" && c.args.detail === "prompt",
+    );
     expect(promptCalls).toHaveLength(1);
     expect(withClass(root, "cc-prompt-body").length).toBeGreaterThan(0);
     expect(textOf(withClass(root, "cc-prompt-body")[0])).toContain("do the thing");
   });
 
   it("switching away and back to Request does not re-fetch an already-loaded prompt", async () => {
-    const world = { tasks: [{ taskId: TASK_ID, jobId: TASK_ID, sessionKey: SESSION_KEY, agent: "assistant", status: "running", lastEventAt: 0 }] };
+    const world = {
+      tasks: [
+        {
+          taskId: TASK_ID,
+          jobId: TASK_ID,
+          sessionKey: SESSION_KEY,
+          agent: "assistant",
+          status: "running",
+          lastEventAt: 0,
+        },
+      ],
+    };
     const host = createHost({ mountedOnBoot: true, world });
     const { root } = mount(host);
     await settle();
@@ -533,17 +705,32 @@ describe("original request stays out of recurring heartbeats — fetched lazily 
     click(findTabButton(root, "Request"));
     await settle();
 
-    expect(host.calls.filter((c) => c.name === "get_task" && c.args.detail === "prompt")).toHaveLength(1);
+    expect(
+      host.calls.filter((c) => c.name === "get_task" && c.args.detail === "prompt"),
+    ).toHaveLength(1);
   });
 });
 
 describe("no fullscreen/Task Center affordance in the assembled widget", () => {
   it("never renders an 'Open Task Center' control, and the widget stays functional without one", async () => {
-    const world = { tasks: [{ taskId: TASK_ID, jobId: TASK_ID, sessionKey: SESSION_KEY, agent: "assistant", status: "running", lastEventAt: 0 }] };
+    const world = {
+      tasks: [
+        {
+          taskId: TASK_ID,
+          jobId: TASK_ID,
+          sessionKey: SESSION_KEY,
+          agent: "assistant",
+          status: "running",
+          lastEventAt: 0,
+        },
+      ],
+    };
     const host = createHost({ mountedOnBoot: true, world });
     const { root } = mount(host);
     await settle();
-    const found = withClass(root, "cc-card-tab").some((n) => textOf(n).includes("⛶") || n.getAttribute("aria-label") === "Open Task Center");
+    const found = withClass(root, "cc-card-tab").some(
+      (n) => textOf(n).includes("⛶") || n.getAttribute("aria-label") === "Open Task Center",
+    );
     expect(found).toBe(false);
     expect(rowTitles(root)).toEqual(["assistant is working…"]);
   });
@@ -551,14 +738,28 @@ describe("no fullscreen/Task Center affordance in the assembled widget", () => {
 
 describe("a dead chat stream is not a dead task", () => {
   it("renders the recovery notice as reassurance, above the rows and outside any task's pill", async () => {
-    const base: Task = { taskId: TASK_ID, jobId: TASK_ID, sessionKey: SESSION_KEY, agent: "assistant", status: "running", lastEventAt: 0 };
+    const base: Task = {
+      taskId: TASK_ID,
+      jobId: TASK_ID,
+      sessionKey: SESSION_KEY,
+      agent: "assistant",
+      status: "running",
+      lastEventAt: 0,
+    };
     const host = createHost({ mountedOnBoot: true, world: { tasks: [base] } });
     const inner = host.callTool;
     host.callTool = (name: string, args: Json): Promise<Json> => {
       if (name === "get_task" && args.detail !== "prompt") {
         // The server says: the originating reply ended before the answer
         // arrived, and it is recovering the job — which is still running.
-        return Promise.resolve({ structuredContent: { ...base, recovery: { reason: "no_live_final_text" }, updates: [], logCursor: 0 } });
+        return Promise.resolve({
+          structuredContent: {
+            ...base,
+            recovery: { reason: "no_live_final_text" },
+            updates: [],
+            logCursor: 0,
+          },
+        });
       }
       return inner(name, args);
     };
@@ -574,7 +775,18 @@ describe("a dead chat stream is not a dead task", () => {
   });
 
   it("shows no notice at all when the stream is healthy", async () => {
-    const world = { tasks: [{ taskId: TASK_ID, jobId: TASK_ID, sessionKey: SESSION_KEY, agent: "assistant", status: "running", lastEventAt: 0 }] };
+    const world = {
+      tasks: [
+        {
+          taskId: TASK_ID,
+          jobId: TASK_ID,
+          sessionKey: SESSION_KEY,
+          agent: "assistant",
+          status: "running",
+          lastEventAt: 0,
+        },
+      ],
+    };
     const host = createHost({ mountedOnBoot: true, world });
     const { root } = mount(host);
     await settle();
@@ -588,7 +800,19 @@ describe("resume signals", () => {
     // without an `online` listener the card sits on whatever the failed poll
     // left — and pollIntervalMs backs off to 30s on repeated failures, so it
     // can stay wrong for a long time after connectivity returns.
-    const world = { tasks: [{ taskId: TASK_ID, jobId: TASK_ID, sessionKey: SESSION_KEY, agent: "assistant", status: "completed", lastEventAt: 0, summary: "done" }] };
+    const world = {
+      tasks: [
+        {
+          taskId: TASK_ID,
+          jobId: TASK_ID,
+          sessionKey: SESSION_KEY,
+          agent: "assistant",
+          status: "completed",
+          lastEventAt: 0,
+          summary: "done",
+        },
+      ],
+    };
     const host = createHost({ mountedOnBoot: true, world });
     const { windowStub } = mount(host);
     await settle();
@@ -602,7 +826,9 @@ describe("resume signals", () => {
     windowStub.dispatch("online");
     await settle();
 
-    expect(host.calls.filter((c) => c.name === "list_tasks").length).toBeGreaterThan(readsAfterBoot);
+    expect(host.calls.filter((c) => c.name === "list_tasks").length).toBeGreaterThan(
+      readsAfterBoot,
+    );
   });
 });
 
@@ -618,8 +844,24 @@ describe("concurrent refreshes: only the newest read may write", () => {
    */
   it("keeps the newer snapshot when a superseded refresh's response lands last", async () => {
     const generation: Record<number, Task> = {
-      1: { taskId: TASK_ID, jobId: TASK_ID, sessionKey: SESSION_KEY, agent: "assistant", status: "running", lastEventAt: 1_000, summary: "older read" },
-      2: { taskId: TASK_ID, jobId: TASK_ID, sessionKey: SESSION_KEY, agent: "assistant", status: "completed", lastEventAt: 2_000, summary: "newer read" },
+      1: {
+        taskId: TASK_ID,
+        jobId: TASK_ID,
+        sessionKey: SESSION_KEY,
+        agent: "assistant",
+        status: "running",
+        lastEventAt: 1_000,
+        summary: "older read",
+      },
+      2: {
+        taskId: TASK_ID,
+        jobId: TASK_ID,
+        sessionKey: SESSION_KEY,
+        agent: "assistant",
+        status: "completed",
+        lastEventAt: 2_000,
+        summary: "newer read",
+      },
     };
     const host = createHost({ mountedOnBoot: true, world: { tasks: [generation[1]] } });
 
@@ -638,8 +880,12 @@ describe("concurrent refreshes: only the newest read may write", () => {
           release.push(() => resolve({ structuredContent: { tasks: [generation[nth]] } }));
         });
       }
-      if (name === "get_task") return Promise.resolve({ structuredContent: { ...generation[answering], updates: [], logCursor: 0 } });
-      if (name === "get_session") return Promise.resolve({ structuredContent: { tasks: [generation[answering]] } });
+      if (name === "get_task")
+        return Promise.resolve({
+          structuredContent: { ...generation[answering], updates: [], logCursor: 0 },
+        });
+      if (name === "get_session")
+        return Promise.resolve({ structuredContent: { tasks: [generation[answering]] } });
       return Promise.resolve({});
     };
 
@@ -677,7 +923,10 @@ describe("concurrent refreshes: only the newest read may write", () => {
       lastEventAt,
       summary,
     });
-    const generation: Record<number, Task> = { 1: running("older read", 1_000), 2: running("newer read", 2_000) };
+    const generation: Record<number, Task> = {
+      1: running("older read", 1_000),
+      2: running("newer read", 2_000),
+    };
     const host = createHost({ mountedOnBoot: true, world: { tasks: [generation[1]] } });
 
     const release: (() => void)[] = [];
@@ -687,11 +936,17 @@ describe("concurrent refreshes: only the newest read may write", () => {
       if (name === "list_tasks") {
         const nth = release.length + 1;
         return new Promise<Json>((resolve) => {
-          release.push(() => resolve({ structuredContent: { tasks: [generation[Math.min(nth, 2)]] } }));
+          release.push(() =>
+            resolve({ structuredContent: { tasks: [generation[Math.min(nth, 2)]] } }),
+          );
         });
       }
-      if (name === "get_task") return Promise.resolve({ structuredContent: { ...generation[answering], updates: [], logCursor: 0 } });
-      if (name === "get_session") return Promise.resolve({ structuredContent: { tasks: [generation[answering]] } });
+      if (name === "get_task")
+        return Promise.resolve({
+          structuredContent: { ...generation[answering], updates: [], logCursor: 0 },
+        });
+      if (name === "get_session")
+        return Promise.resolve({ structuredContent: { tasks: [generation[answering]] } });
       return Promise.resolve({});
     };
 
@@ -732,7 +987,14 @@ describe("a delegated run shows the ids someone can actually act on", () => {
   const CODING_SESSION = "coding-session-9f2b1c4d";
 
   function delegatedHost(overrides: Json = {}) {
-    const base: Task = { taskId: TASK_ID, jobId: TASK_ID, sessionKey: SESSION_KEY, agent: "assistant", status: "running", lastEventAt: 0 };
+    const base: Task = {
+      taskId: TASK_ID,
+      jobId: TASK_ID,
+      sessionKey: SESSION_KEY,
+      agent: "assistant",
+      status: "running",
+      lastEventAt: 0,
+    };
     const host = createHost({ mountedOnBoot: true, world: { tasks: [base] } });
     const inner = host.callTool;
     host.callTool = (name: string, args: Json): Promise<Json> => {
@@ -809,7 +1071,8 @@ describe("a delegated run shows the ids someone can actually act on", () => {
   it("carries the ids into a real failure too, so the error names something checkable", async () => {
     const host = delegatedHost({
       status: "failed",
-      error: "Stopped watching after 90m: upstream run openclaw-run-77 was last reported executing 4m ago",
+      error:
+        "Stopped watching after 90m: upstream run openclaw-run-77 was last reported executing 4m ago",
     });
     const { root } = mount(host);
     await settle();
@@ -822,7 +1085,18 @@ describe("a delegated run shows the ids someone can actually act on", () => {
 
 describe("the card asks for the payload it actually renders", () => {
   it("requests a diagnostics-bearing preset — it renders a Diagnostics tab, so it must not ask for one that strips the failure", async () => {
-    const world = { tasks: [{ taskId: TASK_ID, jobId: TASK_ID, sessionKey: SESSION_KEY, agent: "assistant", status: "running", lastEventAt: 0 }] };
+    const world = {
+      tasks: [
+        {
+          taskId: TASK_ID,
+          jobId: TASK_ID,
+          sessionKey: SESSION_KEY,
+          agent: "assistant",
+          status: "running",
+          lastEventAt: 0,
+        },
+      ],
+    };
     const host = createHost({ mountedOnBoot: true, world });
     mount(host);
     await settle();
@@ -836,7 +1110,14 @@ describe("the card asks for the payload it actually renders", () => {
   });
 
   it("surfaces the recovery guidance through get_task's real nested shape, not just a flat fixture", async () => {
-    const base: Task = { taskId: TASK_ID, jobId: TASK_ID, sessionKey: SESSION_KEY, agent: "assistant", status: "failed", lastEventAt: 0 };
+    const base: Task = {
+      taskId: TASK_ID,
+      jobId: TASK_ID,
+      sessionKey: SESSION_KEY,
+      agent: "assistant",
+      status: "failed",
+      lastEventAt: 0,
+    };
     const host = createHost({ mountedOnBoot: true, world: { tasks: [base] } });
     const inner = host.callTool;
     host.callTool = (name: string, args: Json): Promise<Json> => {
@@ -849,11 +1130,13 @@ describe("the card asks for the payload it actually renders", () => {
             updates: [],
             logCursor: 0,
             diagnostics: {
-              error: "Stopped watching after 90m: upstream run openclaw-run-77 was last reported executing 4m ago",
+              error:
+                "Stopped watching after 90m: upstream run openclaw-run-77 was last reported executing 4m ago",
               errorInfo: {
                 category: "timeout",
                 message: "late recovery hit the hard cap",
-                suggestedRecovery: "Do not re-submit on this session while the run is executing — a second send aborts it.",
+                suggestedRecovery:
+                  "Do not re-submit on this session while the run is executing — a second send aborts it.",
               },
             },
           },

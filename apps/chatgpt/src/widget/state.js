@@ -76,7 +76,8 @@ export function groupStatus(status) {
   // TaskSummary uses `done`, while a mounted get_task snapshot preserves the
   // backend JobStatus (`completed` / `completed_no_summary`). Both are
   // successful terminal states and must never fall through to failed.
-  if (status === "done" || status === "completed" || status === "completed_no_summary") return "completed";
+  if (status === "done" || status === "completed" || status === "completed_no_summary")
+    return "completed";
   return "failed";
 }
 
@@ -226,7 +227,10 @@ export function buildSessionRows(tasks, opts = {}) {
 /** @param {SessionRow[]} rows @param {"active" | "recent"} view @param {string} [pinnedSessionKey] @returns {SessionRow[]} */
 export function filterRows(rows, view, pinnedSessionKey) {
   if (view === "recent") return rows;
-  return rows.filter((r) => r.group === "active" || r.group === "needs_attention" || r.sessionKey === pinnedSessionKey);
+  return rows.filter(
+    (r) =>
+      r.group === "active" || r.group === "needs_attention" || r.sessionKey === pinnedSessionKey,
+  );
 }
 
 /**
@@ -271,7 +275,12 @@ export function mergePinnedDetail(tasks, pinnedDetail) {
 export function isTaskSnapshot(snapshot) {
   if (!snapshot) return false;
   const id = snapshot.taskId ?? snapshot.jobId;
-  return typeof id === "string" && id.length > 0 && typeof snapshot.sessionKey === "string" && snapshot.sessionKey.length > 0;
+  return (
+    typeof id === "string" &&
+    id.length > 0 &&
+    typeof snapshot.sessionKey === "string" &&
+    snapshot.sessionKey.length > 0
+  );
 }
 
 /**
@@ -303,7 +312,11 @@ export function expandSessionRow(row, historyTasks) {
   return {
     ...row,
     expanded: true,
-    history: historyTasks.map((t) => ({ ...t, group: groupStatus(t.status), title: deriveTitle(t) })),
+    history: historyTasks.map((t) => ({
+      ...t,
+      group: groupStatus(t.status),
+      title: deriveTitle(t),
+    })),
   };
 }
 
@@ -345,7 +358,8 @@ export function deriveCardTabs(task) {
   // task whose message never landed, and core sets .error to a session-busy
   // string for status="blocked" — so status is the reliable signal and the
   // error fields are the fallback for anything it does not cover.
-  const problem = task?.status === "failed" || task?.status === "blocked" || task?.status === "needs-human";
+  const problem =
+    task?.status === "failed" || task?.status === "blocked" || task?.status === "needs-human";
   // A delegated turn earns the tab even when nothing is wrong: the Fleet run
   // and coding-session ids live there, and they are exactly what an operator
   // needs while the work is still HEALTHY — to attach to it, or to tell it
@@ -427,7 +441,9 @@ function renderInlineMd(escaped) {
   });
   out = out.replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, (whole, label, url) => {
     const href = safeHref(url);
-    return href ? `<a href="${href}" target="_blank" rel="noopener noreferrer">${label}</a>` : whole;
+    return href
+      ? `<a href="${href}" target="_blank" rel="noopener noreferrer">${label}</a>`
+      : whole;
   });
   out = out.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
   out = out.replace(/(^|[^*\w])\*([^*\n]+)\*(?=[^*\w]|$)/g, "$1<em>$2</em>");
@@ -445,7 +461,14 @@ function renderTableRows(rows) {
   const head = cells(rows[0]);
   const bodyRows = rows.slice(isDivider(rows[1] ?? "") ? 2 : 1);
   const thead = `<thead><tr>${head.map((c) => `<th>${c}</th>`).join("")}</tr></thead>`;
-  const tbody = bodyRows.map((r) => `<tr>${cells(r).map((c) => `<td>${c}</td>`).join("")}</tr>`).join("");
+  const tbody = bodyRows
+    .map(
+      (r) =>
+        `<tr>${cells(r)
+          .map((c) => `<td>${c}</td>`)
+          .join("")}</tr>`,
+    )
+    .join("");
   return `<table>${thead}${tbody ? `<tbody>${tbody}</tbody>` : ""}</table>`;
 }
 
@@ -514,7 +537,9 @@ export function renderMarkdownHtml(text) {
       const ordered = Boolean(numbered);
       const items = [];
       while (i < lines.length) {
-        const m = ordered ? /^\s{0,3}\d{1,9}[.)]\s+(.*)$/.exec(lines[i]) : /^\s{0,3}[-*+]\s+(.*)$/.exec(lines[i]);
+        const m = ordered
+          ? /^\s{0,3}\d{1,9}[.)]\s+(.*)$/.exec(lines[i])
+          : /^\s{0,3}[-*+]\s+(.*)$/.exec(lines[i]);
         if (!m) break;
         items.push(`<li>${renderInlineMd(escapeHtml(m[1].trim()))}</li>`);
         i += 1;
@@ -628,7 +653,8 @@ export function resolveScope(knownSessionKeys, allActivity) {
  */
 export function resolveCompactSelection(mounted, visibleTasks, previousSessionKey) {
   const tasks = visibleTasks ?? [];
-  if (previousSessionKey && tasks.some((t) => t.sessionKey === previousSessionKey)) return previousSessionKey;
+  if (previousSessionKey && tasks.some((t) => t.sessionKey === previousSessionKey))
+    return previousSessionKey;
   if (mounted?.sessionKey) return mounted.sessionKey;
   let newest;
   for (const task of tasks) {
@@ -809,7 +835,11 @@ export function deriveConnectionNotice({
   const stream = streamEnded ? "interrupted" : "active";
   // The task's own state is never asserted here — it has its own pill.
   if (streamEnded) {
-    return { connector, stream, text: "The chat connection ended, but the task is still running — reconnecting to it." };
+    return {
+      connector,
+      stream,
+      text: "The chat connection ended, but the task is still running — reconnecting to it.",
+    };
   }
   if (connector === "reconnecting") {
     return { connector, stream, text: "Reconnecting to the task — it keeps running either way." };
@@ -839,9 +869,8 @@ export function deriveRunDuration(task, now) {
   if (typeof startedAt !== "number" || !Number.isFinite(startedAt) || startedAt <= 0) return null;
   const terminal = isTerminalGroup(groupStatus(task.status));
   if (!terminal) return `running ${formatElapsed(now - startedAt)}`;
-  const endedAt = typeof task.lastEventAt === "number" && task.lastEventAt > startedAt
-    ? task.lastEventAt
-    : now;
+  const endedAt =
+    typeof task.lastEventAt === "number" && task.lastEventAt > startedAt ? task.lastEventAt : now;
   return `ran ${formatElapsed(endedAt - startedAt)}`;
 }
 
@@ -929,7 +958,11 @@ export function deriveUpstreamEvidence(task, now) {
   const fresh = liveness != null && now - liveness.checkedAt <= LIVENESS_FRESH_MS;
   const recoveryReason = task?.recovery?.reason;
   return {
-    upstream: fresh ? (liveness.upstream === "active" ? "run executing" : "no positive signal") : null,
+    upstream: fresh
+      ? liveness.upstream === "active"
+        ? "run executing"
+        : "no positive signal"
+      : null,
     checkedAgo: fresh ? `${formatElapsed(now - liveness.checkedAt)} ago` : null,
     // The card says what is being DONE, not just that something is wrong —
     // a "recovering" state with no stated action reads as a stall.
@@ -959,7 +992,13 @@ export function deriveTimeline(logs, maxRows = 4) {
       last.ts = entry.ts;
       last.isError = last.isError || entry.isError === true;
     } else {
-      collapsed.push({ type: entry.type, text: entry.text, ts: entry.ts, count: 1, isError: entry.isError === true });
+      collapsed.push({
+        type: entry.type,
+        text: entry.text,
+        ts: entry.ts,
+        count: 1,
+        isError: entry.isError === true,
+      });
     }
   }
   return collapsed.slice(-maxRows).reverse();
@@ -1079,7 +1118,8 @@ export function collectFollowUpWakes({ tasks, priorGroups, alreadyWoken }) {
 export function nextCardTab(tabs, current, key) {
   const index = Math.max(0, tabs.indexOf(current));
   if (key === "ArrowRight" || key === "ArrowDown") return tabs[(index + 1) % tabs.length];
-  if (key === "ArrowLeft" || key === "ArrowUp") return tabs[(index - 1 + tabs.length) % tabs.length];
+  if (key === "ArrowLeft" || key === "ArrowUp")
+    return tabs[(index - 1 + tabs.length) % tabs.length];
   if (key === "Home") return tabs[0];
   if (key === "End") return tabs[tabs.length - 1];
   return current;

@@ -20,7 +20,8 @@ function asLiveStatus(v: unknown): AttachmentLiveStatus | undefined {
  * free-text context field and is stripped out before the message reaches the
  * agent, so the agent's prompt never sees raw directive JSON.
  */
-const DIRECTIVE_RE = /\[\[clawconnect:agent-session\]\]([\s\S]*?)\[\[\/clawconnect:agent-session\]\]/;
+const DIRECTIVE_RE =
+  /\[\[clawconnect:agent-session\]\]([\s\S]*?)\[\[\/clawconnect:agent-session\]\]/;
 
 /**
  * The runtime-neutral marker every managed-session runtime already prints
@@ -140,7 +141,9 @@ function validateDirective(value: unknown): AgentSessionDirective | undefined {
  * validation; in every undefined case the caller should treat `text` as
  * carrying no directive and use it unmodified.
  */
-export function parseAgentSessionDirective(text: string | undefined): ParsedAgentSessionDirective | undefined {
+export function parseAgentSessionDirective(
+  text: string | undefined,
+): ParsedAgentSessionDirective | undefined {
   if (!text) return undefined;
   const match = DIRECTIVE_RE.exec(text);
   if (!match) return undefined;
@@ -174,7 +177,9 @@ export function parseAgentSessionDirective(text: string | undefined): ParsedAgen
  * optional. `state` rides in as the initial status; anything outside the
  * neutral vocabulary is dropped rather than stored.
  */
-export function parseAgentSessionMarker(text: string | undefined): ParsedAgentSessionDirective | undefined {
+export function parseAgentSessionMarker(
+  text: string | undefined,
+): ParsedAgentSessionDirective | undefined {
   if (!text) return undefined;
   const match = MARKER_RE.exec(text);
   if (!match) return undefined;

@@ -1,4 +1,9 @@
-import { agentBlurb, agentDescriptor, type AgentEntry, type AgentRegistry } from "./agent-registry.ts";
+import {
+  agentBlurb,
+  agentDescriptor,
+  type AgentEntry,
+  type AgentRegistry,
+} from "./agent-registry.ts";
 import { SERVER_VERSION, buildSha, toolsetVersion } from "./build-info.ts";
 import type { GatewayPool } from "./gateway-pool.ts";
 import { getMemory, listCollections, searchMemory } from "./memory.ts";
@@ -141,7 +146,11 @@ const ACTIVE_STATUSES: ReadonlySet<TaskSummary["status"]> = new Set([
 const READ_ONLY = "READ ONLY: never starts, changes, or cancels any work.";
 
 function jsonResult(payload: unknown, isError?: boolean): CapabilityResult {
-  return { structuredContent: payload, text: JSON.stringify(payload), ...(isError ? { isError: true } : {}) };
+  return {
+    structuredContent: payload,
+    text: JSON.stringify(payload),
+    ...(isError ? { isError: true } : {}),
+  };
 }
 
 function errorResult(message: string): CapabilityResult {
@@ -211,7 +220,10 @@ const TASK_SUMMARY_SCHEMA: Record<string, unknown> = {
     jobId: { type: "string" },
     sessionKey: { type: "string" },
     agent: { type: "string" },
-    status: { type: "string", enum: ["queued", "running", "done", "failed", "blocked", "needs-human", "cancelled"] },
+    status: {
+      type: "string",
+      enum: ["queued", "running", "done", "failed", "blocked", "needs-human", "cancelled"],
+    },
     startedAt: { type: "number" },
     lastEventAt: { type: "number" },
     summary: { type: "string" },
@@ -230,7 +242,9 @@ export function buildCapabilities(ctx: CapabilityContext): Capability[] {
     scope.allowedIds.map((id) => agentsById.get(id)).filter((a): a is AgentEntry => Boolean(a));
 
   const blurbs = scope.allowedIds
-    .map((id) => agentBlurb(agentsById.get(id) ?? { id, url: "", password: "", openclawAgentId: "" }))
+    .map((id) =>
+      agentBlurb(agentsById.get(id) ?? { id, url: "", password: "", openclawAgentId: "" }),
+    )
     .join("; ");
 
   const agentProp = {
@@ -248,7 +262,8 @@ export function buildCapabilities(ctx: CapabilityContext): Capability[] {
     errorResult(
       `Agent "${requested}" is not available on this connection. Allowed: ${scope.allowedIds.join(", ")}.`,
     );
-  const inScope = (agent: string | undefined): boolean => !agent || scope.allowedIds.includes(agent);
+  const inScope = (agent: string | undefined): boolean =>
+    !agent || scope.allowedIds.includes(agent);
 
   const senderNameProp = identity.user
     ? {
@@ -325,7 +340,17 @@ Pass a sessionKey from a previous task to continue the same thread.`,
             required: ["tool", "args"],
           },
         },
-        required: ["jobId", "taskId", "sessionKey", "status", "execution", "upstream", "transcript", "cancellation", "nextAction"],
+        required: [
+          "jobId",
+          "taskId",
+          "sessionKey",
+          "status",
+          "execution",
+          "upstream",
+          "transcript",
+          "cancellation",
+          "nextAction",
+        ],
       },
       annotations: {
         title: "Run Task",
@@ -377,8 +402,14 @@ The call is bounded and reconciled: it returns only after OpenClaw confirms the 
       inputSchema: {
         type: "object",
         properties: {
-          taskId: { type: "string", description: "Task identifier from run_task. Same value as jobId." },
-          sessionKey: { type: "string", description: "Alternative to taskId — cancels that session's latest task." },
+          taskId: {
+            type: "string",
+            description: "Task identifier from run_task. Same value as jobId.",
+          },
+          sessionKey: {
+            type: "string",
+            description: "Alternative to taskId — cancels that session's latest task.",
+          },
         },
       },
       outputSchema: {
@@ -408,7 +439,8 @@ The call is bounded and reconciled: it returns only after OpenClaw confirms the 
       handler: async (args) => {
         const taskId = str(args.taskId);
         const sessionKey = str(args.sessionKey);
-        if (!taskId && !sessionKey) return errorResult("Pass taskId (or sessionKey) to say which task to stop.");
+        if (!taskId && !sessionKey)
+          return errorResult("Pass taskId (or sessionKey) to say which task to stop.");
         const result = await cancelTask(pool, { jobId: taskId, sessionKey });
         if (!result.found) {
           return {
@@ -458,7 +490,10 @@ completed_no_summary and error are terminal — report them. Rarely, a long tool
             description:
               "The sessionKey from run_task — resolves the session's latest job. Alternative to jobId, and how a status check reattaches after a refresh.",
           },
-          agent: { ...agentProp, description: "Usually inferred from jobId; set only if run_task ran elsewhere." },
+          agent: {
+            ...agentProp,
+            description: "Usually inferred from jobId; set only if run_task ran elsewhere.",
+          },
           knownLogCount: {
             type: "number",
             description:
@@ -472,7 +507,8 @@ completed_no_summary and error are terminal — report them. Rarely, a long tool
           },
           waitMs: {
             type: "number",
-            description: "Max time to block, in ms. Default 45000; clamped to [1000, 120000] rather than erroring.",
+            description:
+              "Max time to block, in ms. Default 45000; clamped to [1000, 120000] rather than erroring.",
           },
         },
       },
@@ -493,7 +529,8 @@ completed_no_summary and error are terminal — report them. Rarely, a long tool
       },
       handler: async (args, opts) => {
         const requestedAgent = str(args.agent);
-        if (requestedAgent && !scope.allowedIds.includes(requestedAgent)) return refuseAgent(requestedAgent);
+        if (requestedAgent && !scope.allowedIds.includes(requestedAgent))
+          return refuseAgent(requestedAgent);
         const result = await checkTask(pool, {
           jobId: str(args.jobId),
           sessionKey: str(args.sessionKey),
@@ -550,10 +587,23 @@ At detail levels that include it, \`updates\` is a bounded recent-activity windo
       inputSchema: {
         type: "object",
         properties: {
-          taskId: { type: "string", description: "Task identifier. Same value as jobId — either name resolves the same task." },
+          taskId: {
+            type: "string",
+            description:
+              "Task identifier. Same value as jobId — either name resolves the same task.",
+          },
           detail: {
             type: "string",
-            enum: ["core", "summary", "updates", "artifacts", "diagnostics", "prompt", "full", "fullWithDiagnostics"],
+            enum: [
+              "core",
+              "summary",
+              "updates",
+              "artifacts",
+              "diagnostics",
+              "prompt",
+              "full",
+              "fullWithDiagnostics",
+            ],
             description:
               "Detail preset; omit for summary. core=identifiers, status, and polling metadata only; summary=core+summary; updates=core+`updates` (recent activity) with logCursor/logEventCount; artifacts=core+artifacts; diagnostics=core+`diagnostics` (error, errorInfo, recovery, continuationState); prompt=the originally submitted task/context, which no other preset ever returns; full=core+summary+updates+artifacts; fullWithDiagnostics=full+diagnostics.",
           },
@@ -604,7 +654,11 @@ At detail levels that include it, \`updates\` is a bounded recent-activity windo
           return jsonResult({ taskId, prompt: promptResult.prompt });
         }
         const payload = buildGetTaskStructuredContent(result, detail);
-        return { structuredContent: payload, text: JSON.stringify(payload), ...(result.isError ? { isError: true } : {}) };
+        return {
+          structuredContent: payload,
+          text: JSON.stringify(payload),
+          ...(result.isError ? { isError: true } : {}),
+        };
       },
     },
 
@@ -639,7 +693,10 @@ At detail levels that include it, \`updates\` is a bounded recent-activity windo
       },
       handler: (args) => {
         const scoped = listTasks(pool).filter((t) => inScope(t.agent));
-        const filtered = str(args.view) === "active" ? scoped.filter((t) => ACTIVE_STATUSES.has(t.status)) : scoped;
+        const filtered =
+          str(args.view) === "active"
+            ? scoped.filter((t) => ACTIVE_STATUSES.has(t.status))
+            : scoped;
         return jsonResult({ tasks: filtered });
       },
     },
@@ -659,7 +716,10 @@ At detail levels that include it, \`updates\` is a bounded recent-activity windo
             description:
               '"snapshot" (default) = the session\'s current state, no events. "events" = one bounded slice from `after`. "tail" = the same slice plus a `nextAfter` cursor for paging FORWARD through the log (oldest-first, not last-N-lines); page again with after=nextAfter until fewer than `limit` events come back. "tasks" = every task ever run under this session, newest first, in list_tasks\' row shape (summaries are truncated previews there).',
           },
-          limit: { type: "number", description: "Max events per page for events/tail modes. Default 50, max 200." },
+          limit: {
+            type: "number",
+            description: "Max events per page for events/tail modes. Default 50, max 200.",
+          },
           after: {
             type: "number",
             description:
@@ -760,7 +820,8 @@ At detail levels that include it, \`updates\` is a bounded recent-activity windo
         idempotentHint: true,
         openWorldHint: false,
       },
-      handler: () => jsonResult({ default: scope.defaultId, agents: scopedAgents().map(agentDescriptor) }),
+      handler: () =>
+        jsonResult({ default: scope.defaultId, agents: scopedAgents().map(agentDescriptor) }),
     },
 
     {
@@ -779,7 +840,10 @@ At detail levels that include it, \`updates\` is a bounded recent-activity windo
             description:
               "Restrict to these collection names. Omit to search all collections the connection can reach. Use list_collections to discover them.",
           },
-          intent: { type: "string", description: "One-line description of why you're searching — telemetry only." },
+          intent: {
+            type: "string",
+            description: "One-line description of why you're searching — telemetry only.",
+          },
         },
         required: ["query"],
       },
@@ -819,7 +883,9 @@ At detail levels that include it, \`updates\` is a bounded recent-activity windo
           await searchMemory(scopedAgents(), {
             query: str(args.query) ?? "",
             limit: num(args.limit),
-            collections: Array.isArray(args.collections) ? (args.collections as string[]) : undefined,
+            collections: Array.isArray(args.collections)
+              ? (args.collections as string[])
+              : undefined,
             intent: str(args.intent),
           }),
         ),
@@ -832,7 +898,12 @@ At detail levels that include it, \`updates\` is a bounded recent-activity windo
       description: `${READ_ONLY} Fetches the full body of a memory document by its qmd:// path (returned in search_memory hits as 'file').`,
       inputSchema: {
         type: "object",
-        properties: { file: { type: "string", description: "qmd://collection/<id>.md path from a search_memory hit" } },
+        properties: {
+          file: {
+            type: "string",
+            description: "qmd://collection/<id>.md path from a search_memory hit",
+          },
+        },
         required: ["file"],
       },
       outputSchema: {

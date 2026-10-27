@@ -339,7 +339,10 @@ function sanitizeAttachmentState(raw: SessionAttachmentState): SessionAttachment
 export class SessionManager {
   private readonly logLimits = readJobLogLimits();
 
-  private pushLog(job: Job, entry: { ts: number; type: string; text: string; isError?: boolean }): void {
+  private pushLog(
+    job: Job,
+    entry: { ts: number; type: string; text: string; isError?: boolean },
+  ): void {
     appendJobLog(job, { ...entry, text: capLogText(entry.text) }, this.logLimits);
   }
 
@@ -347,18 +350,29 @@ export class SessionManager {
     if (!update.reason) return false;
     job.lastEventAt = Date.now();
     this.pushLog(job, {
-      ts: Date.now(), type: "recovery",
-      text: update.reason === "limit_exceeded"
-        ? `Transcript memory limit reached; bounded head recovery pending. ${update.skippedEvents ?? 0} known live records skipped so far; upstream execution continues.`
-        : `Transcript resumed at current head after memory limit: skipped ${update.skippedSequenceCount ?? 0} sequence positions and ${update.skippedEvents ?? 0} known live records (counts can overlap). Earlier events remain in the upstream transcript.`,
+      ts: Date.now(),
+      type: "recovery",
+      text:
+        update.reason === "limit_exceeded"
+          ? `Transcript memory limit reached; bounded head recovery pending. ${update.skippedEvents ?? 0} known live records skipped so far; upstream execution continues.`
+          : `Transcript resumed at current head after memory limit: skipped ${update.skippedSequenceCount ?? 0} sequence positions and ${update.skippedEvents ?? 0} known live records (counts can overlap). Earlier events remain in the upstream transcript.`,
     });
     return true;
   }
 
-  private readonly finishedJobLimit = this.retentionLimit("CLAWCONNECT_FINISHED_JOB_MAX_COUNT", 100);
-  private readonly finishedJobMaxAge = this.retentionLimit("CLAWCONNECT_FINISHED_JOB_MAX_AGE_MS", 86_400_000);
+  private readonly finishedJobLimit = this.retentionLimit(
+    "CLAWCONNECT_FINISHED_JOB_MAX_COUNT",
+    100,
+  );
+  private readonly finishedJobMaxAge = this.retentionLimit(
+    "CLAWCONNECT_FINISHED_JOB_MAX_AGE_MS",
+    86_400_000,
+  );
   private readonly attachmentLimit = this.retentionLimit("CLAWCONNECT_ATTACHMENT_MAX_COUNT", 1_000);
-  private readonly attachmentMaxAge = this.retentionLimit("CLAWCONNECT_ATTACHMENT_MAX_AGE_MS", 30 * 86_400_000);
+  private readonly attachmentMaxAge = this.retentionLimit(
+    "CLAWCONNECT_ATTACHMENT_MAX_AGE_MS",
+    30 * 86_400_000,
+  );
   private readonly finishedAt = new Map<string, number>();
   private readonly retentionTimer: ReturnType<typeof setInterval>;
   private jobs = new Map<string, Job>();
@@ -539,15 +553,27 @@ export class SessionManager {
     const touchedAt = (record: AgentSessionAttachment) => record.retentionUpdatedAt ?? now;
     const historical = (record: AgentSessionAttachment) =>
       record.status === "superseded" || record.status === "detached";
-    const stale = records.filter(({ state, id, record }) => {
-      const job = record.delegatedTurnId ? this.jobs.get(record.delegatedTurnId) : undefined;
-      return job?.status !== "running" &&
-        !(state.currentAttachmentId === id && this.getLatestJobWithoutSweep(state.sessionKey)?.status === "running");
-    }).sort((a, b) => Number(historical(b.record)) - Number(historical(a.record)) || touchedAt(a.record) - touchedAt(b.record));
+    const stale = records
+      .filter(({ state, id, record }) => {
+        const job = record.delegatedTurnId ? this.jobs.get(record.delegatedTurnId) : undefined;
+        return (
+          job?.status !== "running" &&
+          !(
+            state.currentAttachmentId === id &&
+            this.getLatestJobWithoutSweep(state.sessionKey)?.status === "running"
+          )
+        );
+      })
+      .sort(
+        (a, b) =>
+          Number(historical(b.record)) - Number(historical(a.record)) ||
+          touchedAt(a.record) - touchedAt(b.record),
+      );
     let count = records.length;
     let changed = false;
     for (const { state, id, record } of stale) {
-      if (count <= this.attachmentLimit && now - touchedAt(record) < this.attachmentMaxAge) continue;
+      if (count <= this.attachmentLimit && now - touchedAt(record) < this.attachmentMaxAge)
+        continue;
       delete state.attachments[id];
       if (state.currentAttachmentId === id) state.currentAttachmentId = undefined;
       count--;
@@ -740,7 +766,10 @@ export class SessionManager {
       upstreamRunIds: this.upstreamRunIds.size,
       reconcilers: this.reconcilers.size,
       attachmentSessions: this.attachments.size,
-      attachments: [...this.attachments.values()].reduce((n, state) => n + Object.keys(state.attachments).length, 0),
+      attachments: [...this.attachments.values()].reduce(
+        (n, state) => n + Object.keys(state.attachments).length,
+        0,
+      ),
       logEntries,
       logTextChars,
       ...(oldestJobStartedAt === undefined ? {} : { oldestJobStartedAt }),
@@ -1090,7 +1119,13 @@ export class SessionManager {
       ? state.attachments?.[state.currentAttachmentId]
       : undefined;
     if (!state || !current) return undefined;
-    const detached: AgentSessionAttachment = { ...current, status: "detached", reason, lastObservedAt: Date.now(), retentionUpdatedAt: Date.now() };
+    const detached: AgentSessionAttachment = {
+      ...current,
+      status: "detached",
+      reason,
+      lastObservedAt: Date.now(),
+      retentionUpdatedAt: Date.now(),
+    };
     this.attachments.set(sessionKey, {
       sessionKey,
       currentAttachmentId: undefined,
@@ -1111,7 +1146,11 @@ export class SessionManager {
     const state = this.attachments.get(sessionKey);
     const current = state?.attachments?.[attachmentId];
     if (!state || !current) return;
-    const updated: AgentSessionAttachment = { ...current, ...patch, retentionUpdatedAt: Date.now() };
+    const updated: AgentSessionAttachment = {
+      ...current,
+      ...patch,
+      retentionUpdatedAt: Date.now(),
+    };
     this.attachments.set(sessionKey, {
       ...state,
       attachments: { ...(state.attachments ?? {}), [attachmentId]: updated },
@@ -1618,15 +1657,17 @@ export class SessionManager {
           }
           if (job.lastSeenSequence !== previousSequence) this.persistActiveJobs();
           if (this.recordTranscriptLimit(job, update)) return;
-          if (previousTranscript === update.transcript && previousUpstream === update.upstream) return;
+          if (previousTranscript === update.transcript && previousUpstream === update.upstream)
+            return;
           job.lastEventAt = Date.now();
           if (update.transcript === "detached") {
             this.pushLog(job, {
               ts: Date.now(),
               type: "recovery",
-              text: update.upstream === "unavailable"
-                ? "Upstream transcript transport is unavailable; execution state remains independent while reconciliation continues."
-                : "Transcript transport detached; reconnecting without starting a duplicate task.",
+              text:
+                update.upstream === "unavailable"
+                  ? "Upstream transcript transport is unavailable; execution state remains independent while reconciliation continues."
+                  : "Transcript transport detached; reconnecting without starting a duplicate task.",
             });
           } else if (update.transcript === "replaying") {
             this.pushLog(job, {
@@ -1820,7 +1861,11 @@ export class SessionManager {
     if (!operation) {
       this.cancelRequested.add(job.jobId);
       job.cancellationState = "requested";
-      this.pushLog(job, { ts: Date.now(), type: "lifecycle", text: "Stop requested by the caller." });
+      this.pushLog(job, {
+        ts: Date.now(),
+        type: "lifecycle",
+        text: "Stop requested by the caller.",
+      });
       job.lastEventAt = Date.now();
       operation = this.gateway
         .abort(job.sessionKey, job.parentRunId)
@@ -2613,8 +2658,7 @@ export class SessionManager {
         lastJobId: jobId,
         lastSummary: message.slice(0, 500),
         artifacts,
-        recommendedNextStep:
-          "Inspect upstream before reusing this session, or start a new thread.",
+        recommendedNextStep: "Inspect upstream before reusing this session, or start a new thread.",
       });
       this.persistActiveJobs();
       return;
@@ -2897,9 +2941,7 @@ export class SessionManager {
       upstream: job.upstreamState,
       transcript: job.transcriptState,
       cancellation: job.cancellationState,
-      ...(job.lastSeenSequence !== undefined
-        ? { lastSeenSequence: job.lastSeenSequence }
-        : {}),
+      ...(job.lastSeenSequence !== undefined ? { lastSeenSequence: job.lastSeenSequence } : {}),
       startedAt: job.startedAt,
       lastEventAt: job.lastEventAt,
       lastPollAt: Date.now(),

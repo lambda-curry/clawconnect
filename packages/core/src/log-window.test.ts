@@ -15,14 +15,24 @@ function controllableGateway() {
   let onEventCb: ((e: GatewayEvent) => void) | undefined;
   let resolveChat: ((v: string) => void) | undefined;
   const gateway = {
-    chat(_sessionKey: string, _message: string, _timeoutMs: number, onEvent?: (e: GatewayEvent) => void) {
+    chat(
+      _sessionKey: string,
+      _message: string,
+      _timeoutMs: number,
+      onEvent?: (e: GatewayEvent) => void,
+    ) {
       onEventCb = onEvent;
       return new Promise<string>((resolve) => {
         resolveChat = resolve;
       });
     },
     close() {},
-    reconcileRun: async () => ({ ok: true, changed: true, trailingText: "", snapshotKey: "active" }),
+    reconcileRun: async () => ({
+      ok: true,
+      changed: true,
+      trailingText: "",
+      snapshotKey: "active",
+    }),
   } as unknown as OpenClawGateway;
   return {
     gateway,
@@ -34,7 +44,10 @@ function controllableGateway() {
   };
 }
 
-const lifecycleEvent = (i: number): GatewayEvent => ({ type: "lifecycle", text: `working on step ${i}` });
+const lifecycleEvent = (i: number): GatewayEvent => ({
+  type: "lifecycle",
+  text: `working on step ${i}`,
+});
 
 describe("check_task/get_task log window — long tasks stay bounded, cursor is stable across polls", () => {
   it("initial read (no cursor) on a long-running job returns at most INITIAL_WINDOW_MAX events, not the full history", () => {
@@ -146,7 +159,10 @@ describe("check_task/get_task log window — long tasks stay bounded, cursor is 
   it("does not include the original prompt or the full log history in a running snapshot at any cursor value", () => {
     const ctrl = controllableGateway();
     const sessions = new SessionManager(ctrl.gateway);
-    const job = sessions.submitTask({ task: "a secret task description", sessionKey: "fixed-session-2" });
+    const job = sessions.submitTask({
+      task: "a secret task description",
+      sessionKey: "fixed-session-2",
+    });
     ctrl.emitMany(60, lifecycleEvent);
 
     for (const cursor of [undefined, 0, 10, 59]) {

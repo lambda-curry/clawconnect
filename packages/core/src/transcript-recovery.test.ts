@@ -16,7 +16,14 @@ type RequestFrame = { id?: string; method?: string; params?: Record<string, unkn
 function toolMessage(sequence: number, name: string) {
   return {
     role: "assistant",
-    content: [{ type: "toolCall", id: `call-${sequence}`, name, arguments: { command: `step ${sequence}` } }],
+    content: [
+      {
+        type: "toolCall",
+        id: `call-${sequence}`,
+        name,
+        arguments: { command: `step ${sequence}` },
+      },
+    ],
     __openclaw: { id: `message-${sequence}`, seq: sequence },
   };
 }
@@ -24,7 +31,9 @@ function toolMessage(sequence: number, name: string) {
 function legacyToolMessage(name: string) {
   return {
     role: "assistant",
-    content: [{ type: "toolCall", id: `legacy-${name}`, name, arguments: { command: "legacy step" } }],
+    content: [
+      { type: "toolCall", id: `legacy-${name}`, name, arguments: { command: "legacy step" } },
+    ],
   };
 }
 
@@ -98,7 +107,9 @@ describe("OpenClawGateway resumable transcript", () => {
     wss.on("connection", (socket) => {
       connectionNumber += 1;
       const thisConnection = connectionNumber;
-      socket.send(JSON.stringify({ type: "event", event: "connect.challenge", payload: { nonce: "test" } }));
+      socket.send(
+        JSON.stringify({ type: "event", event: "connect.challenge", payload: { nonce: "test" } }),
+      );
       socket.on("message", (raw: Buffer) => {
         const frame = JSON.parse(raw.toString()) as RequestFrame;
         if (frame.method === "connect") {
@@ -127,11 +138,7 @@ describe("OpenClawGateway resumable transcript", () => {
           history.push(toolMessage(1, "Read"));
           socket.send(sessionMessage(1, "Read"));
           setTimeout(() => {
-            history.push(
-              toolMessage(2, "Bash"),
-              toolMessage(3, "Edit"),
-              legacyToolMessage("Grep"),
-            );
+            history.push(toolMessage(2, "Bash"), toolMessage(3, "Edit"), legacyToolMessage("Grep"));
             socket.terminate();
           }, 20);
         }
@@ -166,9 +173,17 @@ describe("OpenClawGateway resumable transcript", () => {
       "Write",
     ]);
     expect(subscribeCount).toBe(2);
-    expect(states).toContainEqual(expect.objectContaining({ upstream: "reconnecting", transcript: "detached" }));
-    expect(states).toContainEqual(expect.objectContaining({ upstream: "reconnecting", transcript: "replaying" }));
-    expect(states.at(-1)).toMatchObject({ upstream: "connected", transcript: "live", lastSeenSequence: 4 });
+    expect(states).toContainEqual(
+      expect.objectContaining({ upstream: "reconnecting", transcript: "detached" }),
+    );
+    expect(states).toContainEqual(
+      expect.objectContaining({ upstream: "reconnecting", transcript: "replaying" }),
+    );
+    expect(states.at(-1)).toMatchObject({
+      upstream: "connected",
+      transcript: "live",
+      lastSeenSequence: 4,
+    });
   }, 20_000);
 
   it("retries a lost chat.send acknowledgement with the same idempotency key", async () => {
@@ -179,7 +194,9 @@ describe("OpenClawGateway resumable transcript", () => {
     wss.on("connection", (socket) => {
       connectionNumber += 1;
       const thisConnection = connectionNumber;
-      socket.send(JSON.stringify({ type: "event", event: "connect.challenge", payload: { nonce: "test" } }));
+      socket.send(
+        JSON.stringify({ type: "event", event: "connect.challenge", payload: { nonce: "test" } }),
+      );
       socket.on("message", (raw: Buffer) => {
         const frame = JSON.parse(raw.toString()) as RequestFrame;
         if (frame.method === "connect") {

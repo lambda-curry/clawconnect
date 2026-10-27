@@ -117,7 +117,11 @@ describe("JsonFileAttachmentStore", () => {
       sessionKey: "agent:main:main:thread:s2",
       currentAttachmentId: "att-2",
       attachments: {
-        "att-1": { ...sample.attachments["att-1"], status: "superseded", reason: "replaced for a fresh worktree" },
+        "att-1": {
+          ...sample.attachments["att-1"],
+          status: "superseded",
+          reason: "replaced for a fresh worktree",
+        },
         "att-2": {
           id: "att-2",
           runtime: "claude-fleet",

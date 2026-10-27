@@ -103,7 +103,10 @@ describe("transcriptMessageEvents", () => {
     expect(
       transcriptMessageEvents({
         role: "assistant",
-        content: [{ type: "text", text: "   " }, { type: "text", text: "" }],
+        content: [
+          { type: "text", text: "   " },
+          { type: "text", text: "" },
+        ],
       }),
     ).toEqual([]);
   });
@@ -149,7 +152,9 @@ describe("classifyUpstreamRun — liveness only, never a termination receipt", (
     // activeRunIds omits queued turns, hidden runs, and restart-redispatched
     // runs by design, so a run of ours can be live yet unnamed.
     expect(classifyUpstreamRun({ hasActiveRun: true, activeRunIds: [] }, RUN)).toBe("active");
-    expect(classifyUpstreamRun({ hasActiveRun: true, activeRunIds: ["someone-else"] }, RUN)).toBe("active");
+    expect(classifyUpstreamRun({ hasActiveRun: true, activeRunIds: ["someone-else"] }, RUN)).toBe(
+      "active",
+    );
   });
 
   it("NEVER reports terminal — absence of an active run is not proof a run ended", () => {
@@ -160,7 +165,9 @@ describe("classifyUpstreamRun — liveness only, never a termination receipt", (
     // terminal would release the busy guard and let a resubmit abort the
     // still-running job.
     expect(classifyUpstreamRun({ hasActiveRun: false, activeRunIds: [] }, RUN)).toBe("unknown");
-    expect(classifyUpstreamRun({ hasActiveRun: false, activeRunIds: ["other"] }, RUN)).toBe("unknown");
+    expect(classifyUpstreamRun({ hasActiveRun: false, activeRunIds: ["other"] }, RUN)).toBe(
+      "unknown",
+    );
   });
 
   it("is unknown when the field is absent, malformed, or sessionInfo is missing", () => {
@@ -172,7 +179,9 @@ describe("classifyUpstreamRun — liveness only, never a termination receipt", (
   });
 
   it("still reports active without a runId to correlate against", () => {
-    expect(classifyUpstreamRun({ hasActiveRun: true, activeRunIds: ["x"] }, undefined)).toBe("active");
+    expect(classifyUpstreamRun({ hasActiveRun: true, activeRunIds: ["x"] }, undefined)).toBe(
+      "active",
+    );
     expect(classifyUpstreamRun({ hasActiveRun: false }, undefined)).toBe("unknown");
   });
 });

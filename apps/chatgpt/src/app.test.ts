@@ -362,7 +362,10 @@ describe("MCP 2026-07-28 over the SDK v2 handler", () => {
       protocolEra: "modern",
       protocolVersion: "2026-07-28",
       retained: {
-        jobs: 0, jobRoutingIndex: 0, historyEntries: 0, attachments: 0,
+        jobs: 0,
+        jobRoutingIndex: 0,
+        historyEntries: 0,
+        attachments: 0,
         gateway: { pendingTranscriptWork: 0, pendingTranscriptBytes: 0 },
       },
     });
@@ -380,9 +383,14 @@ describe("MCP 2026-07-28 over the SDK v2 handler", () => {
     // a constant — the defect that let this tool contradict its own handshake.
     expect(legacyInfo.result.structuredContent).not.toHaveProperty("protocolVersion");
 
-    const declared = await rpc(url, "tools/call", { name: "get_connection_info", arguments: {} }, {
-      "MCP-Protocol-Version": "2025-06-18",
-    });
+    const declared = await rpc(
+      url,
+      "tools/call",
+      { name: "get_connection_info", arguments: {} },
+      {
+        "MCP-Protocol-Version": "2025-06-18",
+      },
+    );
     expect(declared.result.structuredContent).toMatchObject({
       protocolEra: "legacy",
       protocolVersion: "2025-06-18",

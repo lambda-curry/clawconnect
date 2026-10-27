@@ -41,15 +41,30 @@ async function startFakeGateway(onRequest: RequestHandler) {
   const wss = new WebSocketServer({ port: 0, host: "127.0.0.1" });
   await once(wss, "listening");
   wss.on("connection", (socket) => {
-    socket.send(JSON.stringify({ type: "event", event: "connect.challenge", payload: { nonce: "test-nonce" } }));
+    socket.send(
+      JSON.stringify({
+        type: "event",
+        event: "connect.challenge",
+        payload: { nonce: "test-nonce" },
+      }),
+    );
     socket.on("message", (raw: Buffer) => {
       const frame = JSON.parse(raw.toString()) as RequestFrame;
       if (frame.method === "connect") {
-        socket.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: { protocol: 4 } }));
+        socket.send(
+          JSON.stringify({ type: "res", id: frame.id, ok: true, payload: { protocol: 4 } }),
+        );
         return;
       }
       if (frame.method === "chat.history") {
-        socket.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: { messages: [], hasMore: false } }));
+        socket.send(
+          JSON.stringify({
+            type: "res",
+            id: frame.id,
+            ok: true,
+            payload: { messages: [], hasMore: false },
+          }),
+        );
         return;
       }
       if (frame.method === "sessions.messages.subscribe") {

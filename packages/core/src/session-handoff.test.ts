@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vite-plus/test";
-import { parseAgentSessionMarker, parseAgentSessionDirective, parseSessionHandoff } from "./session-handoff.ts";
+import {
+  parseAgentSessionMarker,
+  parseAgentSessionDirective,
+  parseSessionHandoff,
+} from "./session-handoff.ts";
 import { SessionManager, buildSubmitMessage } from "./session.ts";
 import type { OpenClawGateway } from "./gateway.ts";
 
@@ -23,7 +27,14 @@ describe("parseAgentSessionDirective", () => {
     const after = "\n\nMore instructions.";
     const text =
       before +
-      block({ op: "attach", runtime: "example-runtime", handle: "cf-foo", host: "workstation-1", providerSessionId: "prov-1", worktree: "/w" }) +
+      block({
+        op: "attach",
+        runtime: "example-runtime",
+        handle: "cf-foo",
+        host: "workstation-1",
+        providerSessionId: "prov-1",
+        worktree: "/w",
+      }) +
       after;
     const result = parseAgentSessionDirective(text);
     expect(result).toBeDefined();
@@ -42,26 +53,48 @@ describe("parseAgentSessionDirective", () => {
 
   it("parses a replace directive requiring a reason", () => {
     const withReason = parseAgentSessionDirective(
-      block({ op: "replace", runtime: "example-runtime", handle: "cf-bar", host: "workstation-1", reason: "stale worktree" }),
+      block({
+        op: "replace",
+        runtime: "example-runtime",
+        handle: "cf-bar",
+        host: "workstation-1",
+        reason: "stale worktree",
+      }),
     );
-    expect(withReason?.directive).toMatchObject({ op: "replace", handle: "cf-bar", reason: "stale worktree" });
+    expect(withReason?.directive).toMatchObject({
+      op: "replace",
+      handle: "cf-bar",
+      reason: "stale worktree",
+    });
 
-    const withoutReason = parseAgentSessionDirective(block({ op: "replace", runtime: "example-runtime", handle: "cf-bar", host: "workstation-1" }));
+    const withoutReason = parseAgentSessionDirective(
+      block({ op: "replace", runtime: "example-runtime", handle: "cf-bar", host: "workstation-1" }),
+    );
     expect(withoutReason).toBeUndefined();
   });
 
   it("parses continue, detach (with reason), and inspect", () => {
-    expect(parseAgentSessionDirective(block({ op: "continue" }))?.directive).toEqual({ op: "continue" });
-    expect(parseAgentSessionDirective(block({ op: "detach", reason: "task finished" }))?.directive).toEqual({
+    expect(parseAgentSessionDirective(block({ op: "continue" }))?.directive).toEqual({
+      op: "continue",
+    });
+    expect(
+      parseAgentSessionDirective(block({ op: "detach", reason: "task finished" }))?.directive,
+    ).toEqual({
       op: "detach",
       reason: "task finished",
     });
     expect(parseAgentSessionDirective(block({ op: "detach" }))).toBeUndefined();
-    expect(parseAgentSessionDirective(block({ op: "inspect" }))?.directive).toEqual({ op: "inspect" });
+    expect(parseAgentSessionDirective(block({ op: "inspect" }))?.directive).toEqual({
+      op: "inspect",
+    });
   });
 
   it("rejects an unknown op", () => {
-    expect(parseAgentSessionDirective(block({ op: "delete-everything", handle: "cf-foo", host: "workstation-1" }))).toBeUndefined();
+    expect(
+      parseAgentSessionDirective(
+        block({ op: "delete-everything", handle: "cf-foo", host: "workstation-1" }),
+      ),
+    ).toBeUndefined();
   });
 
   it("rejects malformed JSON inside the block without throwing", () => {
@@ -72,25 +105,35 @@ describe("parseAgentSessionDirective", () => {
 
   it("rejects a handle that isn't a safe path segment (path traversal defense)", () => {
     for (const handle of ["../../etc/passwd", "/etc/passwd", "cf foo", "cf/foo", ""]) {
-      expect(parseAgentSessionDirective(block({ op: "attach", handle, host: "workstation-1" }))).toBeUndefined();
+      expect(
+        parseAgentSessionDirective(block({ op: "attach", handle, host: "workstation-1" })),
+      ).toBeUndefined();
     }
   });
 
   it("rejects attach/replace missing handle or host", () => {
-    expect(parseAgentSessionDirective(block({ op: "attach", host: "workstation-1" }))).toBeUndefined();
+    expect(
+      parseAgentSessionDirective(block({ op: "attach", host: "workstation-1" })),
+    ).toBeUndefined();
     expect(parseAgentSessionDirective(block({ op: "attach", handle: "cf-foo" }))).toBeUndefined();
   });
 
   it("parses an optional status the host reports directly, and drops an invalid one", () => {
-    expect(parseAgentSessionDirective(block({ op: "continue", status: "needs_input" }))?.directive).toEqual({
+    expect(
+      parseAgentSessionDirective(block({ op: "continue", status: "needs_input" }))?.directive,
+    ).toEqual({
       op: "continue",
       status: "needs_input",
     });
-    expect(parseAgentSessionDirective(block({ op: "continue", status: "superseded" }))?.directive).toEqual({
+    expect(
+      parseAgentSessionDirective(block({ op: "continue", status: "superseded" }))?.directive,
+    ).toEqual({
       op: "continue",
       status: undefined,
     });
-    expect(parseAgentSessionDirective(block({ op: "inspect", status: "failed" }))?.directive).toEqual({
+    expect(
+      parseAgentSessionDirective(block({ op: "inspect", status: "failed" }))?.directive,
+    ).toEqual({
       op: "inspect",
       status: "failed",
     });
@@ -98,7 +141,12 @@ describe("parseAgentSessionDirective", () => {
 
   it("only consumes the first directive block when two are present", () => {
     const text =
-      block({ op: "attach", runtime: "example-runtime", handle: "cf-first", host: "workstation-1" }) +
+      block({
+        op: "attach",
+        runtime: "example-runtime",
+        handle: "cf-first",
+        host: "workstation-1",
+      }) +
       " " +
       block({ op: "detach", reason: "second" });
     const result = parseAgentSessionDirective(text);
@@ -127,27 +175,42 @@ describe("parseAgentSessionDirective", () => {
   });
 
   it("rejects a malformed runtime id, and rejects an omitted one rather than defaulting it", () => {
-    expect(parseAgentSessionDirective(block({ op: "attach", runtime: "../evil", handle: "cf-foo", host: "workstation-1" }))).toBeUndefined();
+    expect(
+      parseAgentSessionDirective(
+        block({ op: "attach", runtime: "../evil", handle: "cf-foo", host: "workstation-1" }),
+      ),
+    ).toBeUndefined();
     // Until 2026-08-18 an omitted runtime was filled in at the session layer
     // with "claude-fleet". ClawConnect ships no runtime, so there is nothing
     // to fall back to, and inventing an id would have attached the session to
     // something nobody registered. The neutral marker always required this.
-    expect(parseAgentSessionDirective(block({ op: "attach", handle: "cf-foo", host: "workstation-1" }))).toBeUndefined();
+    expect(
+      parseAgentSessionDirective(block({ op: "attach", handle: "cf-foo", host: "workstation-1" })),
+    ).toBeUndefined();
   });
 
   it("parses a continue prompt and an explicit stopRuntime on detach", () => {
-    expect(parseAgentSessionDirective(block({ op: "continue", prompt: "also update the docs" }))?.directive).toMatchObject({
+    expect(
+      parseAgentSessionDirective(block({ op: "continue", prompt: "also update the docs" }))
+        ?.directive,
+    ).toMatchObject({
       op: "continue",
       prompt: "also update the docs",
     });
-    expect(parseAgentSessionDirective(block({ op: "detach", reason: "done", stopRuntime: true }))?.directive).toEqual({
+    expect(
+      parseAgentSessionDirective(block({ op: "detach", reason: "done", stopRuntime: true }))
+        ?.directive,
+    ).toEqual({
       op: "detach",
       reason: "done",
       stopRuntime: true,
     });
     // Ending someone else's agent session is not recoverable, so it is opt-in
     // only — anything short of a literal `true` leaves detach local.
-    expect(parseAgentSessionDirective(block({ op: "detach", reason: "done", stopRuntime: "yes" }))?.directive).toEqual({
+    expect(
+      parseAgentSessionDirective(block({ op: "detach", reason: "done", stopRuntime: "yes" }))
+        ?.directive,
+    ).toEqual({
       op: "detach",
       reason: "done",
     });
@@ -155,12 +218,18 @@ describe("parseAgentSessionDirective", () => {
 
   it("accepts the widened state vocabulary both runtimes need", () => {
     for (const status of ["needs_permission", "completed", "idle", "dead", "stale"]) {
-      expect(parseAgentSessionDirective(block({ op: "inspect", status }))?.directive).toEqual({ op: "inspect", status });
+      expect(parseAgentSessionDirective(block({ op: "inspect", status }))?.directive).toEqual({
+        op: "inspect",
+        status,
+      });
     }
     // "unavailable"/"unknown" describe a READ, not a session, and are never
     // stored as a status.
     for (const status of ["unavailable", "unknown"]) {
-      expect(parseAgentSessionDirective(block({ op: "inspect", status }))?.directive).toEqual({ op: "inspect", status: undefined });
+      expect(parseAgentSessionDirective(block({ op: "inspect", status }))?.directive).toEqual({
+        op: "inspect",
+        status: undefined,
+      });
     }
   });
 });
@@ -217,15 +286,25 @@ describe("parseAgentSessionMarker", () => {
   });
 
   it("allows an omitted host — a service runtime's session lives on a server, not a named machine", () => {
-    const result = parseAgentSessionMarker(marker({ runtime: "example-runtime", sessionId: "thr-abc123", state: "starting" }));
-    expect(result?.directive).toMatchObject({ op: "attach", runtime: "example-runtime", handle: "thr-abc123" });
+    const result = parseAgentSessionMarker(
+      marker({ runtime: "example-runtime", sessionId: "thr-abc123", state: "starting" }),
+    );
+    expect(result?.directive).toMatchObject({
+      op: "attach",
+      runtime: "example-runtime",
+      handle: "thr-abc123",
+    });
     expect((result!.directive as { host?: string }).host).toBeUndefined();
   });
 
   it("requires a runtime and a safe session id, and never throws on garbage", () => {
     expect(parseAgentSessionMarker(marker({ sessionId: "thr-abc123" }))).toBeUndefined();
     expect(parseAgentSessionMarker(marker({ runtime: "example-runtime" }))).toBeUndefined();
-    expect(parseAgentSessionMarker(marker({ runtime: "example-runtime", sessionId: "../../etc/passwd" }))).toBeUndefined();
+    expect(
+      parseAgentSessionMarker(
+        marker({ runtime: "example-runtime", sessionId: "../../etc/passwd" }),
+      ),
+    ).toBeUndefined();
     expect(parseAgentSessionMarker("<agent-session>{not json}</agent-session>")).toBeUndefined();
     expect(parseAgentSessionMarker("no marker here")).toBeUndefined();
     expect(parseAgentSessionMarker(undefined)).toBeUndefined();
@@ -247,7 +326,10 @@ describe("parseSessionHandoff", () => {
   });
 
   it("falls back to the marker when no directive block is present", () => {
-    expect(parseSessionHandoff(marker({ runtime: "example-runtime", sessionId: "thr-abc123" }))?.directive).toMatchObject({
+    expect(
+      parseSessionHandoff(marker({ runtime: "example-runtime", sessionId: "thr-abc123" }))
+        ?.directive,
+    ).toMatchObject({
       op: "attach",
       runtime: "example-runtime",
     });
@@ -268,11 +350,25 @@ describe("parseSessionHandoff", () => {
  */
 describe("a malformed handoff block is ignored as a directive AND still stripped", () => {
   const malformed: [string, string][] = [
-    ["unparseable JSON", "[[clawconnect:agent-session]]{ not valid json[[/clawconnect:agent-session]]"],
+    [
+      "unparseable JSON",
+      "[[clawconnect:agent-session]]{ not valid json[[/clawconnect:agent-session]]",
+    ],
     ["an unknown op", block({ op: "delete-everything", handle: "s-1", host: "workstation-1" })],
     ["an attach with no runtime", block({ op: "attach", handle: "s-1", host: "workstation-1" })],
-    ["an attach with an unsafe handle", block({ op: "attach", runtime: "example-runtime", handle: "../escape", host: "workstation-1" })],
-    ["a replace with no reason", block({ op: "replace", runtime: "example-runtime", handle: "s-1", host: "workstation-1" })],
+    [
+      "an attach with an unsafe handle",
+      block({
+        op: "attach",
+        runtime: "example-runtime",
+        handle: "../escape",
+        host: "workstation-1",
+      }),
+    ],
+    [
+      "a replace with no reason",
+      block({ op: "replace", runtime: "example-runtime", handle: "s-1", host: "workstation-1" }),
+    ],
     ["a malformed marker", "<agent-session>{ not valid json}</agent-session>"],
   ];
 

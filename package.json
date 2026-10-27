@@ -2,15 +2,15 @@
   "name": "clawconnect",
   "version": "0.0.0",
   "private": true,
-  "type": "module",
   "description": "MCP server and CLI for connecting AI coding agents to OpenClaw instances",
-  "author": "Jake Ruesink",
+  "homepage": "https://github.com/lambda-curry/clawconnect",
   "license": "MIT",
+  "author": "Jake Ruesink",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/lambda-curry/clawconnect.git"
   },
-  "homepage": "https://github.com/lambda-curry/clawconnect",
+  "type": "module",
   "scripts": {
     "ready": "vp run -r build",
     "dev:chatgpt": "vp run chatgpt#dev",

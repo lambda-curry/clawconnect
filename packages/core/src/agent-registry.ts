@@ -149,7 +149,9 @@ function parseEntry(raw: AgentEntryInput, index: number): AgentEntry {
     return trimmed.length > 0 ? trimmed : undefined;
   };
   const collections = Array.isArray(raw.collections)
-    ? raw.collections.filter((c): c is string => typeof c === "string" && c.trim().length > 0).map((c) => c.trim())
+    ? raw.collections
+        .filter((c): c is string => typeof c === "string" && c.trim().length > 0)
+        .map((c) => c.trim())
     : undefined;
   return {
     id,
@@ -183,7 +185,10 @@ export function loadAgentRegistry(): AgentRegistry {
       if (seen.has(a.id)) throw new Error(`agents.json: duplicate agent id "${a.id}"`);
       seen.add(a.id);
     }
-    const defaultId = typeof raw.default === "string" && raw.default.trim().length > 0 ? raw.default.trim() : agents[0]!.id;
+    const defaultId =
+      typeof raw.default === "string" && raw.default.trim().length > 0
+        ? raw.default.trim()
+        : agents[0]!.id;
     if (!agents.find((a) => a.id === defaultId)) {
       throw new Error(`agents.json: "default" = "${defaultId}" does not match any agent id`);
     }

@@ -33,10 +33,21 @@ export function buildCheckTaskStructuredContent(result: FoundCheckTaskResult) {
   return { ...result.snapshot, isTerminal: result.isTerminal, isError: result.isError };
 }
 
-export type TaskDetail = "core" | "summary" | "updates" | "artifacts" | "diagnostics" | "prompt" | "full" | "fullWithDiagnostics";
+export type TaskDetail =
+  | "core"
+  | "summary"
+  | "updates"
+  | "artifacts"
+  | "diagnostics"
+  | "prompt"
+  | "full"
+  | "fullWithDiagnostics";
 
 /** get_task's detail-preset-filtered structuredContent, shared so both transports' detail filtering stays in lockstep instead of two hand-maintained copies. */
-export function buildGetTaskStructuredContent(result: FoundCheckTaskResult, detail: TaskDetail | undefined) {
+export function buildGetTaskStructuredContent(
+  result: FoundCheckTaskResult,
+  detail: TaskDetail | undefined,
+) {
   const { snapshot, isTerminal, isError, continuePolling } = result;
   const d = detail ?? "summary";
   const has = (field: string) => d === field || d === "full" || d === "fullWithDiagnostics";

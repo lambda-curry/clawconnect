@@ -33,7 +33,9 @@ import { AgentSessionRuntimeRegistry } from "./agent-session.ts";
  */
 export const RUNTIME_MODULES_ENV = "CLAWCONNECT_AGENT_SESSION_RUNTIME_MODULES";
 
-export type AgentSessionRuntimeRegistrar = (registry: AgentSessionRuntimeRegistry) => void | Promise<void>;
+export type AgentSessionRuntimeRegistrar = (
+  registry: AgentSessionRuntimeRegistry,
+) => void | Promise<void>;
 
 function splitSpecifiers(spec: string): string[] {
   return spec
@@ -86,13 +88,17 @@ export async function loadAgentSessionRuntimes(
       }
       await register(registry);
     } catch (err) {
-      log(`[agent-session] failed to load runtime module "${specifier}": ${err instanceof Error ? err.message : String(err)}`);
+      log(
+        `[agent-session] failed to load runtime module "${specifier}": ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
   }
 
   const ids = registry.ids();
   if (ids.length === 0) {
-    log(`[agent-session] ${RUNTIME_MODULES_ENV} was set but no runtime registered — no runtime is reachable`);
+    log(
+      `[agent-session] ${RUNTIME_MODULES_ENV} was set but no runtime registered — no runtime is reachable`,
+    );
     return undefined;
   }
   log(`[agent-session] registered runtime(s): ${ids.join(", ")}`);

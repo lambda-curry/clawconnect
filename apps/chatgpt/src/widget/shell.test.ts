@@ -62,8 +62,8 @@ describe("Task Center visual regressions", () => {
     expect(shell).toContain('role: "tab"');
     expect(shell).toContain('"aria-selected": activeTab === tab');
     expect(shell).toContain('"aria-controls": `${tablistId}-panel`');
-    expect(shell).toContain('onkeydown: (e)');
-    expect(shell).toContain('nextCardTab(cardTabs, activeTab, e.key)');
+    expect(shell).toContain("onkeydown: (e)");
+    expect(shell).toContain("nextCardTab(cardTabs, activeTab, e.key)");
     // Per-task, not a global pair: renderRow runs once per card, so a shared
     // cardTab/cardTabFor let the last-rendered row reset every other row's
     // selection. Only reproducible with two cards open, which is why it shipped.
@@ -72,7 +72,9 @@ describe("Task Center visual regressions", () => {
     expect(shell).not.toContain("app.cardTabFor");
     // The tab strip leads the card, which is what makes its negative top margin
     // correct — it overlapped the meta line by exactly 12px when it sat third.
-    expect(shell).toContain("// Tabs lead the card, then the title row and meta line beneath them.");
+    expect(shell).toContain(
+      "// Tabs lead the card, then the title row and meta line beneath them.",
+    );
     expect(shell).toContain("margin: -12px -14px 10px");
     // One-line activity: a long tool invocation used to reflow the card height
     // on every poll.

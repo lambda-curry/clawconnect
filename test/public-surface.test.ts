@@ -69,8 +69,10 @@ const PUBLIC_DOCS = walk(REPO_ROOT, isMarkdown).filter((p) => {
 });
 
 /** Shipped source. Test files are excluded — this file names every banned term. */
-const SHIPPED_SOURCE = walk(join(REPO_ROOT, "packages"), (p) => /\.(ts|js)$/.test(p) && !p.includes(".test."))
-  .concat(walk(join(REPO_ROOT, "apps"), (p) => /\.(ts|js|html)$/.test(p) && !p.includes(".test.")));
+const SHIPPED_SOURCE = walk(
+  join(REPO_ROOT, "packages"),
+  (p) => /\.(ts|js)$/.test(p) && !p.includes(".test."),
+).concat(walk(join(REPO_ROOT, "apps"), (p) => /\.(ts|js|html)$/.test(p) && !p.includes(".test.")));
 
 describe("public surface stays host-neutral", () => {
   it("finds the files it is supposed to be checking", () => {
@@ -138,7 +140,8 @@ describe("public surface stays host-neutral", () => {
     for (const doc of PUBLIC_DOCS) {
       const text = readFileSync(doc, "utf8");
       for (const m of text.matchAll(/`((?:packages|apps)\/[\w./-]+\.(?:ts|js|html))`/g)) {
-        if (!existsSync(join(REPO_ROOT, m[1]!))) dangling.push(`${relative(REPO_ROOT, doc)} → ${m[1]}`);
+        if (!existsSync(join(REPO_ROOT, m[1]!)))
+          dangling.push(`${relative(REPO_ROOT, doc)} → ${m[1]}`);
       }
     }
     expect(dangling).toEqual([]);
@@ -153,9 +156,8 @@ describe("public surface stays host-neutral", () => {
     // loadAgentSessionRuntimes() that grep passed for the wrong reason. Assert
     // the actual invariant instead: with no module named, nothing is
     // registered, so a default install cannot reach any runtime.
-    const { loadAgentSessionRuntimes, RUNTIME_MODULES_ENV } = await import(
-      "../packages/core/src/runtime-modules.ts"
-    );
+    const { loadAgentSessionRuntimes, RUNTIME_MODULES_ENV } =
+      await import("../packages/core/src/runtime-modules.ts");
     await expect(loadAgentSessionRuntimes(undefined)).resolves.toBeUndefined();
     await expect(loadAgentSessionRuntimes("")).resolves.toBeUndefined();
 

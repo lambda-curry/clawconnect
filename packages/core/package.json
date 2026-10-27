@@ -2,15 +2,18 @@
   "name": "@clawconnect/core",
   "version": "0.0.0",
   "private": true,
-  "type": "module",
   "description": "Shared gateway, session management, and tool handlers for ClawConnect",
-  "author": "Jake Ruesink",
   "license": "MIT",
+  "author": "Jake Ruesink",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/lambda-curry/clawconnect.git",
     "directory": "packages/core"
   },
+  "files": [
+    "dist"
+  ],
+  "type": "module",
   "exports": {
     ".": "./dist/index.mjs",
     "./package.json": "./package.json"
@@ -20,9 +23,6 @@
       ".": "./dist/index.mjs"
     }
   },
-  "files": [
-    "dist"
-  ],
   "scripts": {
     "build": "vp pack",
     "dev": "vp pack --watch"

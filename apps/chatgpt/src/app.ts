@@ -82,7 +82,9 @@ export function checkTaskText(snapshot: JobSnapshot, isTerminal: boolean): strin
   const blocked = blockedDelegation(snapshot);
   const resume = `Poll again with knownLogCount=${snapshot.logCursor}.`;
   if (blocked) return `${blocked.notice} ${resume}`;
-  return snapshot.recovery ? `Recovering late transcript final text. ${resume}` : `Still running. ${resume}`;
+  return snapshot.recovery
+    ? `Recovering late transcript final text. ${resume}`
+    : `Still running. ${resume}`;
 }
 
 /**
@@ -412,7 +414,9 @@ export function createApp(registry: AgentRegistry, opts: CreateAppOptions = {}):
       return sessions.length === 0
         ? "No sessions known to this connector yet."
         : sessions
-            .map((s) => `${s.agent ?? "?"}: ${s.sessionKey.slice(-12)} (${s.lastJobId.slice(0, 8)})`)
+            .map(
+              (s) => `${s.agent ?? "?"}: ${s.sessionKey.slice(-12)} (${s.lastJobId.slice(0, 8)})`,
+            )
             .join("\n");
     },
   };
@@ -431,7 +435,9 @@ export function createApp(registry: AgentRegistry, opts: CreateAppOptions = {}):
   // ── The one server factory, serving both eras ─────────────────────────────
 
   function createHttpMcpServer(ctx: McpRequestContext): McpServer {
-    const requestUrl = ctx.requestInfo ? new URL(ctx.requestInfo.url) : new URL("http://localhost/mcp");
+    const requestUrl = ctx.requestInfo
+      ? new URL(ctx.requestInfo.url)
+      : new URL("http://localhost/mcp");
     const scope = resolveScope(requestUrl);
     const identity = (ctx.authInfo?.extra?.identity as Identity | undefined) ?? { user: null };
     const extensions = buildExtensionsCapability(WIDGET_ENABLED);
