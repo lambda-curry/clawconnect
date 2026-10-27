@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 import { SessionManager } from "./session.ts";
 import { INITIAL_WINDOW_MAX, DELTA_WINDOW_MAX } from "./log-projection.ts";
 import type { OpenClawGateway } from "./gateway.ts";

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vite-plus/test";
 import { SessionManager } from "./session.ts";
 import type { OpenClawGateway } from "./gateway.ts";
 

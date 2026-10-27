@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { expect, it } from "vitest";
+import { expect, it } from "vite-plus/test";
 
 it("releases input and output schemas after per-request servers are closed", () => {
   // A separate process gives this check real GC without changing the test runner.

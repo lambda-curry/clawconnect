@@ -1,7 +1,7 @@
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { AgentSessionRuntimeRegistry, isDelegateBlockedTerminalReason } from "./agent-session.ts";
 import type { JobStore, PersistedJob } from "./job-store.ts";
 import type { GatewayEvent, Job, JobSnapshot } from "./types.ts";

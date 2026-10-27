@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 import {
   LOG_ENTRY_TEXT_MAX,
   MESSAGE_TOOL_VETO_PREAMBLE,

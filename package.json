@@ -20,8 +20,7 @@
   "devDependencies": {
     "@modelcontextprotocol/sdk": "catalog:",
     "@typescript/native-preview": "catalog:",
-    "vite-plus": "catalog:",
-    "vitest": "catalog:"
+    "vite-plus": "catalog:"
   },
   "engines": {
     "node": ">=22.12.0"

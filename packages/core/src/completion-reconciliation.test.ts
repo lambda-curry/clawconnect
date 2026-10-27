@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { RECONCILE_QUIET_MS, SessionManager } from "./session.ts";
 import type { OpenClawGateway, RunObservation } from "./gateway.ts";
 import { NO_SUMMARY_SENTINEL, ParentObservationTimeoutError, type GatewayEvent } from "./types.ts";

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { GatewayPool } from "./gateway-pool.ts";
 import { runTask, checkTask, getTask } from "./tools.ts";
 import { setTelemetrySink } from "./telemetry.ts";

@@ -2,9 +2,7 @@ import { defineConfig } from "vite-plus";
 
 export default defineConfig({
   pack: {
-    dts: {
-      tsgo: false,
-    },
+    dts: {},
     // Name the binary explicitly. Left to auto-detect, `vp pack` derives the
     // command name from the package name without its scope (@clawconnect/mcp
     // -> "mcp") and rewrites package.json's `bin` field on every build, which

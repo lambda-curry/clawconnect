@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 import { parseAgentSessionMarker, parseAgentSessionDirective, parseSessionHandoff } from "./session-handoff.ts";
 import { SessionManager, buildSubmitMessage } from "./session.ts";
 import type { OpenClawGateway } from "./gateway.ts";

@@ -2,9 +2,7 @@ import { defineConfig } from "vite-plus";
 
 export default defineConfig({
   pack: {
-    dts: {
-      tsgo: false,
-    },
+    dts: {},
     exports: true,
   },
   lint: {

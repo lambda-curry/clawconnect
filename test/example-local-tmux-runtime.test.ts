@@ -59,7 +59,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 // @ts-expect-error — the example is deliberately plain JS with no .d.ts: an
 // operator points CLAWCONNECT_AGENT_SESSION_RUNTIME_MODULES straight at it.
 import { registerAgentSessionRuntimes } from "../examples/local-tmux-runtime/runtime.mjs";
