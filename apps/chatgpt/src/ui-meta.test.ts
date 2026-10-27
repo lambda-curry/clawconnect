@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 import {
   buildExtensionsCapability,
   buildMountMeta,
@@ -14,7 +14,9 @@ describe("missing UI metadata fallback — widget disabled means no _meta/capabi
   });
 
   it("buildExtensionsCapability advertises the exact mimeType when enabled", () => {
-    expect(buildExtensionsCapability(true)).toEqual({ [UI_EXTENSION_ID]: { mimeTypes: [UI_RESOURCE_MIME_TYPE] } });
+    expect(buildExtensionsCapability(true)).toEqual({
+      [UI_EXTENSION_ID]: { mimeTypes: [UI_RESOURCE_MIME_TYPE] },
+    });
   });
 
   it("buildMountMeta is an empty object when disabled — no resourceUri leaks", () => {
@@ -23,7 +25,10 @@ describe("missing UI metadata fallback — widget disabled means no _meta/capabi
 
   it("buildMountMeta carries both the modern and legacy resourceUri keys when enabled", () => {
     const meta = buildMountMeta(true, "ui://clawconnect/task-center-v3.html");
-    expect(meta.ui).toEqual({ resourceUri: "ui://clawconnect/task-center-v3.html", visibility: ["model", "app"] });
+    expect(meta.ui).toEqual({
+      resourceUri: "ui://clawconnect/task-center-v3.html",
+      visibility: ["model", "app"],
+    });
     expect(meta[UI_RESOURCE_URI_META_KEY]).toBe("ui://clawconnect/task-center-v3.html");
     expect(meta["openai/outputTemplate"]).toBe("ui://clawconnect/task-center-v3.html");
   });

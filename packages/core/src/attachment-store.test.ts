@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vite-plus/test";
 import { JsonFileAttachmentStore } from "./attachment-store.ts";
 import type { StoreDegradation } from "./store-health.ts";
 import type { SessionAttachmentState } from "./types.ts";
@@ -117,7 +117,11 @@ describe("JsonFileAttachmentStore", () => {
       sessionKey: "agent:main:main:thread:s2",
       currentAttachmentId: "att-2",
       attachments: {
-        "att-1": { ...sample.attachments["att-1"], status: "superseded", reason: "replaced for a fresh worktree" },
+        "att-1": {
+          ...sample.attachments["att-1"],
+          status: "superseded",
+          reason: "replaced for a fresh worktree",
+        },
         "att-2": {
           id: "att-2",
           runtime: "claude-fleet",

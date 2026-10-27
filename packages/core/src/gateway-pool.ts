@@ -34,7 +34,9 @@ interface PoolEntry {
  */
 export const SYNTHETIC_CLIENT_ADDRESS = "192.0.2.1";
 
-export function parseGatewayConnectHeaders(raw: string | undefined): Record<string, string> | undefined {
+export function parseGatewayConnectHeaders(
+  raw: string | undefined,
+): Record<string, string> | undefined {
   const trimmed = raw?.trim();
   if (!trimmed) return undefined;
   let parsed: Record<string, unknown>;
@@ -131,7 +133,10 @@ export class GatewayPool {
       ? new JsonFileJobStore(join(this.jobStoreDir, `${agent.id}.json`), onDegraded)
       : undefined;
     const attachmentStore = this.attachmentStoreDir
-      ? new JsonFileAttachmentStore(join(this.attachmentStoreDir, `${agent.id}.attachments.json`), onDegraded)
+      ? new JsonFileAttachmentStore(
+          join(this.attachmentStoreDir, `${agent.id}.attachments.json`),
+          onDegraded,
+        )
       : undefined;
     const sessions = new SessionManager(
       gateway,
@@ -194,25 +199,50 @@ export class GatewayPool {
     const entries = this.allEntries();
     const agents = entries.map((entry) => entry.sessions.retentionStats());
     const retained = {
-      jobs: 0, finishedJobs: 0, logEntries: 0, logTextChars: 0, logBytes: 0,
-      latestJobIndex: 0, sessionStates: 0, historySessions: 0, historyEntries: 0,
-      provisionalOutcomes: 0, recheckSettled: 0, cancelRequested: 0, cancelInFlight: 0,
-      upstreamRunIds: 0, reconcilers: 0, attachmentSessions: 0, attachments: 0,
+      jobs: 0,
+      finishedJobs: 0,
+      logEntries: 0,
+      logTextChars: 0,
+      logBytes: 0,
+      latestJobIndex: 0,
+      sessionStates: 0,
+      historySessions: 0,
+      historyEntries: 0,
+      provisionalOutcomes: 0,
+      recheckSettled: 0,
+      cancelRequested: 0,
+      cancelInFlight: 0,
+      upstreamRunIds: 0,
+      reconcilers: 0,
+      attachmentSessions: 0,
+      attachments: 0,
     };
     for (const stats of agents) {
-      for (const key of Object.keys(retained) as (keyof typeof retained)[]) retained[key] += stats[key];
+      for (const key of Object.keys(retained) as (keyof typeof retained)[])
+        retained[key] += stats[key];
     }
     const gateway = {
-      pendingTranscriptWork: 0, pendingTranscriptBytes: 0,
-      transcriptReplayMessages: 0, transcriptReplayBytes: 0, transcriptSeenIds: 0,
-      transcriptLimitFailures: 0, transcriptWatches: 0, pendingRpcs: 0, subscribers: 0,
-      transcriptPausedWatches: 0, transcriptSkippedEvents: 0, transcriptSkippedSequences: 0,
+      pendingTranscriptWork: 0,
+      pendingTranscriptBytes: 0,
+      transcriptReplayMessages: 0,
+      transcriptReplayBytes: 0,
+      transcriptSeenIds: 0,
+      transcriptLimitFailures: 0,
+      transcriptWatches: 0,
+      pendingRpcs: 0,
+      subscribers: 0,
+      transcriptPausedWatches: 0,
+      transcriptSkippedEvents: 0,
+      transcriptSkippedSequences: 0,
     };
     for (const entry of entries) {
       const stats = entry.gateway.diagnostics();
-      for (const key of Object.keys(gateway) as (keyof typeof gateway)[]) gateway[key] += stats[key];
+      for (const key of Object.keys(gateway) as (keyof typeof gateway)[])
+        gateway[key] += stats[key];
     }
-    const starts = agents.flatMap((stats) => stats.oldestJobStartedAt === undefined ? [] : [stats.oldestJobStartedAt]);
+    const starts = agents.flatMap((stats) =>
+      stats.oldestJobStartedAt === undefined ? [] : [stats.oldestJobStartedAt],
+    );
     return {
       ...retained,
       gateway,

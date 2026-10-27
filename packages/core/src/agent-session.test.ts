@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vite-plus/test";
 import {
   AgentSessionRuntimeRegistry,
   blockedDelegation,
@@ -60,36 +60,54 @@ describe("normalizing what a runtime reports", () => {
 
   it("populates finalResponse ONLY for a genuinely completed turn", () => {
     // A service runtime's terminal success, and claude-fleet's — both mean "the turn landed".
-    expect(normalize({ state: "completed", latestResponse: "the answer" }).finalResponse).toBe("the answer");
-    expect(normalize({ state: "idle", latestResponse: "the answer" }).finalResponse).toBe("the answer");
+    expect(normalize({ state: "completed", latestResponse: "the answer" }).finalResponse).toBe(
+      "the answer",
+    );
+    expect(normalize({ state: "idle", latestResponse: "the answer" }).finalResponse).toBe(
+      "the answer",
+    );
 
     // A partial answer from a session that is still working, or blocked on a
     // human, must never be mistakable for the turn's result — even when the
     // runtime itself volunteers finalResponse.
     for (const state of ["running", "needs_input", "needs_permission", "starting", "stale"]) {
-      const status = normalize({ state, latestResponse: "half a thought", finalResponse: "half a thought" });
+      const status = normalize({
+        state,
+        latestResponse: "half a thought",
+        finalResponse: "half a thought",
+      });
       expect(status.finalResponse, state).toBeUndefined();
       expect(status.latestResponse, state).toBe("half a thought");
     }
   });
 
   it("emits termination only for terminal states, deriving the reason when the runtime didn't say", () => {
-    expect(normalize({ state: "running", termination: { reason: "completed" } }).termination).toBeUndefined();
+    expect(
+      normalize({ state: "running", termination: { reason: "completed" } }).termination,
+    ).toBeUndefined();
     expect(normalize({ state: "completed" }).termination).toMatchObject({ reason: "completed" });
     expect(normalize({ state: "dead" }).termination).toMatchObject({ reason: "died" });
     expect(normalize({ state: "failed" }).termination).toMatchObject({ reason: "failed" });
     // A cancelled session is `dead` + reason "cancelled" — no separate state,
     // so every consumer that already branches on terminal keeps working.
-    expect(normalize({ state: "dead", termination: { reason: "cancelled", exitCode: 130 } }).termination).toMatchObject({
+    expect(
+      normalize({ state: "dead", termination: { reason: "cancelled", exitCode: 130 } }).termination,
+    ).toMatchObject({
       reason: "cancelled",
       exitCode: 130,
     });
     // An unrecognized reason falls back to the derived one rather than passing through.
-    expect(normalize({ state: "dead", termination: { reason: "vibes" } }).termination?.reason).toBe("died");
+    expect(normalize({ state: "dead", termination: { reason: "vibes" } }).termination?.reason).toBe(
+      "died",
+    );
   });
 
   it("accepts timestamps as epoch ms or ISO strings", () => {
-    const iso = normalize({ state: "running", startedAt: "2026-08-03T12:00:00.000Z", lastEventAt: "2026-08-03T12:05:00.000Z" });
+    const iso = normalize({
+      state: "running",
+      startedAt: "2026-08-03T12:00:00.000Z",
+      lastEventAt: "2026-08-03T12:05:00.000Z",
+    });
     expect(iso.startedAt).toBe(Date.parse("2026-08-03T12:00:00.000Z"));
     expect(iso.lastEventAt).toBe(Date.parse("2026-08-03T12:05:00.000Z"));
 
@@ -98,17 +116,33 @@ describe("normalizing what a runtime reports", () => {
 
     // Unparseable is dropped, never fabricated — session.ts's freshness bound
     // depends on a real timestamp meaning a real one.
-    expect(normalize({ state: "running", lastEventAt: "sometime tuesday" }).lastEventAt).toBeUndefined();
+    expect(
+      normalize({ state: "running", lastEventAt: "sometime tuesday" }).lastEventAt,
+    ).toBeUndefined();
   });
 
   it("merges strings-only metadata over the ref's, coercing finite scalars", () => {
-    const status = normalize({ state: "running", metadata: { turnId: "t-9", attempt: 2, isolated: true, junk: { a: 1 } } });
-    expect(status.metadata).toEqual({ runtimeProjectId: "proj-1", turnId: "t-9", attempt: "2", isolated: "true" });
+    const status = normalize({
+      state: "running",
+      metadata: { turnId: "t-9", attempt: 2, isolated: true, junk: { a: 1 } },
+    });
+    expect(status.metadata).toEqual({
+      runtimeProjectId: "proj-1",
+      turnId: "t-9",
+      attempt: "2",
+      isolated: "true",
+    });
   });
 
   it("keeps a read failure separate from the session's own failure", () => {
-    const status = normalize({ state: "unavailable", error: "the runtime endpoint refused the connection" });
-    expect(status.error).toEqual({ code: "runtime_error", message: "the runtime endpoint refused the connection" });
+    const status = normalize({
+      state: "unavailable",
+      error: "the runtime endpoint refused the connection",
+    });
+    expect(status.error).toEqual({
+      code: "runtime_error",
+      message: "the runtime endpoint refused the connection",
+    });
     expect(status.state).toBe("unavailable");
   });
 });
@@ -116,7 +150,11 @@ describe("normalizing what a runtime reports", () => {
 describe("capabilities and dispatch", () => {
   it("derives capabilities from the callbacks actually supplied", () => {
     const registry = new AgentSessionRuntimeRegistry();
-    const readOnly = registry.register({ id: "example-runtime", provider: "p", inspect: async () => ({ state: "running" }) });
+    const readOnly = registry.register({
+      id: "example-runtime",
+      provider: "p",
+      inspect: async () => ({ state: "running" }),
+    });
     expect(readOnly.capabilities).toEqual({ inspect: true, continue: false, detach: false });
 
     const full = registry.register({
@@ -131,7 +169,9 @@ describe("capabilities and dispatch", () => {
 
   it("rejects a malformed runtime id at registration — a wiring bug, not a runtime condition", () => {
     const registry = new AgentSessionRuntimeRegistry();
-    expect(() => registry.register({ id: "../etc", provider: "p", inspect: async () => ({}) })).toThrow(/invalid runtime id/);
+    expect(() =>
+      registry.register({ id: "../etc", provider: "p", inspect: async () => ({}) }),
+    ).toThrow(/invalid runtime id/);
   });
 
   it("returns a precise unknown_runtime result instead of throwing", async () => {
@@ -145,9 +185,18 @@ describe("capabilities and dispatch", () => {
 
   it("returns unsupported_operation for a capability the runtime never registered", async () => {
     const registry = new AgentSessionRuntimeRegistry();
-    const runtime = registry.register({ id: "example-runtime", provider: "p", inspect: async () => ({ state: "running" }) });
+    const runtime = registry.register({
+      id: "example-runtime",
+      provider: "p",
+      inspect: async () => ({ state: "running" }),
+    });
 
-    const status = await dispatchAgentSession(runtime, REF, { op: "continue", prompt: "keep going" }, { now: NOW });
+    const status = await dispatchAgentSession(
+      runtime,
+      REF,
+      { op: "continue", prompt: "keep going" },
+      { now: NOW },
+    );
     expect(status.state).toBe("unavailable");
     expect(status.error?.code).toBe("unsupported_operation");
     expect(status.error?.message).toContain("does not support continue");
@@ -170,7 +219,11 @@ describe("capabilities and dispatch", () => {
 
   it("treats a null reply as session_not_found rather than as a failed session", async () => {
     const registry = new AgentSessionRuntimeRegistry();
-    const runtime = registry.register({ id: "example-runtime", provider: "p", inspect: async () => null });
+    const runtime = registry.register({
+      id: "example-runtime",
+      provider: "p",
+      inspect: async () => null,
+    });
 
     const status = await dispatchAgentSession(runtime, REF, { op: "inspect" }, { now: NOW });
     expect(status.state).toBe("unavailable");
@@ -213,8 +266,18 @@ describe("capabilities and dispatch", () => {
       },
     });
 
-    await dispatchAgentSession(runtime, REF, { op: "continue", prompt: "also update the docs" }, { now: NOW });
-    const detached = await dispatchAgentSession(runtime, REF, { op: "detach", reason: "user cancelled" }, { now: NOW });
+    await dispatchAgentSession(
+      runtime,
+      REF,
+      { op: "continue", prompt: "also update the docs" },
+      { now: NOW },
+    );
+    const detached = await dispatchAgentSession(
+      runtime,
+      REF,
+      { op: "detach", reason: "user cancelled" },
+      { now: NOW },
+    );
 
     expect(calls).toEqual(["continue:also update the docs", "detach:user cancelled"]);
     expect(detached.termination).toMatchObject({ reason: "cancelled" });
@@ -228,7 +291,11 @@ describe("capabilities and dispatch", () => {
     expect(registry.has("nope")).toBe(false);
     // The shape of the seam is the guarantee: the only way to reach a runtime
     // is one call about one already-known session.
-    expect(Object.keys(registry.get("example-runtime")!.callbacks).sort()).toEqual(["id", "inspect", "provider"]);
+    expect(Object.keys(registry.get("example-runtime")!.callbacks).sort()).toEqual([
+      "id",
+      "inspect",
+      "provider",
+    ]);
   });
 });
 
@@ -242,7 +309,10 @@ describe("the registered runtime's provider is authoritative", () => {
       inspect: async (ref) => {
         seen.push(ref);
         // A reply cannot restate identity at all — provider included.
-        return { state: "running", ...({ provider: "sneaky-provider" } as AgentSessionObservation) };
+        return {
+          state: "running",
+          ...({ provider: "sneaky-provider" } as AgentSessionObservation),
+        };
       },
     });
 
@@ -254,7 +324,12 @@ describe("the registered runtime's provider is authoritative", () => {
       { now: NOW },
     );
     // …and one that named none at all.
-    const silent = await dispatchAgentSession(runtime, { ...REF, provider: undefined }, { op: "inspect" }, { now: NOW });
+    const silent = await dispatchAgentSession(
+      runtime,
+      { ...REF, provider: undefined },
+      { op: "inspect" },
+      { now: NOW },
+    );
 
     expect(seen.map((r) => r.provider)).toEqual(["anthropic-claude-code", "anthropic-claude-code"]);
     expect(spoofed.provider).toBe("anthropic-claude-code");
@@ -262,7 +337,12 @@ describe("the registered runtime's provider is authoritative", () => {
   });
 
   it("leaves the attachment's own provider alone when no runtime can answer", async () => {
-    const status = await dispatchAgentSession(undefined, { ...REF, provider: "whatever-it-said" }, { op: "inspect" }, { now: NOW });
+    const status = await dispatchAgentSession(
+      undefined,
+      { ...REF, provider: "whatever-it-said" },
+      { op: "inspect" },
+      { now: NOW },
+    );
     expect(status.state).toBe("unavailable");
     expect(status.provider).toBe("whatever-it-said");
   });
@@ -288,7 +368,12 @@ describe("a callback that never answers", () => {
         },
       });
 
-      const pending = dispatchAgentSession(runtime, REF, { op: "inspect" }, { now: NOW, timeoutMs: 5_000 });
+      const pending = dispatchAgentSession(
+        runtime,
+        REF,
+        { op: "inspect" },
+        { now: NOW, timeoutMs: 5_000 },
+      );
       await vi.advanceTimersByTimeAsync(4_999);
       expect(seenSignal?.aborted).toBe(false);
 
@@ -316,7 +401,12 @@ describe("a callback that never answers", () => {
         inspect: async () => ({ state: "running" }),
         continue: () => new Promise<never>(() => {}),
       });
-      const pending = dispatchAgentSession(runtime, REF, { op: "continue", prompt: "go" }, { now: NOW, timeoutMs: 1_000 });
+      const pending = dispatchAgentSession(
+        runtime,
+        REF,
+        { op: "continue", prompt: "go" },
+        { now: NOW, timeoutMs: 1_000 },
+      );
       await vi.advanceTimersByTimeAsync(1_001);
       expect((await pending).error?.code).toBe("continue_timeout");
     } finally {
@@ -333,7 +423,12 @@ describe("a callback that never answers", () => {
         provider: "p",
         inspect: () => new Promise((resolve) => setTimeout(() => resolve({ state: "idle" }), 500)),
       });
-      const pending = dispatchAgentSession(runtime, REF, { op: "inspect" }, { now: NOW, timeoutMs: 5_000 });
+      const pending = dispatchAgentSession(
+        runtime,
+        REF,
+        { op: "inspect" },
+        { now: NOW, timeoutMs: 5_000 },
+      );
       await vi.advanceTimersByTimeAsync(600);
       expect((await pending).state).toBe("idle");
     } finally {
@@ -381,9 +476,9 @@ describe("a blocked delegation is never an ordinary finished task", () => {
     expect(notice).toContain("should I force-push?");
     expect(notice).toContain("https://runtime.example/threads/abc123");
 
-    expect(describeBlockedAgentSession({ ...blockedSnapshot.agentSession, status: "needs_permission" })).toContain(
-      "waiting for permission",
-    );
+    expect(
+      describeBlockedAgentSession({ ...blockedSnapshot.agentSession, status: "needs_permission" }),
+    ).toContain("waiting for permission");
   });
 
   it("says nothing for a running job, an unblocked session, or another turn's delegation", () => {
@@ -481,13 +576,19 @@ describe("an ACTIVE blocked delegation on a still-running turn", () => {
     // blockedDelegationNotice stays the TERMINAL-only accessor, so the
     // transports' terminal branches are untouched by any of this.
     expect(blockedDelegationNotice(activeSnapshot)).toBeUndefined();
-    expect(blockedDelegationNotice({ ...activeSnapshot, status: "completed_no_summary" })).toBe(blocked.notice);
+    expect(blockedDelegationNotice({ ...activeSnapshot, status: "completed_no_summary" })).toBe(
+      blocked.notice,
+    );
   });
 
   it("describes an active block only for a genuinely blocked attachment", () => {
     expect(describeActiveBlockedAgentSession(undefined)).toBeUndefined();
     expect(
-      describeActiveBlockedAgentSession({ runtime: "example-runtime", handle: "thr-1", status: "running" }),
+      describeActiveBlockedAgentSession({
+        runtime: "example-runtime",
+        handle: "thr-1",
+        status: "running",
+      }),
     ).toBeUndefined();
   });
 });

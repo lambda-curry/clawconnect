@@ -183,9 +183,10 @@ function transcriptMessageIdentity(message: Record<string, unknown>): {
   sequence?: number;
 } {
   const meta = message.__openclaw;
-  const record = meta && typeof meta === "object" && !Array.isArray(meta)
-    ? (meta as Record<string, unknown>)
-    : undefined;
+  const record =
+    meta && typeof meta === "object" && !Array.isArray(meta)
+      ? (meta as Record<string, unknown>)
+      : undefined;
   return {
     ...(typeof record?.id === "string" ? { id: record.id } : {}),
     ...(typeof record?.seq === "number" && Number.isSafeInteger(record.seq) && record.seq > 0
@@ -233,36 +234,44 @@ export function transcriptMessageEvents(message: Record<string, unknown>): Gatew
       if (value.type === "text") {
         const text = typeof value.text === "string" ? value.text.trim() : "";
         if (!text) return [];
-        return [{
-          type: "assistant",
-          text: text.length > ASSISTANT_EVENT_TEXT_MAX
-            ? `${text.slice(0, ASSISTANT_EVENT_TEXT_MAX - 1)}…`
-            : text,
-        }];
+        return [
+          {
+            type: "assistant",
+            text:
+              text.length > ASSISTANT_EVENT_TEXT_MAX
+                ? `${text.slice(0, ASSISTANT_EVENT_TEXT_MAX - 1)}…`
+                : text,
+          },
+        ];
       }
       if (value.type !== "toolCall") return [];
       const toolName = typeof value.name === "string" ? value.name : "unknown";
       const candidate = value.arguments ?? value.input;
-      const args = candidate && typeof candidate === "object" && !Array.isArray(candidate)
-        ? (candidate as Record<string, unknown>)
-        : {};
-      return [{
-        type: "tool",
-        text: formatToolEventText(toolName, args),
-        toolName,
-        args,
-      }];
+      const args =
+        candidate && typeof candidate === "object" && !Array.isArray(candidate)
+          ? (candidate as Record<string, unknown>)
+          : {};
+      return [
+        {
+          type: "tool",
+          text: formatToolEventText(toolName, args),
+          toolName,
+          args,
+        },
+      ];
     });
   }
   if (role !== "toolResult") return [];
   const toolName = typeof message.toolName === "string" ? message.toolName : "unknown";
   const isError = message.isError === true;
-  return [{
-    type: "tool-result",
-    text: `${toolName} ${isError ? "failed" : "done"}`,
-    toolName,
-    isError,
-  }];
+  return [
+    {
+      type: "tool-result",
+      text: `${toolName} ${isError ? "failed" : "done"}`,
+      toolName,
+      isError,
+    },
+  ];
 }
 
 /**
@@ -729,7 +738,10 @@ export class OpenClawGateway {
           : [];
         for (const message of messages) {
           const size = Buffer.byteLength(JSON.stringify(message));
-          if (collected.length >= this.transcriptLimits.messages || bytes + size > this.transcriptLimits.bytes) {
+          if (
+            collected.length >= this.transcriptLimits.messages ||
+            bytes + size > this.transcriptLimits.bytes
+          ) {
             throw new TranscriptLimitError("Transcript replay message/byte limit exceeded");
           }
           collected.push(message);
@@ -790,12 +802,13 @@ export class OpenClawGateway {
       upstream: TranscriptTransportUpdate["upstream"],
       transcript: TranscriptTransportUpdate["transcript"],
       reason?: TranscriptTransportUpdate["reason"],
-    ) => onState?.({
-      upstream,
-      transcript,
-      ...(reason ? { reason, skippedEvents, skippedSequenceCount } : {}),
-      ...(lastSeenSequence > 0 ? { lastSeenSequence } : {}),
-    });
+    ) =>
+      onState?.({
+        upstream,
+        transcript,
+        ...(reason ? { reason, skippedEvents, skippedSequenceCount } : {}),
+        ...(lastSeenSequence > 0 ? { lastSeenSequence } : {}),
+      });
 
     const legacyKey = (id: string) => createHash("sha256").update(id).digest("hex");
     const rememberLegacyId = (id: string) => {
@@ -874,19 +887,34 @@ export class OpenClawGateway {
         unavailableTimer = undefined;
       }
       const readHeadSequence = async () => {
-        const page = await this.sendRpc("chat.history", {
-          sessionKey, limit: 1, offset: 0, maxChars: Math.min(500_000, this.transcriptLimits.bytes),
-        }, 20_000) as HistoryPage;
+        const page = (await this.sendRpc(
+          "chat.history",
+          {
+            sessionKey,
+            limit: 1,
+            offset: 0,
+            maxChars: Math.min(500_000, this.transcriptLimits.bytes),
+          },
+          20_000,
+        )) as HistoryPage;
         if (stopped) return 0;
         const messages = Array.isArray(page.messages) ? page.messages : [];
-        if (messages.length > 1 || (messages.length === 0 && page.hasMore === true) || Buffer.byteLength(JSON.stringify(messages)) > this.transcriptLimits.bytes) {
+        if (
+          messages.length > 1 ||
+          (messages.length === 0 && page.hasMore === true) ||
+          Buffer.byteLength(JSON.stringify(messages)) > this.transcriptLimits.bytes
+        ) {
           throw new TranscriptLimitError("Transcript head exceeds replay byte/message limit");
         }
         const head = messages[0];
-        const sequence = head && typeof head === "object" && !Array.isArray(head)
-          ? transcriptMessageIdentity(head as Record<string, unknown>).sequence : undefined;
+        const sequence =
+          head && typeof head === "object" && !Array.isArray(head)
+            ? transcriptMessageIdentity(head as Record<string, unknown>).sequence
+            : undefined;
         if (messages.length > 0 && sequence === undefined) {
-          throw new TranscriptLimitError("Transcript head has no durable sequence; cannot resume safely");
+          throw new TranscriptLimitError(
+            "Transcript head has no durable sequence; cannot resume safely",
+          );
         }
         return sequence ?? 0;
       };
@@ -896,7 +924,12 @@ export class OpenClawGateway {
       if (stopped) return;
       const subscribedSequence = await readHeadSequence();
       if (stopped) return;
-      const nextSequence = Math.max(lastSeenSequence, sequence, subscribedSequence, highestObservedSequence);
+      const nextSequence = Math.max(
+        lastSeenSequence,
+        sequence,
+        subscribedSequence,
+        highestObservedSequence,
+      );
       const skipped = nextSequence - lastSeenSequence;
       skippedSequenceCount += skipped;
       this.transcriptCounters.transcriptSkippedSequences += skipped;
@@ -904,17 +937,27 @@ export class OpenClawGateway {
       clearSeenIds();
       paused = false;
       this.transcriptCounters.transcriptPausedWatches--;
-      logDebug(`[openclaw-gateway] transcript limit recovery for ${sessionKey}: resumed at sequence ${lastSeenSequence}; skipped ${skippedSequenceCount} sequence positions and ${skippedEvents} known live events (overlap possible)`);
+      logDebug(
+        `[openclaw-gateway] transcript limit recovery for ${sessionKey}: resumed at sequence ${lastSeenSequence}; skipped ${skippedSequenceCount} sequence positions and ${skippedEvents} known live events (overlap possible)`,
+      );
       report("connected", "live", "limit_recovered");
     };
     const scheduleHeadResync = () => {
       if (stopped || headResyncScheduled) return;
       headResyncScheduled = true;
-      work = work.then(resyncHead).catch((err: unknown) => {
-        if (stopped) return;
-        logDebug(`[openclaw-gateway] transcript head recovery paused for ${sessionKey}; skipped ${skippedEvents} known live events:`, err);
-        report("connected", "detached", "limit_exceeded");
-      }).finally(() => { headResyncScheduled = false; });
+      work = work
+        .then(resyncHead)
+        .catch((err: unknown) => {
+          if (stopped) return;
+          logDebug(
+            `[openclaw-gateway] transcript head recovery paused for ${sessionKey}; skipped ${skippedEvents} known live events:`,
+            err,
+          );
+          report("connected", "detached", "limit_exceeded");
+        })
+        .finally(() => {
+          headResyncScheduled = false;
+        });
     };
     const failed = (err: unknown) => {
       if (stopped) return;
@@ -924,7 +967,10 @@ export class OpenClawGateway {
           this.transcriptCounters.transcriptPausedWatches++;
           this.transcriptCounters.transcriptLimitFailures++;
           clearSeenIds();
-          logDebug(`[openclaw-gateway] transcript limit hit for ${sessionKey}; skipped ${skippedEvents} known live events; scheduling bounded head recovery:`, err);
+          logDebug(
+            `[openclaw-gateway] transcript limit hit for ${sessionKey}; skipped ${skippedEvents} known live events; scheduling bounded head recovery:`,
+            err,
+          );
           report("connected", "detached", "limit_exceeded");
           scheduleHeadResync();
         }
@@ -941,7 +987,10 @@ export class OpenClawGateway {
     let pendingBytes = 0;
     const enqueue = (action: () => void | Promise<void>, bytes = 0) => {
       if (stopped || paused) return work;
-      if (pendingItems >= this.transcriptLimits.queueItems || pendingBytes + bytes > this.transcriptLimits.queueBytes) {
+      if (
+        pendingItems >= this.transcriptLimits.queueItems ||
+        pendingBytes + bytes > this.transcriptLimits.queueBytes
+      ) {
         if (bytes > 0) skipLiveEvent();
         failed(new TranscriptLimitError("Transcript pending-work limit exceeded"));
         return work;
@@ -950,24 +999,26 @@ export class OpenClawGateway {
       pendingBytes += bytes;
       this.transcriptCounters.pendingTranscriptWork++;
       this.transcriptCounters.pendingTranscriptBytes += bytes;
-      work = work.then(async () => {
-        try {
-          if (!stopped && !paused) {
-            const result = action();
-            if (result) await result;
-          } else if (paused && bytes > 0) {
-            skipLiveEvent();
+      work = work
+        .then(async () => {
+          try {
+            if (!stopped && !paused) {
+              const result = action();
+              if (result) await result;
+            } else if (paused && bytes > 0) {
+              skipLiveEvent();
+            }
+          } catch (err) {
+            if (bytes > 0) skipLiveEvent();
+            throw err;
+          } finally {
+            pendingItems--;
+            pendingBytes -= bytes;
+            this.transcriptCounters.pendingTranscriptWork--;
+            this.transcriptCounters.pendingTranscriptBytes -= bytes;
           }
-        } catch (err) {
-          if (bytes > 0) skipLiveEvent();
-          throw err;
-        } finally {
-          pendingItems--;
-          pendingBytes -= bytes;
-          this.transcriptCounters.pendingTranscriptWork--;
-          this.transcriptCounters.pendingTranscriptBytes -= bytes;
-        }
-      }).catch(failed);
+        })
+        .catch(failed);
       return work;
     };
     const enqueueRecovery = (baseline: boolean) => enqueue(() => recover(baseline));
@@ -992,7 +1043,10 @@ export class OpenClawGateway {
       stopped = true;
       clearSeenIds();
       if (paused) this.transcriptCounters.transcriptPausedWatches--;
-      if (skippedEvents > 0) logDebug(`[openclaw-gateway] transcript watch ended for ${sessionKey}; skipped ${skippedSequenceCount} sequence positions and ${skippedEvents} known live events (overlap possible)`);
+      if (skippedEvents > 0)
+        logDebug(
+          `[openclaw-gateway] transcript watch ended for ${sessionKey}; skipped ${skippedSequenceCount} sequence positions and ${skippedEvents} known live events (overlap possible)`,
+        );
       if (unavailableTimer) clearTimeout(unavailableTimer);
       this.subscribers.delete(subId);
       this.reconnectListeners.delete(onReconnect);
@@ -1009,7 +1063,8 @@ export class OpenClawGateway {
       const payload = frame.payload as SessionMessagePayload;
       if (payload.sessionKey !== sessionKey || !payload.message) return;
       const sequence = payload.messageSeq ?? transcriptMessageIdentity(payload.message).sequence;
-      if (sequence !== undefined) highestObservedSequence = Math.max(highestObservedSequence, sequence);
+      if (sequence !== undefined)
+        highestObservedSequence = Math.max(highestObservedSequence, sequence);
       if (paused) {
         skipLiveEvent();
         return;
@@ -1032,13 +1087,16 @@ export class OpenClawGateway {
         }
         return;
       }
-      void enqueue(() => {
-        if (sequence !== undefined && sequence > lastSeenSequence + 1) {
-          report("connected", "replaying");
-          return replay(false).then(acceptLive);
-        }
-        acceptLive();
-      }, Buffer.byteLength(JSON.stringify(payload)));
+      void enqueue(
+        () => {
+          if (sequence !== undefined && sequence > lastSeenSequence + 1) {
+            report("connected", "replaying");
+            return replay(false).then(acceptLive);
+          }
+          acceptLive();
+        },
+        Buffer.byteLength(JSON.stringify(payload)),
+      );
     });
 
     await enqueueRecovery(resumeAfterSequence === undefined);
@@ -1068,11 +1126,7 @@ export class OpenClawGateway {
     let lastError: Error | undefined;
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
-        return await this.sendRpc(
-          "chat.send",
-          { sessionKey, message, idempotencyKey },
-          30_000,
-        );
+        return await this.sendRpc("chat.send", { sessionKey, message, idempotencyKey }, 30_000);
       } catch (err) {
         lastError = err instanceof Error ? err : new Error(String(err));
         const retryable =
@@ -1134,7 +1188,11 @@ export class OpenClawGateway {
   private async readTranscriptSample(
     sessionKey: string,
     runId?: string,
-  ): Promise<{ snapshotKey: string; trailingText: string; upstream: RunObservation["upstream"] } | null> {
+  ): Promise<{
+    snapshotKey: string;
+    trailingText: string;
+    upstream: RunObservation["upstream"];
+  } | null> {
     try {
       const res = (await this.sendRpc(
         "chat.history",
@@ -1599,8 +1657,7 @@ export class OpenClawGateway {
             logDebug("[openclaw-gateway] no live final text — trying transcript fallback");
             cleanup(false);
             this.fetchTranscriptFinalText(sessionKey).then(
-              (transcriptText) =>
-                resolve(transcriptText || NO_SUMMARY_SENTINEL),
+              (transcriptText) => resolve(transcriptText || NO_SUMMARY_SENTINEL),
               () => resolve(NO_SUMMARY_SENTINEL),
             );
           }
@@ -1615,7 +1672,9 @@ export class OpenClawGateway {
 
       const dispatch = (frame: Frame) => {
         if (frame.event === "agent") {
-          handleAgentEvent(frame.payload as { runId?: string; stream?: string; data?: Record<string, unknown> });
+          handleAgentEvent(
+            frame.payload as { runId?: string; stream?: string; data?: Record<string, unknown> },
+          );
         } else if (frame.event === "chat") {
           handleChatEvent(frame.payload as ChatEventPayload);
         }
@@ -1635,7 +1694,8 @@ export class OpenClawGateway {
       //      receive. A flood of agent frames must not be able to evict it.
       const buffer = (frame: Frame) => {
         if (frame.event === "chat") {
-          const frameSessionKey = (frame.payload as { sessionKey?: string } | undefined)?.sessionKey;
+          const frameSessionKey = (frame.payload as { sessionKey?: string } | undefined)
+            ?.sessionKey;
           if (typeof frameSessionKey === "string" && frameSessionKey !== sessionKey) {
             droppedForeignChatFrames += 1;
             if (droppedForeignChatFrames === 1) {
@@ -1663,7 +1723,9 @@ export class OpenClawGateway {
           buffer(frame);
           return;
         }
-        handleAgentEvent(frame.payload as { runId?: string; stream?: string; data?: Record<string, unknown> });
+        handleAgentEvent(
+          frame.payload as { runId?: string; stream?: string; data?: Record<string, unknown> },
+        );
       });
 
       this.subscribers.set(subId, (frame) => {

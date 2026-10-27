@@ -36,7 +36,8 @@ export async function agentsCommand(args: string[]) {
     return;
   }
 
-  const sourceNote = registry.source === "file" ? REGISTRY_PATH : "(env fallback — OPENCLAW_URL/OPENCLAW_PASSWORD)";
+  const sourceNote =
+    registry.source === "file" ? REGISTRY_PATH : "(env fallback — OPENCLAW_URL/OPENCLAW_PASSWORD)";
   console.log(`Configured agents (source: ${sourceNote})`);
   console.log("");
   for (const a of registry.agents) {

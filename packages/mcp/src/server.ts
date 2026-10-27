@@ -255,7 +255,10 @@ export function registerCapability(
     capability.name,
     {
       description: capability.description,
-      inputSchema: fromJsonSchema<Record<string, unknown>>(capability.inputSchema as never, validator),
+      inputSchema: fromJsonSchema<Record<string, unknown>>(
+        capability.inputSchema as never,
+        validator,
+      ),
       ...(capability.outputSchema
         ? { outputSchema: fromJsonSchema(capability.outputSchema as never, validator) }
         : {}),

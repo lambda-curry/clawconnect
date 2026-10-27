@@ -32,11 +32,15 @@ export function buildWidgetHtml() {
   // Line-start only, so this doesn't false-positive on the word "export"
   // appearing in a comment (as it does a few lines up in this very file).
   if (/^export\b/m.test(inlinedState)) {
-    throw new Error("build-widget.mjs: an `export` statement survived inlining — state.js has an export shape this script doesn't strip yet.");
+    throw new Error(
+      "build-widget.mjs: an `export` statement survived inlining — state.js has an export shape this script doesn't strip yet.",
+    );
   }
 
   if (!shellHtml.includes("__STATE_MODULE__")) {
-    throw new Error("build-widget.mjs: shell.html has no __STATE_MODULE__ placeholder to inline into.");
+    throw new Error(
+      "build-widget.mjs: shell.html has no __STATE_MODULE__ placeholder to inline into.",
+    );
   }
 
   return shellHtml.replace("__STATE_MODULE__", inlinedState);

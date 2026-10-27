@@ -84,7 +84,10 @@ export function projectLogWindow(
   const marker = logs[0]?.type === "truncation" ? logs[0] : undefined;
   const keepMarker = (entries: LogEntry[], max: number): LogEntry[] => {
     if (!marker || (cursor && (marker.seq ?? 0) <= cursor)) return entries.slice(-max);
-    return [marker, ...entries.filter((entry) => entry !== marker).slice(-Math.max(0, max - 1))].slice(0, max);
+    return [
+      marker,
+      ...entries.filter((entry) => entry !== marker).slice(-Math.max(0, max - 1)),
+    ].slice(0, max);
   };
 
   if (!cursor) {

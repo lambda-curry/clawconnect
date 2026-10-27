@@ -71,7 +71,10 @@ export function loadJsonArrayFile(
     if (!Array.isArray(parsed)) throw new Error("file does not contain a JSON array");
     entries = parsed;
   } catch (err) {
-    return { entries: [], blocked: preserve(filePath, kind, (err as Error).message, onDegraded, now()) };
+    return {
+      entries: [],
+      blocked: preserve(filePath, kind, (err as Error).message, onDegraded, now()),
+    };
   }
   return { entries, blocked: false };
 }

@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vite-plus/test";
 import { buildCapabilities } from "./capability.ts";
 import { GatewayPool } from "./gateway-pool.ts";
 import type { AgentRegistry } from "./agent-registry.ts";
@@ -67,7 +67,10 @@ describe("a store that could not be read reaches a surface a supervisor reads", 
     const pool = new GatewayPool(registry(), dir);
     pool.warmAll();
 
-    const degraded = connectionInfo(pool).degradedStores as { kind: string; preservedAs?: string }[];
+    const degraded = connectionInfo(pool).degradedStores as {
+      kind: string;
+      preservedAs?: string;
+    }[];
     expect(degraded).toHaveLength(1);
     expect(degraded[0].kind).toBe("job");
     expect(degraded[0].preservedAs).toMatch(/test-agent\.json\.corrupt-/);

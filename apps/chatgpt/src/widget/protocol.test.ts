@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 import {
   UI_PROTOCOL_VERSION,
   UI_APP_INFO,

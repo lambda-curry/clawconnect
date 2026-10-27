@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 import {
   LOG_ENTRY_TEXT_MAX,
   MESSAGE_TOOL_VETO_PREAMBLE,
@@ -8,8 +8,18 @@ import {
 } from "./session.ts";
 import type { GatewayEvent, LogEntry } from "./types.ts";
 
-const logEntry = (type: string, text: string, seq: number): LogEntry => ({ ts: seq, type, text, seq });
-const toolEvent = (text: string): GatewayEvent => ({ type: "tool", text, toolName: text.split(":")[0], args: {} });
+const logEntry = (type: string, text: string, seq: number): LogEntry => ({
+  ts: seq,
+  type,
+  text,
+  seq,
+});
+const toolEvent = (text: string): GatewayEvent => ({
+  type: "tool",
+  text,
+  toolName: text.split(":")[0],
+  args: {},
+});
 
 describe("isEchoOfRecentEvent — the same tool call arriving from both sources", () => {
   it("suppresses an identical tool row that just landed", () => {
@@ -45,7 +55,9 @@ describe("isEchoOfRecentEvent — the same tool call arriving from both sources"
 
   it("never suppresses prose or lifecycle — only tool calls are double-sourced", () => {
     const logs = [logEntry("assistant", "Looking at the test.", 1)];
-    expect(isEchoOfRecentEvent(logs, { type: "assistant", text: "Looking at the test." })).toBe(false);
+    expect(isEchoOfRecentEvent(logs, { type: "assistant", text: "Looking at the test." })).toBe(
+      false,
+    );
   });
 });
 

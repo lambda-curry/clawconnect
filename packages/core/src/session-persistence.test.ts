@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vite-plus/test";
 import { SessionManager } from "./session.ts";
 import type { OpenClawGateway } from "./gateway.ts";
 import type { JobStore, PersistedJob } from "./job-store.ts";
@@ -28,12 +28,19 @@ class FakeJobStore implements JobStore {
 function fakeGateway(opts: {
   chat?: (sessionKey: string, message: string, timeoutMs: number) => Promise<string>;
   pollTranscriptForFinalText?: () => Promise<string | undefined>;
-  reconcileRun?: () => Promise<{ ok: boolean; changed: boolean; trailingText: string; snapshotKey: string }>;
+  reconcileRun?: () => Promise<{
+    ok: boolean;
+    changed: boolean;
+    trailingText: string;
+    snapshotKey: string;
+  }>;
 }): OpenClawGateway {
   return {
     chat: opts.chat ?? (() => new Promise<string>(() => {})),
     pollTranscriptForFinalText: opts.pollTranscriptForFinalText ?? (async () => undefined),
-    reconcileRun: opts.reconcileRun ?? (async () => ({ ok: true, changed: true, trailingText: "", snapshotKey: "active" })),
+    reconcileRun:
+      opts.reconcileRun ??
+      (async () => ({ ok: true, changed: true, trailingText: "", snapshotKey: "active" })),
   } as unknown as OpenClawGateway;
 }
 
@@ -70,7 +77,11 @@ describe("SessionManager restart persistence", () => {
 
   it("a job that resolves to completed is no longer in the next persisted snapshot", async () => {
     const store = new FakeJobStore();
-    const sessions = new SessionManager(fakeGateway({ chat: async () => "the real answer" }), "main", store);
+    const sessions = new SessionManager(
+      fakeGateway({ chat: async () => "the real answer" }),
+      "main",
+      store,
+    );
     const job = sessions.submitTask({ task: "quick thing" });
     expect(store.latestSave?.map((j) => j.jobId)).toContain(job.jobId);
 
@@ -164,8 +175,12 @@ describe("SessionManager restart persistence", () => {
     const store = new FakeJobStore([persistedRunning]);
     const sessions = new SessionManager(fakeGateway({}), "main", store);
 
-    expect(sessions.getLatestJobForSession(persistedRunning.sessionKey)?.jobId).toBe(persistedRunning.jobId);
-    expect(sessions.getJobHistory(persistedRunning.sessionKey).map((j) => j.jobId)).toEqual([persistedRunning.jobId]);
+    expect(sessions.getLatestJobForSession(persistedRunning.sessionKey)?.jobId).toBe(
+      persistedRunning.jobId,
+    );
+    expect(sessions.getJobHistory(persistedRunning.sessionKey).map((j) => j.jobId)).toEqual([
+      persistedRunning.jobId,
+    ]);
   });
 });
 
@@ -184,8 +199,22 @@ describe("SessionManager rehydration — a store with two entries on one session
     // is defensive rather than dead.
     const sessionKey = "agent:main:main:thread:shared";
     const store = new FakeJobStore([
-      { jobId: "job-a", sessionKey, startedAt: 1_000, lastEventAt: 2_000, pollCount: 0, prompt: { task: "older" } },
-      { jobId: "job-b", sessionKey, startedAt: 3_000, lastEventAt: 4_000, pollCount: 0, prompt: { task: "newer" } },
+      {
+        jobId: "job-a",
+        sessionKey,
+        startedAt: 1_000,
+        lastEventAt: 2_000,
+        pollCount: 0,
+        prompt: { task: "older" },
+      },
+      {
+        jobId: "job-b",
+        sessionKey,
+        startedAt: 3_000,
+        lastEventAt: 4_000,
+        pollCount: 0,
+        prompt: { task: "newer" },
+      },
     ]);
     const sessions = new SessionManager(
       fakeGateway({ pollTranscriptForFinalText: async () => "text belonging to the newer run" }),

@@ -16,13 +16,18 @@ export const UI_RESOURCE_MIME_TYPE = "text/html;profile=mcp-app";
 /** Legacy flat alias for _meta.ui.resourceUri — hosts must check both per the SDK's own compatibility note. */
 export const UI_RESOURCE_URI_META_KEY = "ui/resourceUri";
 
-export function buildExtensionsCapability(widgetEnabled: boolean): Record<string, unknown> | undefined {
+export function buildExtensionsCapability(
+  widgetEnabled: boolean,
+): Record<string, unknown> | undefined {
   if (!widgetEnabled) return undefined;
   return { [UI_EXTENSION_ID]: { mimeTypes: [UI_RESOURCE_MIME_TYPE] } };
 }
 
 /** _meta for the one tool that mounts the widget (run_task only). Empty when the widget is disabled — no resourceUri, no visibility grant, nothing for a host to act on. */
-export function buildMountMeta(widgetEnabled: boolean, resourceUri: string): Record<string, unknown> {
+export function buildMountMeta(
+  widgetEnabled: boolean,
+  resourceUri: string,
+): Record<string, unknown> {
   if (!widgetEnabled) return {};
   return {
     ui: { resourceUri, visibility: ["model", "app"] },

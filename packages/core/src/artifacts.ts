@@ -43,9 +43,12 @@ export function processEvent(artifacts: Artifacts, event: GatewayEvent) {
     if (cmd) artifacts.commandsRun.push(cmd);
   }
 
-  const directFilePath = [event.args.file_path, event.args.filePath, event.args.path, event.args.file].find(
-    (value) => typeof value === "string",
-  ) as string | undefined;
+  const directFilePath = [
+    event.args.file_path,
+    event.args.filePath,
+    event.args.path,
+    event.args.file,
+  ].find((value) => typeof value === "string") as string | undefined;
 
   if (name === "Edit" || name === "Write" || name === "edit" || name === "write") {
     addChangedFile(artifacts, directFilePath);
@@ -188,7 +191,10 @@ export function extractPatternsFromSummary(artifacts: Artifacts, summary: string
     if (branch) setInferred(artifacts, "branchName", branch.name, branch.provenance);
   }
   const lastSentence = summary.slice(-200);
-  if (/\?\s*$/.test(lastSentence) || /please confirm|which option|waiting for|choose between/i.test(lastSentence)) {
+  if (
+    /\?\s*$/.test(lastSentence) ||
+    /please confirm|which option|waiting for|choose between/i.test(lastSentence)
+  ) {
     artifacts.needsHumanDecision = true;
   }
 }
@@ -197,7 +203,9 @@ export function deriveNextStep(artifacts: Artifacts, status: JobStatus): string 
   if (status === "error") return "Fix the issue and retry.";
   if (artifacts.prUrl) return "Review or merge the PR.";
   if (artifacts.needsHumanDecision) return "Answer the pending question to continue.";
-  if (artifacts.filesChanged.length > 0 && !artifacts.commitSha) return "Review changes and commit.";
-  if (artifacts.filesChanged.length > 0) return "Review the changes or continue with the next task.";
+  if (artifacts.filesChanged.length > 0 && !artifacts.commitSha)
+    return "Review changes and commit.";
+  if (artifacts.filesChanged.length > 0)
+    return "Review the changes or continue with the next task.";
   return undefined;
 }

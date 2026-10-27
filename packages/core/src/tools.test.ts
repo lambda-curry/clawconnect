@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vite-plus/test";
 import { delegateBlockedTerminalReason } from "./agent-session.ts";
 import { GatewayPool } from "./gateway-pool.ts";
 import {
@@ -33,16 +33,28 @@ vi.mock("./gateway.ts", () => {
         _sessionKey: string,
         _message: string,
         _timeoutMs: number,
-        onEvent?: (e: { type: string; text: string; toolName?: string; args?: Record<string, unknown>; isError?: boolean }) => void,
+        onEvent?: (e: {
+          type: string;
+          text: string;
+          toolName?: string;
+          args?: Record<string, unknown>;
+          isError?: boolean;
+        }) => void,
       ) {
-        onEvent?.({ type: "tool", text: "ran a command", toolName: "Bash", args: { command: "echo hi" } });
+        onEvent?.({
+          type: "tool",
+          text: "ran a command",
+          toolName: "Bash",
+          args: { command: "echo hi" },
+        });
         onEvent?.({ type: "tool-result", text: "hi", toolName: "Bash", isError: false });
         onEvent?.({ type: "lifecycle", text: "Agent lifecycle: end" });
         return new Promise<string>(() => {});
       },
       close() {},
       pollTranscriptForFinalText: () => Promise.resolve(undefined),
-      reconcileRun: () => Promise.resolve({ ok: true, changed: true, trailingText: "", snapshotKey: "active" }),
+      reconcileRun: () =>
+        Promise.resolve({ ok: true, changed: true, trailingText: "", snapshotKey: "active" }),
     };
   }
   return { OpenClawGateway: FakeOpenClawGateway };
@@ -166,7 +178,12 @@ describe("get_session read model", () => {
     if (!first.found) return;
     expect(first.nextAfter).toBe(2);
 
-    const second = getSession(pool, { sessionId: run.sessionKey, mode: "tail", limit: 2, after: first.nextAfter });
+    const second = getSession(pool, {
+      sessionId: run.sessionKey,
+      mode: "tail",
+      limit: 2,
+      after: first.nextAfter,
+    });
     expect(second.found).toBe(true);
     if (!second.found) return;
     expect(second.nextAfter).toBeGreaterThanOrEqual(first.nextAfter!);
@@ -186,7 +203,13 @@ describe("get_session read model", () => {
     if (!result.found) return;
     expect(result.events).toBeUndefined();
     expect(result.tasks).toEqual([
-      expect.objectContaining({ taskId: run.jobId, jobId: run.jobId, sessionKey: run.sessionKey, agent: "hank", status: "running" }),
+      expect.objectContaining({
+        taskId: run.jobId,
+        jobId: run.jobId,
+        sessionKey: run.sessionKey,
+        agent: "hank",
+        status: "running",
+      }),
     ]);
   });
 });
@@ -194,11 +217,19 @@ describe("get_session read model", () => {
 describe("prompt retrieval authorization (getTaskPrompt)", () => {
   it("returns the original task/context/senderName for a resolvable taskId", () => {
     const pool = freshPool();
-    const run = runTask(pool, { task: "investigate the bug", context: "seen in prod", senderName: "Jake" });
+    const run = runTask(pool, {
+      task: "investigate the bug",
+      context: "seen in prod",
+      senderName: "Jake",
+    });
     const result = getTaskPrompt(pool, { jobId: run.jobId });
     expect(result.found).toBe(true);
     if (!result.found) return;
-    expect(result.prompt).toEqual({ task: "investigate the bug", context: "seen in prod", senderName: "Jake" });
+    expect(result.prompt).toEqual({
+      task: "investigate the bug",
+      context: "seen in prod",
+      senderName: "Jake",
+    });
   });
 
   it("resolves the prompt by sessionKey too, matching check_task/get_task's dual jobId/sessionKey resolution", () => {
@@ -346,7 +377,7 @@ describe("list_tasks summary bounds vs get_task's full read", () => {
     expect(row!.summaryTruncated).toBeUndefined();
   });
 
-  it("get_session(mode:\"tasks\") rows follow the same listing bound as list_tasks", () => {
+  it('get_session(mode:"tasks") rows follow the same listing bound as list_tasks', () => {
     const pool = freshPool();
     const run = runTask(pool, { task: "do it" });
     completeJob(pool, run.jobId, longSummary);
@@ -365,15 +396,29 @@ describe("get_session tail is forward pagination", () => {
     const pool = freshPool();
     try {
       const run = runTask(pool, { task: "trim prefix" });
-      const first = getSession(pool, { sessionId: run.sessionKey, mode: "tail", limit: 1, after: 0 });
+      const first = getSession(pool, {
+        sessionId: run.sessionKey,
+        mode: "tail",
+        limit: 1,
+        after: 0,
+      });
       if (!first.found) throw new Error("expected a session");
       expect(first.events?.[0]).toMatchObject({ type: "truncation", seq: 2 });
       expect(first.nextAfter).toBe(2);
-      const second = getSession(pool, { sessionId: run.sessionKey, mode: "tail", limit: 2, after: first.nextAfter });
+      const second = getSession(pool, {
+        sessionId: run.sessionKey,
+        mode: "tail",
+        limit: 2,
+        after: first.nextAfter,
+      });
       if (!second.found) throw new Error("expected a session");
       expect(second.events?.map((event) => event.seq)).toEqual([3, 4]);
       expect(second.nextAfter).toBe(4);
-      const end = getSession(pool, { sessionId: run.sessionKey, mode: "tail", after: second.nextAfter });
+      const end = getSession(pool, {
+        sessionId: run.sessionKey,
+        mode: "tail",
+        after: second.nextAfter,
+      });
       if (!end.found) throw new Error("expected a session");
       expect(end.events).toEqual([]);
       expect(end.nextAfter).toBe(4);
@@ -398,7 +443,12 @@ describe("get_session tail is forward pagination", () => {
     expect(page1.events).toEqual(all.slice(0, limit));
     expect(page1.nextAfter).toBe(limit);
 
-    const page2 = getSession(pool, { sessionId: run.sessionKey, mode: "tail", limit, after: page1.nextAfter });
+    const page2 = getSession(pool, {
+      sessionId: run.sessionKey,
+      mode: "tail",
+      limit,
+      after: page1.nextAfter,
+    });
     if (!page2.found) throw new Error("expected a session");
     // Forward pagination: page 2 continues where page 1 stopped rather than
     // re-serving the newest entries, and a short page is the exhaustion signal.
@@ -406,7 +456,12 @@ describe("get_session tail is forward pagination", () => {
     expect(page2.events!.length).toBeLessThan(limit);
     expect(page2.nextAfter).toBe(all.length);
 
-    const page3 = getSession(pool, { sessionId: run.sessionKey, mode: "tail", limit, after: page2.nextAfter });
+    const page3 = getSession(pool, {
+      sessionId: run.sessionKey,
+      mode: "tail",
+      limit,
+      after: page2.nextAfter,
+    });
     if (!page3.found) throw new Error("expected a session");
     expect(page3.events).toEqual([]);
     expect(page3.nextAfter).toBe(page2.nextAfter);
@@ -465,7 +520,9 @@ describe("a blocked delegation is listed as needing a human, not as done", () =>
       const run = runTask(pool, { task: "delegate it" });
       blockJob(pool, run.jobId, state);
 
-      expect(listTasks(pool).find((t) => t.taskId === run.jobId)?.status, state).toBe("needs-human");
+      expect(listTasks(pool).find((t) => t.taskId === run.jobId)?.status, state).toBe(
+        "needs-human",
+      );
       const session = getSession(pool, { sessionId: run.sessionKey, mode: "tasks" });
       expect(session.found && session.tasks?.[0]?.status, state).toBe("needs-human");
     }
@@ -582,7 +639,13 @@ describe("a RUNNING task whose delegated session is waiting on a human", () => {
     // An attachment that exists but is NOT blocked says nothing either.
     const attached = runTask(pool, {
       task: "delegate it",
-      context: directiveBlock({ op: "attach", handle: "thr-live", host: "workstation-1", runtime: "example-runtime", status: "running" }),
+      context: directiveBlock({
+        op: "attach",
+        handle: "thr-live",
+        host: "workstation-1",
+        runtime: "example-runtime",
+        status: "running",
+      }),
     });
     const attachedRow = listTasks(pool).find((t) => t.taskId === attached.jobId)!;
     expect(attachedRow.status).toBe("running");

@@ -40,3 +40,4 @@ lerna-debug.log*
 # A snapshot is a dump of live memory — tokens, user content, request bodies —
 # so it must never be committed, least of all from a public repository.
 *.heapsnapshot
+.vitest/

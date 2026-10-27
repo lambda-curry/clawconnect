@@ -1,5 +1,5 @@
 import { createServer, type Server } from "node:http";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vite-plus/test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createMcpServer } from "../packages/mcp/src/server.ts";
@@ -162,7 +162,10 @@ describe("run_task's argument list", () => {
    */
   it("declares exactly task/agent/context/sessionKey/senderName on both transports", async () => {
     const [viaStdio, viaHttp] = await Promise.all([stdioTools(), httpTools()]);
-    for (const [label, tools] of [["stdio", viaStdio], ["http", viaHttp]] as const) {
+    for (const [label, tools] of [
+      ["stdio", viaStdio],
+      ["http", viaHttp],
+    ] as const) {
       const properties = (
         tools.find((t) => t.name === "run_task")?.inputSchema as
           | { properties?: Record<string, unknown> }
@@ -180,7 +183,9 @@ describe("run_task's argument list", () => {
 
   it("requires only task, so every existing caller keeps working unchanged", async () => {
     const tools = await stdioTools();
-    const required = (tools.find((t) => t.name === "run_task")?.inputSchema as { required?: string[] } | undefined)?.required;
+    const required = (
+      tools.find((t) => t.name === "run_task")?.inputSchema as { required?: string[] } | undefined
+    )?.required;
     expect(required).toEqual(["task"]);
   });
 });

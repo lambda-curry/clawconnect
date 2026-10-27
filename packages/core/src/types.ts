@@ -92,7 +92,14 @@ export type LogEntry = { ts: number; type: string; text: string; isError?: boole
  * and correctly not an error without either check being touched.
  */
 export type JobStatus = "running" | "completed" | "completed_no_summary" | "error" | "cancelled";
-export type TaskStatus = "queued" | "running" | "blocked" | "needs-human" | "done" | "failed" | "cancelled";
+export type TaskStatus =
+  | "queued"
+  | "running"
+  | "blocked"
+  | "needs-human"
+  | "done"
+  | "failed"
+  | "cancelled";
 
 /** Independent lifecycle axes exposed to callers. */
 export type TaskExecutionState = "running" | "completed" | "failed" | "cancelled";

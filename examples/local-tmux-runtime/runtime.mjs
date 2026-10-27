@@ -125,7 +125,9 @@ async function isLive(handle, signal) {
 async function readTerminalHandoff(fleetHomeDir, handle, signal) {
   let meta;
   try {
-    meta = JSON.parse(await readFile(join(fleetHomeDir, handle, "meta.json"), { encoding: "utf8", signal }));
+    meta = JSON.parse(
+      await readFile(join(fleetHomeDir, handle, "meta.json"), { encoding: "utf8", signal }),
+    );
   } catch {
     // Missing, unreadable, unparseable, or aborted — all "no trustworthy
     // handoff yet", which is why the existence check IS the read.

@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { RECONCILE_QUIET_MS, SessionManager } from "./session.ts";
 import type { OpenClawGateway, RunObservation } from "./gateway.ts";
 import { NO_SUMMARY_SENTINEL, ParentObservationTimeoutError, type GatewayEvent } from "./types.ts";
@@ -33,7 +33,10 @@ const settled = (
   snapshotKey = "settled-1",
   upstream: Upstream = "unknown",
 ): RunObservation => ({ ok: true, changed: false, trailingText, snapshotKey, upstream });
-const advancing = (snapshotKey = "advancing-1", upstream: Upstream = "unknown"): RunObservation => ({
+const advancing = (
+  snapshotKey = "advancing-1",
+  upstream: Upstream = "unknown",
+): RunObservation => ({
   ok: true,
   changed: true,
   trailingText: "",
@@ -125,8 +128,18 @@ function fakeGateway(
   };
 }
 
-const toolEvent: GatewayEvent = { type: "tool", text: "Bash: pnpm test", toolName: "Bash", args: {} };
-const toolResultEvent: GatewayEvent = { type: "tool-result", text: "Bash done", toolName: "Bash", isError: false };
+const toolEvent: GatewayEvent = {
+  type: "tool",
+  text: "Bash: pnpm test",
+  toolName: "Bash",
+  args: {},
+};
+const toolResultEvent: GatewayEvent = {
+  type: "tool-result",
+  text: "Bash done",
+  toolName: "Bash",
+  isError: false,
+};
 
 /**
  * A COMPLETE tool round. Real streams pair every tool start with a result;
@@ -187,7 +200,10 @@ describe("task cancellation — upstream and recovery share one terminal path", 
     vi.useFakeTimers();
     const ctrl = fakeGateway({ abort: async () => ({ ok: true, aborted: true }) });
     const sessions = new SessionManager(ctrl.gateway);
-    const job = sessions.submitTask({ task: "cancel this", sessionKey: "agent:main:main:thread:cancel" });
+    const job = sessions.submitTask({
+      task: "cancel this",
+      sessionKey: "agent:main:main:thread:cancel",
+    });
 
     await sessions.requestCancel(job.jobId);
     await sessions.requestCancel(job.jobId);
@@ -208,7 +224,9 @@ describe("task cancellation — upstream and recovery share one terminal path", 
       continuePolling: false,
       nextAction: null,
     });
-    expect(sessions.submitTask({ task: "reuse after cancel", sessionKey: job.sessionKey }).status).toBe("running");
+    expect(
+      sessions.submitTask({ task: "reuse after cancel", sessionKey: job.sessionKey }).status,
+    ).toBe("running");
   });
 
   it("cancels a job already inside no-live-final-text recovery", async () => {
@@ -261,7 +279,9 @@ describe("task cancellation — upstream and recovery share one terminal path", 
 describe("completion reconciliation — a terminal event that never arrived", () => {
   it("recovers the final response from the transcript, but only once it is confirmed by a second round", async () => {
     vi.useFakeTimers();
-    const ctrl = fakeGateway({ observations: [settled("the real answer"), settled("the real answer")] });
+    const ctrl = fakeGateway({
+      observations: [settled("the real answer"), settled("the real answer")],
+    });
     const sessions = new SessionManager(ctrl.gateway);
     const job = sessions.submitTask({ task: "tool-heavy job" });
 
@@ -475,7 +495,9 @@ describe("completion reconciliation — an active run is never mistaken for a fi
     // Reaching the round cap is not a substitute for confirmation: the first
     // round told us nothing at all, so the interim line the second round
     // happens to see has been observed exactly once.
-    const ctrl = fakeGateway({ observations: [unreadable(), settled("I'm tracing the live wiring now…")] });
+    const ctrl = fakeGateway({
+      observations: [unreadable(), settled("I'm tracing the live wiring now…")],
+    });
     const sessions = new SessionManager(ctrl.gateway);
     const job = sessions.submitTask({ task: "tool-heavy job" });
     emitToolRound(ctrl);
@@ -819,7 +841,10 @@ describe("completion reconciliation — the live job 9f21545a shape", () => {
     // is the run's own terminal text. Letting the former retire the guard
     // that protects the latter silently discarded the real answer.
     const pollSpy = vi.fn(async () => "text from the transcript re-read");
-    const { ctrl, sessions, job } = await reconcileToProvisionalCompleted("an early guess", pollSpy);
+    const { ctrl, sessions, job } = await reconcileToProvisionalCompleted(
+      "an early guess",
+      pollSpy,
+    );
 
     // A re-read lands first and corrects the summary.
     const afterRecheck = await sessions.waitForJob(job.jobId, 0, undefined, "wait", 1_000);
@@ -846,7 +871,10 @@ describe("completion reconciliation — the live job 9f21545a shape", () => {
     // chat() settling — the last live evidence the job can ever get — has to
     // close it out.
     const pollSpy = vi.fn(async () => "an early guess");
-    const { ctrl, sessions, job } = await reconcileToProvisionalCompleted("an early guess", pollSpy);
+    const { ctrl, sessions, job } = await reconcileToProvisionalCompleted(
+      "an early guess",
+      pollSpy,
+    );
 
     // Still provisional while chat() is outstanding: the re-read happens.
     await sessions.waitForJob(job.jobId, 0, undefined, "wait", 1_000);
@@ -866,7 +894,10 @@ describe("completion reconciliation — the live job 9f21545a shape", () => {
   it("stops re-reading a provisional completion once chat() rejects", async () => {
     vi.useFakeTimers();
     const pollSpy = vi.fn(async () => "an early guess");
-    const { ctrl, sessions, job } = await reconcileToProvisionalCompleted("an early guess", pollSpy);
+    const { ctrl, sessions, job } = await reconcileToProvisionalCompleted(
+      "an early guess",
+      pollSpy,
+    );
 
     await sessions.waitForJob(job.jobId, 0, undefined, "wait", 1_000);
     expect(pollSpy).toHaveBeenCalledTimes(1);
@@ -1034,7 +1065,10 @@ describe("completion reconciliation — handing the job off safely", () => {
     // sessionKey. The old job's lazy recheck must not read (and claim) the
     // new run's answer.
     const pollSpy = vi.fn(async () => "the newer job's answer");
-    const ctrl = fakeGateway({ observations: [settled("first answer")], pollTranscriptForFinalText: pollSpy });
+    const ctrl = fakeGateway({
+      observations: [settled("first answer")],
+      pollTranscriptForFinalText: pollSpy,
+    });
     const sessions = new SessionManager(ctrl.gateway);
     const sessionKey = "agent:main:main:thread:supersede";
     const first = sessions.submitTask({ task: "first ask", sessionKey });
@@ -1060,7 +1094,9 @@ describe("completion reconciliation — handing the job off safely", () => {
 
   it("the abandoned live stream timing out does not overwrite a reconciled completion", async () => {
     vi.useFakeTimers();
-    const ctrl = fakeGateway({ observations: [settled("the real answer"), settled("the real answer")] });
+    const ctrl = fakeGateway({
+      observations: [settled("the real answer"), settled("the real answer")],
+    });
     const sessions = new SessionManager(ctrl.gateway);
     const job = sessions.submitTask({ task: "tool-heavy job" });
     emitToolRound(ctrl);
@@ -1082,7 +1118,9 @@ describe("completion reconciliation — handing the job off safely", () => {
 describe("completion reconciliation — caller-visible effects", () => {
   it("repeated check_task calls after a reconciled completion are idempotent", async () => {
     vi.useFakeTimers();
-    const ctrl = fakeGateway({ observations: [settled("the real answer"), settled("the real answer")] });
+    const ctrl = fakeGateway({
+      observations: [settled("the real answer"), settled("the real answer")],
+    });
     const sessions = new SessionManager(ctrl.gateway);
     const job = sessions.submitTask({ task: "tool-heavy job" });
     emitToolRound(ctrl);
@@ -1132,7 +1170,9 @@ describe("completion reconciliation — caller-visible effects", () => {
 
   it("releases the busy-session guard once the job is reconciled terminal", async () => {
     vi.useFakeTimers();
-    const ctrl = fakeGateway({ observations: [settled("the real answer"), settled("the real answer")] });
+    const ctrl = fakeGateway({
+      observations: [settled("the real answer"), settled("the real answer")],
+    });
     const sessions = new SessionManager(ctrl.gateway);
     const sessionKey = "agent:main:main:thread:busy-release";
     const first = sessions.submitTask({ task: "first ask", sessionKey });
@@ -1258,7 +1298,9 @@ describe("completion reconciliation — a parent observation timeout is not the 
 
   it("still ends the job in error when the gateway reports the run itself failed", async () => {
     vi.useFakeTimers();
-    const ctrl = fakeGateway({ pollTranscriptForFinalText: async () => "text that must never be used" });
+    const ctrl = fakeGateway({
+      pollTranscriptForFinalText: async () => "text that must never be used",
+    });
     const sessions = new SessionManager(ctrl.gateway);
     const job = sessions.submitTask({ task: "doomed job" });
     emitToolRound(ctrl);

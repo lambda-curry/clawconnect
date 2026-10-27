@@ -142,7 +142,8 @@ export type BlockedAgentSessionView = {
 };
 
 function blockedSentence(attachment: BlockedAgentSessionView, lead: string, tail: string): string {
-  const waiting = attachment.status === "needs_permission" ? "waiting for permission" : "waiting for input";
+  const waiting =
+    attachment.status === "needs_permission" ? "waiting for permission" : "waiting for input";
   const asked = attachment.latestResponse ? ` It last said: ${attachment.latestResponse}` : "";
   const where = attachment.remoteUrl ? ` Open it at ${attachment.remoteUrl}.` : "";
   return `${lead} ${attachment.runtime}/${attachment.handle} is ${waiting}.${asked}${where} ${tail}`;
@@ -187,7 +188,9 @@ export function describeActiveBlockedAgentSession(
  * Anything outside the vocabulary is rejected rather than passed through.
  */
 export function coerceAgentSessionState(value: unknown): AgentSessionState | undefined {
-  return typeof value === "string" && AGENT_SESSION_STATES.includes(value) ? (value as AgentSessionState) : undefined;
+  return typeof value === "string" && AGENT_SESSION_STATES.includes(value)
+    ? (value as AgentSessionState)
+    : undefined;
 }
 
 /** Why a session stopped, when it stopped for a reason worth distinguishing. */
@@ -200,7 +203,13 @@ export type AgentSessionTermination = {
   message?: string;
 };
 
-const TERMINATION_REASONS: readonly string[] = ["completed", "cancelled", "failed", "died", "unknown"];
+const TERMINATION_REASONS: readonly string[] = [
+  "completed",
+  "cancelled",
+  "failed",
+  "died",
+  "unknown",
+];
 
 /**
  * A failure of the READ, not of the session: the runtime could not be asked,
@@ -340,7 +349,9 @@ export type BlockedDelegation = {
   notice: string;
 };
 
-export function blockedDelegation(snapshot: BlockedDelegationSnapshot): BlockedDelegation | undefined {
+export function blockedDelegation(
+  snapshot: BlockedDelegationSnapshot,
+): BlockedDelegation | undefined {
   const attachment = blockedAttachmentForTurn(snapshot);
   if (!attachment) return undefined;
   const active = snapshot.status === "running";
@@ -387,7 +398,10 @@ export type AgentSessionRuntimeCallbacks = {
    * session", which normalizes to `unavailable` + `session_not_found` — not to
    * a failure of the session, and not to a thrown error.
    */
-  inspect(ref: AgentSessionRef, opts: AgentSessionCallOptions): Promise<AgentSessionObservation | null | undefined>;
+  inspect(
+    ref: AgentSessionRef,
+    opts: AgentSessionCallOptions,
+  ): Promise<AgentSessionObservation | null | undefined>;
   /** Deliver a follow-up turn to a session. Absent → the runtime reports `continue: false`. */
   continue?(
     ref: AgentSessionRef,
@@ -455,7 +469,8 @@ export async function withAgentSessionTimeout<T>(
   timeoutMs: number = AGENT_SESSION_CALL_TIMEOUT_MS,
   outer?: AbortSignal,
 ): Promise<T> {
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return op(outer ?? new AbortController().signal);
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0)
+    return op(outer ?? new AbortController().signal);
   const controller = new AbortController();
   const forwardAbort = () => controller.abort(outer?.reason);
   if (outer) {
@@ -604,7 +619,10 @@ function coerceTermination(
 ): AgentSessionTermination | undefined {
   if (!TERMINAL_STATES.includes(state)) return undefined;
   const reasonRaw = raw && typeof raw === "object" ? optString(raw.reason) : undefined;
-  const reason = reasonRaw && TERMINATION_REASONS.includes(reasonRaw) ? (reasonRaw as AgentSessionTermination["reason"]) : undefined;
+  const reason =
+    reasonRaw && TERMINATION_REASONS.includes(reasonRaw)
+      ? (reasonRaw as AgentSessionTermination["reason"])
+      : undefined;
   const derived: AgentSessionTermination["reason"] = isCompletedTurnState(state)
     ? "completed"
     : state === "dead"
@@ -739,7 +757,10 @@ export async function dispatchAgentSession(
     return unavailableAgentSessionStatus(
       ref,
       now,
-      { code: "unsupported_operation", message: `Runtime "${ref.runtime}" does not support ${request.op}.` },
+      {
+        code: "unsupported_operation",
+        message: `Runtime "${ref.runtime}" does not support ${request.op}.`,
+      },
       `Runtime "${ref.runtime}" registered no ${request.op} callback, so this session cannot be asked to ${request.op}.`,
     );
   }

@@ -1,5 +1,11 @@
-import { describe, expect, it } from "vitest";
-import { collapseToolPairs, projectLogWindow, EVENT_TEXT_MAX, INITIAL_WINDOW_MAX, DELTA_WINDOW_MAX } from "./log-projection.ts";
+import { describe, expect, it } from "vite-plus/test";
+import {
+  collapseToolPairs,
+  projectLogWindow,
+  EVENT_TEXT_MAX,
+  INITIAL_WINDOW_MAX,
+  DELTA_WINDOW_MAX,
+} from "./log-projection.ts";
 import type { LogEntry } from "./types.ts";
 
 function entry(seq: number, type: string, text: string, extra: Partial<LogEntry> = {}): LogEntry {
@@ -39,7 +45,10 @@ describe("collapseToolPairs", () => {
 
 describe("projectLogWindow", () => {
   it("preserves a retention gap marker in bounded initial/delta windows until acknowledged", () => {
-    const logs = [entry(90, "truncation", "90 events omitted"), ...Array.from({ length: 20 }, (_, i) => entry(91 + i, "lifecycle", "recent"))];
+    const logs = [
+      entry(90, "truncation", "90 events omitted"),
+      ...Array.from({ length: 20 }, (_, i) => entry(91 + i, "lifecycle", "recent")),
+    ];
     const initial = projectLogWindow(logs, undefined);
     expect(initial.events).toHaveLength(INITIAL_WINDOW_MAX);
     expect(initial.events[0].type).toBe("truncation");
@@ -48,7 +57,9 @@ describe("projectLogWindow", () => {
     const delta = projectLogWindow(logs, 20);
     expect(delta.events).toHaveLength(DELTA_WINDOW_MAX);
     expect(delta.events[0].type).toBe("truncation");
-    expect(projectLogWindow(logs, 90).events.every((event) => event.type !== "truncation")).toBe(true);
+    expect(projectLogWindow(logs, 90).events.every((event) => event.type !== "truncation")).toBe(
+      true,
+    );
     expect(projectLogWindow(logs, delta.cursor).events).toEqual([]);
   });
   it("no cursor: returns at most INITIAL_WINDOW_MAX of the most recent entries, cursor at head", () => {

@@ -1,7 +1,10 @@
 import { defineConfig } from "vite-plus";
 
 export default defineConfig({
-  fmt: {},
+  fmt: {
+    // Docs, design notes, and the hand-authored widget shell are kept as written.
+    ignorePatterns: ["docs/**", "**/*.md", "apps/chatgpt/src/widget/shell.html"],
+  },
   lint: { options: { typeAware: true, typeCheck: true } },
   run: {
     cache: true,

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 import { deriveNextStep, emptyArtifacts, extractPatternsFromSummary } from "./artifacts.ts";
 
 /**
@@ -30,8 +30,12 @@ describe("commitSha", () => {
   });
 
   it("ignores a hex run embedded in a hyphenated slug", () => {
-    expect(extract("Attached to session run-4d1f8a2c6b3e9047f5a1c8d2e6b0937a.").commitSha).toBeUndefined();
-    expect(extract("Wrote artifact-1a2b3c4d5e-final.json to the scratch directory.").commitSha).toBeUndefined();
+    expect(
+      extract("Attached to session run-4d1f8a2c6b3e9047f5a1c8d2e6b0937a.").commitSha,
+    ).toBeUndefined();
+    expect(
+      extract("Wrote artifact-1a2b3c4d5e-final.json to the scratch directory.").commitSha,
+    ).toBeUndefined();
   });
 
   it("ignores a CI run id pasted inside a URL", () => {
@@ -55,14 +59,18 @@ describe("commitSha", () => {
   });
 
   it("takes a SHA from a GitHub commit URL", () => {
-    const artifacts = extract("Landed: https://github.com/o/r/commit/9f8e7d6c5b4a3928 — see the diff.");
+    const artifacts = extract(
+      "Landed: https://github.com/o/r/commit/9f8e7d6c5b4a3928 — see the diff.",
+    );
 
     expect(artifacts.commitSha).toBe("9f8e7d6c5b4a3928");
     expect(artifacts.provenance?.commitSha).toBe("summary-text");
   });
 
   it("still reads a commit whose sentence happens to contain an input word", () => {
-    expect(extract("The change was reviewed and committed as `a1b2c3d4`.").commitSha).toBe("a1b2c3d4");
+    expect(extract("The change was reviewed and committed as `a1b2c3d4`.").commitSha).toBe(
+      "a1b2c3d4",
+    );
   });
 
   /**
@@ -81,16 +89,18 @@ describe("commitSha", () => {
   it("ignores a commit URL introduced by any input marker, not just `expected`", () => {
     for (const marker of ["base", "from commit", "was", "previous", "parent"]) {
       expect(
-        extract(`Starting from a clean tree; ${marker} https://github.com/o/r/commit/a1b2c3d4.`).commitSha,
+        extract(`Starting from a clean tree; ${marker} https://github.com/o/r/commit/a1b2c3d4.`)
+          .commitSha,
         marker,
       ).toBeUndefined();
     }
   });
 
   it("still takes a commit URL the prose claims as its own work", () => {
-    expect(extract("Fixed the parser and committed as https://github.com/o/r/commit/a1b2c3d4.").commitSha).toBe(
-      "a1b2c3d4",
-    );
+    expect(
+      extract("Fixed the parser and committed as https://github.com/o/r/commit/a1b2c3d4.")
+        .commitSha,
+    ).toBe("a1b2c3d4");
   });
 
   /**
@@ -99,15 +109,18 @@ describe("commitSha", () => {
    */
   it("skips past an input commit URL to the one the job actually produced", () => {
     expect(
-      extract("base https://github.com/o/r/commit/aaaaaaa; committed as https://github.com/o/r/commit/bbbbbbb")
-        .commitSha,
+      extract(
+        "base https://github.com/o/r/commit/aaaaaaa; committed as https://github.com/o/r/commit/bbbbbbb",
+      ).commitSha,
     ).toBe("bbbbbbb");
   });
 });
 
 describe("branchName", () => {
   it("strips markdown and trailing punctuation from prose", () => {
-    expect(extract("Work continues on branch `feature-x`, which is pushed.").branchName).toBe("feature-x");
+    expect(extract("Work continues on branch `feature-x`, which is pushed.").branchName).toBe(
+      "feature-x",
+    );
     expect(extract('Created branch "feature-y".').branchName).toBe("feature-y");
   });
 
@@ -149,7 +162,9 @@ describe("deriveNextStep", () => {
     const artifacts = extract("Committed as `a1b2c3d4`.");
     artifacts.filesChanged.push("src/example.ts");
 
-    expect(deriveNextStep(artifacts, "completed")).toBe("Review the changes or continue with the next task.");
+    expect(deriveNextStep(artifacts, "completed")).toBe(
+      "Review the changes or continue with the next task.",
+    );
   });
 });
 

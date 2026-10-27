@@ -44,14 +44,35 @@ export type {
   BlockedDelegation,
   BlockedDelegationSnapshot,
 } from "./agent-session.ts";
-export { parseAgentSessionDirective, parseAgentSessionMarker, parseSessionHandoff } from "./session-handoff.ts";
+export {
+  parseAgentSessionDirective,
+  parseAgentSessionMarker,
+  parseSessionHandoff,
+} from "./session-handoff.ts";
 export type { ParsedAgentSessionDirective, SessionHandoff } from "./session-handoff.ts";
-export { loadAgentRegistry, resolveAgent, REGISTRY_PATH, agentBlurb, agentDescriptor } from "./agent-registry.ts";
+export {
+  loadAgentRegistry,
+  resolveAgent,
+  REGISTRY_PATH,
+  agentBlurb,
+  agentDescriptor,
+} from "./agent-registry.ts";
 export type { AgentEntry, AgentRegistry } from "./agent-registry.ts";
 export { searchMemory, getMemory, listCollections, DEFAULT_QMD_URL } from "./memory.ts";
-export type { MemorySearchHit, MemorySearchResult, GetMemoryResult, SearchMemoryOpts, CollectionListing } from "./memory.ts";
+export type {
+  MemorySearchHit,
+  MemorySearchResult,
+  GetMemoryResult,
+  SearchMemoryOpts,
+  CollectionListing,
+} from "./memory.ts";
 export { classifyError } from "./errors.ts";
-export { emptyArtifacts, processEvent, extractPatternsFromSummary, deriveNextStep } from "./artifacts.ts";
+export {
+  emptyArtifacts,
+  processEvent,
+  extractPatternsFromSummary,
+  deriveNextStep,
+} from "./artifacts.ts";
 export {
   runTask,
   cancelTask,
@@ -73,7 +94,13 @@ export type {
   Scope,
 } from "./capability.ts";
 export { SERVER_VERSION, buildSha, toolsetVersion } from "./build-info.ts";
-export { collapseToolPairs, projectLogWindow, INITIAL_WINDOW_MAX, DELTA_WINDOW_MAX, EVENT_TEXT_MAX } from "./log-projection.ts";
+export {
+  collapseToolPairs,
+  projectLogWindow,
+  INITIAL_WINDOW_MAX,
+  DELTA_WINDOW_MAX,
+  EVENT_TEXT_MAX,
+} from "./log-projection.ts";
 export type { LogWindow } from "./log-projection.ts";
 export { setTelemetrySink, recordTelemetry } from "./telemetry.ts";
 export type { TelemetryEvent, TelemetrySink } from "./telemetry.ts";

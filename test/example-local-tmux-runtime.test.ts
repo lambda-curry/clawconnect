@@ -59,7 +59,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 // @ts-expect-error — the example is deliberately plain JS with no .d.ts: an
 // operator points CLAWCONNECT_AGENT_SESSION_RUNTIME_MODULES straight at it.
 import { registerAgentSessionRuntimes } from "../examples/local-tmux-runtime/runtime.mjs";
@@ -113,11 +113,19 @@ function tmpHome(): string {
 }
 
 /** Writes a meta.json + transcript pair for `handle` under `home`, and returns the transcript path. */
-function writeSession(home: string, handle: string, lines: unknown[], transcriptName = "session.jsonl"): string {
+function writeSession(
+  home: string,
+  handle: string,
+  lines: unknown[],
+  transcriptName = "session.jsonl",
+): string {
   const dir = join(home, handle);
   mkdirSync(dir, { recursive: true });
   const transcriptPath = join(dir, transcriptName);
-  writeFileSync(transcriptPath, lines.map((l) => (typeof l === "string" ? l : JSON.stringify(l))).join("\n"));
+  writeFileSync(
+    transcriptPath,
+    lines.map((l) => (typeof l === "string" ? l : JSON.stringify(l))).join("\n"),
+  );
   writeFileSync(join(dir, "meta.json"), JSON.stringify({ transcriptPath }));
   return transcriptPath;
 }
@@ -190,14 +198,21 @@ describe("inspect reports only what it can prove", () => {
     writeFileSync(join(dir, "meta.json"), JSON.stringify({}));
     await expect(inspect(home, HANDLE)).resolves.toEqual({ alive: false });
 
-    writeFileSync(join(dir, "meta.json"), JSON.stringify({ transcriptPath: join(dir, "does-not-exist.jsonl") }));
+    writeFileSync(
+      join(dir, "meta.json"),
+      JSON.stringify({ transcriptPath: join(dir, "does-not-exist.jsonl") }),
+    );
     await expect(inspect(home, HANDLE)).resolves.toEqual({ alive: false });
   });
 
   it("reports a completed turn carrying the last assistant text and the entry's OWN timestamp", async () => {
     const home = tmpHome();
     writeSession(home, HANDLE, [
-      { type: "user", timestamp: "2026-08-03T00:00:00.000Z", message: { role: "user", content: [{ type: "text", text: "do the thing" }] } },
+      {
+        type: "user",
+        timestamp: "2026-08-03T00:00:00.000Z",
+        message: { role: "user", content: [{ type: "text", text: "do the thing" }] },
+      },
       assistant("2026-08-03T00:00:05.000Z", "working on it"),
       assistant("2026-08-03T00:01:00.000Z", "done — final answer"),
     ]);
@@ -214,7 +229,11 @@ describe("inspect reports only what it can prove", () => {
     writeSession(home, HANDLE, [
       assistant("2026-08-03T00:00:00.000Z", "real answer"),
       "{ not valid json",
-      { type: "assistant", timestamp: "2026-08-03T00:00:05.000Z", message: { role: "assistant", content: [{ type: "thinking", thinking: "..." }] } },
+      {
+        type: "assistant",
+        timestamp: "2026-08-03T00:00:05.000Z",
+        message: { role: "assistant", content: [{ type: "thinking", thinking: "..." }] },
+      },
     ]);
     await expect(inspect(home, HANDLE)).resolves.toMatchObject({ finalResponse: "real answer" });
   });
@@ -241,7 +260,10 @@ describe("inspect reports only what it can prove", () => {
     const outsideDir = mkdtempSync(join(tmpdir(), "clawconnect-tmux-runtime-outside-"));
     dirs.push(outsideDir);
     const outsideTranscript = join(outsideDir, "secret.jsonl");
-    writeFileSync(outsideTranscript, JSON.stringify(assistant("2026-08-03T00:00:00.000Z", "should never be read")));
+    writeFileSync(
+      outsideTranscript,
+      JSON.stringify(assistant("2026-08-03T00:00:00.000Z", "should never be read")),
+    );
     writeFileSync(join(dir, "meta.json"), JSON.stringify({ transcriptPath: outsideTranscript }));
 
     await expect(inspect(home, HANDLE)).resolves.toEqual({ alive: false });
@@ -254,14 +276,22 @@ describe("inspect reports only what it can prove", () => {
     // Deep enough "../" traversal to escape any tmpdir nesting and land on a
     // real, always-present file — proves the containment check runs BEFORE any
     // read is attempted, not that the target happens to be unreadable.
-    writeFileSync(join(dir, "meta.json"), JSON.stringify({ transcriptPath: "../../../../../../../../etc/passwd" }));
+    writeFileSync(
+      join(dir, "meta.json"),
+      JSON.stringify({ transcriptPath: "../../../../../../../../etc/passwd" }),
+    );
     await expect(inspect(home, HANDLE)).resolves.toEqual({ alive: false });
   });
 
   it("accepts a transcriptPath legitimately nested under the home dir", async () => {
     const home = tmpHome();
     mkdirSync(join(home, HANDLE, "nested"), { recursive: true });
-    writeSession(home, HANDLE, [assistant("2026-08-03T00:00:00.000Z", "legit answer")], join("nested", "session.jsonl"));
+    writeSession(
+      home,
+      HANDLE,
+      [assistant("2026-08-03T00:00:00.000Z", "legit answer")],
+      join("nested", "session.jsonl"),
+    );
     await expect(inspect(home, HANDLE)).resolves.toMatchObject({ finalResponse: "legit answer" });
   });
 });

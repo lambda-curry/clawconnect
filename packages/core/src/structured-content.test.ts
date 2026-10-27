@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 import {
   buildRunTaskStructuredContent,
   buildCheckTaskStructuredContent,
@@ -38,10 +38,18 @@ function fixtureSnapshot(overrides: Partial<JobSnapshot> = {}): JobSnapshot {
   };
 }
 
-function fixtureFoundResult(snapshotOverrides: Partial<JobSnapshot> = {}): Extract<CheckTaskResult, { found: true }> {
+function fixtureFoundResult(
+  snapshotOverrides: Partial<JobSnapshot> = {},
+): Extract<CheckTaskResult, { found: true }> {
   const snapshot = fixtureSnapshot(snapshotOverrides);
   const isTerminal = snapshot.status !== "running";
-  return { found: true, snapshot, isTerminal, isError: snapshot.status === "error", continuePolling: !isTerminal };
+  return {
+    found: true,
+    snapshot,
+    isTerminal,
+    isError: snapshot.status === "error",
+    continuePolling: !isTerminal,
+  };
 }
 
 describe("buildRunTaskStructuredContent", () => {
@@ -98,7 +106,12 @@ describe("buildCheckTaskStructuredContent", () => {
     expect(structuredRunning.continuePolling).toBe(true);
     expect(structuredRunning.pollCount).toBe(3);
 
-    const terminal = fixtureFoundResult({ status: "completed", summary: "done", continuePolling: false, nextAction: null });
+    const terminal = fixtureFoundResult({
+      status: "completed",
+      summary: "done",
+      continuePolling: false,
+      nextAction: null,
+    });
     const structuredTerminal = buildCheckTaskStructuredContent(terminal);
     expect(structuredTerminal.status).toBe("completed");
     expect(structuredTerminal.isTerminal).toBe(true);
@@ -110,7 +123,10 @@ describe("buildCheckTaskStructuredContent", () => {
 
 describe("buildGetTaskStructuredContent", () => {
   it("respects the detail preset and matches check_task's field naming (taskId/jobId both present)", () => {
-    const result = fixtureFoundResult({ summary: "the answer", artifacts: { filesChanged: ["a.ts"], commandsRun: [], needsHumanDecision: false } });
+    const result = fixtureFoundResult({
+      summary: "the answer",
+      artifacts: { filesChanged: ["a.ts"], commandsRun: [], needsHumanDecision: false },
+    });
 
     const core = buildGetTaskStructuredContent(result, "core");
     expect(core).not.toHaveProperty("summary");
@@ -133,7 +149,15 @@ describe("buildGetTaskStructuredContent", () => {
     expect(diag.diagnostics).toBeDefined();
   });
 
-  const ALL_DETAILS = ["core", "summary", "updates", "artifacts", "diagnostics", "full", "fullWithDiagnostics"] as const;
+  const ALL_DETAILS = [
+    "core",
+    "summary",
+    "updates",
+    "artifacts",
+    "diagnostics",
+    "full",
+    "fullWithDiagnostics",
+  ] as const;
 
   /**
    * A TaskSummary ROW carries `liveness` (see toTaskSummary) so a listing can
@@ -171,8 +195,13 @@ describe("buildGetTaskStructuredContent", () => {
     // the complaint but not the id cannot be checked against anything.
     const result = fixtureFoundResult({
       status: "error",
-      error: "Stopped watching after 90m: upstream run run-abc123 was last reported executing 4m ago",
-      errorInfo: { category: "timeout", message: "…", suggestedRecovery: "Do not re-submit on this session…" },
+      error:
+        "Stopped watching after 90m: upstream run run-abc123 was last reported executing 4m ago",
+      errorInfo: {
+        category: "timeout",
+        message: "…",
+        suggestedRecovery: "Do not re-submit on this session…",
+      },
       terminalReason: "late-recovery-upstream-still-active",
       parentRunId: "run-abc123",
       liveness: { checkedAt: 1900, upstream: "active", producing: false },
@@ -193,7 +222,15 @@ describe("buildGetTaskStructuredContent", () => {
 
   it("never includes the prompt — that's a distinct read path (getTaskPrompt), not a detail preset value covered by this builder", () => {
     const result = fixtureFoundResult({});
-    for (const detail of ["core", "summary", "updates", "artifacts", "diagnostics", "full", "fullWithDiagnostics"] as const) {
+    for (const detail of [
+      "core",
+      "summary",
+      "updates",
+      "artifacts",
+      "diagnostics",
+      "full",
+      "fullWithDiagnostics",
+    ] as const) {
       const payload = buildGetTaskStructuredContent(result, detail);
       expect(payload).not.toHaveProperty("prompt");
     }

@@ -2,10 +2,9 @@
   "name": "@clawconnect/cli",
   "version": "0.0.0",
   "private": true,
-  "type": "module",
   "description": "CLI for connecting AI coding agents to OpenClaw instances",
-  "author": "Jake Ruesink",
   "license": "MIT",
+  "author": "Jake Ruesink",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/lambda-curry/clawconnect.git",
@@ -14,6 +13,10 @@
   "bin": {
     "clawconnect": "./dist/bin.mjs"
   },
+  "files": [
+    "dist"
+  ],
+  "type": "module",
   "exports": {
     ".": "./dist/index.mjs",
     "./bin": "./dist/bin.mjs",
@@ -24,9 +27,6 @@
       ".": "./dist/index.mjs"
     }
   },
-  "files": [
-    "dist"
-  ],
   "scripts": {
     "build": "vp pack",
     "dev": "vp pack --watch"
